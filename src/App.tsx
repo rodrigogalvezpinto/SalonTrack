@@ -19,13 +19,17 @@ import { ReEngagementView } from './views/ReEngagementView';
 import { RevenueCalculatorView } from './views/RevenueCalculatorView';
 import { CalendarView } from './views/CalendarView';
 import { SettingsView } from './views/SettingsView';
+import { BusinessView } from './views/BusinessView';
+import { AdminView } from './views/AdminView';
+import { AccountView } from './views/AccountView';
+import { PublicBusinessView } from './views/PublicBusinessView';
 
 import { Client, Service } from './types';
 import { apiRequest } from './utils/api';
 import { showPushNotification, playNotificationChime } from './utils/notifications';
 
 function MainApp() {
-  const { user, profile, isLoading } = useAuth();
+  const { user, profile, isLoading, roles, reloadSession } = useAuth();
 
   // Navigation
   const [currentView, setCurrentView] = useState<string>('dashboard');
@@ -44,6 +48,12 @@ function MainApp() {
       setAuthModalOpen(true);
     }
   }, []);
+
+  useEffect(() => {
+    if (isLoading || !user) return;
+    if (!roles.includes('PROFESSIONAL')) setCurrentView(roles.includes('PLATFORM_ADMIN') ? 'admin' : 'account');
+    else if (currentView === 'account' || currentView === 'admin') setCurrentView('dashboard');
+  }, [currentView, isLoading, roles, user]);
   
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
   const [checkoutDefaultPlan, setCheckoutDefaultPlan] = useState<string>('pro_quarterly');
@@ -60,7 +70,7 @@ function MainApp() {
 
   // Periodic notification check for Santiago timezone
   useEffect(() => {
-    if (!user) return;
+    if (!user || !roles.includes('PROFESSIONAL')) return;
 
     const checkUpcomingRetouches = async () => {
       try {
@@ -84,7 +94,12 @@ function MainApp() {
     // Check every 15 minutes
     const interval = setInterval(checkUpcomingRetouches, 15 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [user]);
+  }, [roles, user]);
+
+  const isPublicProfile = window.location.pathname.startsWith('/negocio/');
+  if (isPublicProfile) {
+    return <PublicBusinessView slug={decodeURIComponent(window.location.pathname.slice('/negocio/'.length).split('/')[0])} />;
+  }
 
   if (isLoading) {
     return (
@@ -161,6 +176,7 @@ function MainApp() {
         {/* Desktop Sidebar */}
         <Sidebar
           currentView={currentView}
+          roles={roles}
           onSelectView={(view) => {
             setSelectedClientId(null);
             setCurrentView(view);
@@ -233,12 +249,24 @@ function MainApp() {
               onOpenCheckout={() => setCheckoutModalOpen(true)}
             />
           )}
+
+          {currentView === 'business' && roles.includes('PROFESSIONAL') && (
+            <BusinessView memberships={user.memberships} />
+          )}
+          {currentView === 'admin' && roles.includes('PLATFORM_ADMIN') && <AdminView />}
+          {currentView === 'account' && !roles.includes('PROFESSIONAL') && (
+            <AccountView onBusinessCreated={async () => {
+              await reloadSession();
+              setCurrentView('business');
+            }} />
+          )}
         </main>
       </div>
 
       {/* Mobile Bottom Navigation Bar */}
       <BottomNav
         currentView={currentView}
+        roles={roles}
         onSelectView={(view) => {
           setSelectedClientId(null);
           setCurrentView(view);
@@ -254,14 +282,14 @@ function MainApp() {
         onContactLogged={bumpDataVersion}
       />
 
-      <NewClientModal
+      {roles.includes('PROFESSIONAL') && <NewClientModal
         isOpen={newClientModalOpen}
         onClose={() => setNewClientModalOpen(false)}
         onClientCreated={() => {
           bumpDataVersion();
           setCurrentView('clients');
         }}
-      />
+      />}
 
       <NewServiceModal
         isOpen={newServiceModalOpen}

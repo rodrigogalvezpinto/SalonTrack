@@ -10,9 +10,9 @@ Authorization: Bearer <TOKEN_JWT>
 ## 1. Autenticación (`/api/auth`)
 
 ### `POST /api/auth/register`
-Registra una nueva cuenta profesional. Responde **409** si el correo ya existe.
-- **Body:** `{ email, password, full_name, business_name, phone }`
-- **Respuesta (201):** `{ message, token, user: { id, email, profile, subscription } }`
+Registra una cuenta profesional o cliente. `account_type` acepta `professional` (predeterminado, con negocio inicial y prueba de 14 días) o `customer` (sin suscripción). Responde **409** si el correo ya existe.
+- **Body:** `{ email, password, full_name, business_name?, phone?, account_type? }`
+- **Respuesta (201):** `{ message, token, user: { id, email, profile, subscription?, roles, memberships } }`
 
 ### `POST /api/auth/login`
 Inicia sesión con credenciales.
@@ -149,3 +149,40 @@ Recibe notificaciones de Mercado Pago de forma idempotente. La verificación del
 
 ### `POST /api/subscriptions/activate-license`
 Confirma el pago simulado y extiende la licencia. Solo disponible con `PAYMENT_PROVIDER=local` (403 en otro caso). Idempotente por `payment_ref`: repetir la referencia no duplica pagos; usar una referencia de otro usuario responde 409.
+
+## 8. Negocios, equipo y roles
+
+La sesión de `/auth/login`, `/auth/register` y `/auth/me` incluye `roles` y las `memberships` activas. Los negocios son privados por defecto y solo se publican al completar los requisitos del perfil.
+
+| Método y ruta | Acceso |
+|---|---|
+| `GET /api/businesses/mine` | Autenticado |
+| `POST /api/businesses` | Autenticado; crea un negocio borrador y otorga `PROFESSIONAL` |
+| `GET /api/businesses/:businessId` | Integrante activo |
+| `PATCH /api/businesses/:businessId` | `OWNER`, `ADMIN` |
+| `POST /api/businesses/:businessId/status` | `OWNER`, `ADMIN` (reglas de transición aplican) |
+| `GET /api/businesses/:businessId/members` | Integrante activo |
+| `POST /api/businesses/:businessId/members` | `OWNER`, `ADMIN` |
+| `PATCH /api/businesses/:businessId/members/:memberId` | `OWNER`, `ADMIN` |
+| `GET /api/public/businesses` | Público; solo publicados |
+| `GET /api/public/businesses/:slug` | Público; solo publicados |
+
+Permisos por rol de negocio:
+
+| Permiso | OWNER | ADMIN | PROFESSIONAL | RECEPTION |
+|---|:---:|:---:|:---:|:---:|
+| Ver negocio y equipo | Sí | Sí | Sí | Sí |
+| Editar negocio y administrar integrantes | Sí | Sí | No | No |
+| Cambiar estado de publicación | Sí | Sí | No | No |
+
+La API `PATCH` de negocio valida URLs `http(s)`, correo, rangos geográficos y requisitos de publicación; el estado solo cambia mediante `/status`. Un ADMIN solo puede administrar integrantes con rol `PROFESSIONAL` o `RECEPTION`. Las acciones de plataforma requieren `PLATFORM_ADMIN`.
+
+## 9. Administración de plataforma
+
+Todas las rutas de `/api/admin/*` requieren autenticación y `PLATFORM_ADMIN`.
+
+- `GET /api/admin/users`: cuentas y roles; nunca devuelve hashes de contraseñas.
+- `GET /api/admin/businesses?status=`: negocios y correo de propietario.
+- `POST /api/admin/businesses/:businessId/status`: aprobar, rechazar, suspender o reactivar según la máquina de estados; rechazo y suspensión requieren motivo.
+- `GET /api/admin/settings` y `PUT /api/admin/settings`: consulta y cambia `business_publication_requires_review`.
+- `npm run admin:grant -- <correo>` asigna el rol `PLATFORM_ADMIN` a una cuenta existente.

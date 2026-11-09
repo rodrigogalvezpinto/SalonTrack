@@ -4,6 +4,8 @@ import { initDatabase, getDatabase, closeDatabase } from '../server/db/connectio
 import { seedDemoData, resetDemoData, DEMO_EMAIL, DEMO_PASSWORD } from '../server/db/seed.js';
 import { backupDatabase, restoreDatabase } from '../server/db/backup.js';
 import { importLegacyJson } from '../server/db/legacyImport.js';
+import { usersRepository } from '../server/repositories/users.js';
+import { rolesRepository } from '../server/repositories/roles.js';
 
 const [command, arg] = process.argv.slice(2);
 
@@ -50,8 +52,17 @@ async function main() {
       if (summary.skipped_details?.length) console.warn('Omitidos:', summary.skipped_details);
       break;
     }
+    case 'grant-admin': {
+      if (!arg) throw new Error('Uso: npm run admin:grant -- <correo>');
+      initDatabase(config.databaseFile);
+      const user = usersRepository.findByEmail(arg);
+      if (!user) throw new Error('No existe una cuenta con ese correo.');
+      rolesRepository.addRole(user.id, 'PLATFORM_ADMIN');
+      console.log(`Rol PLATFORM_ADMIN otorgado a ${user.email}.`);
+      break;
+    }
     default:
-      console.log('Comandos: migrate | seed | reset | backup [destino] | restore <archivo> | import-json [archivo] [--force]');
+      console.log('Comandos: migrate | seed | reset | backup [destino] | restore <archivo> | import-json [archivo] [--force] | grant-admin <correo>');
       process.exitCode = 1;
   }
   closeDatabase();

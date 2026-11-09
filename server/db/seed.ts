@@ -5,13 +5,23 @@ import { profilesRepository } from '../repositories/profiles.js';
 import { clientsRepository } from '../repositories/clients.js';
 import { serviceHistoryRepository } from '../repositories/serviceHistory.js';
 import { subscriptionsRepository } from '../repositories/subscriptions.js';
+import { rolesRepository } from '../repositories/roles.js';
+import { businessesRepository } from '../repositories/businesses.js';
+import { membersRepository } from '../repositories/members.js';
+import { ensureProfessionalSetup } from '../services/businesses.js';
 
 export const DEMO_EMAIL = 'contacto@valeriaestudio.cl';
 export const DEMO_PASSWORD = 'Salon1234';
 export const LEGACY_DEMO_USER_ID = 'usr_demo_valeria_estilista';
+const DEMO_ACCOUNTS = [
+  { email: 'admin@demo.salontrack.cl', password: 'Admin1234', name: 'Administración Demo' },
+  { email: 'cliente@demo.salontrack.cl', password: 'Cliente1234', name: 'Cliente Demo' },
+  { email: 'dueno@demo.salontrack.cl', password: 'Dueno1234', name: 'Dueño Demo' },
+  { email: 'trabajador@demo.salontrack.cl', password: 'Staff1234', name: 'Trabajador Demo' },
+];
 
-/** Inserta la cuenta demo (marcada is_demo=1). Idempotente: no hace nada si ya existe. */
-export function seedDemoData(): boolean {
+/** Inserta los datos CRM de Valeria si su cuenta aún no existe. */
+function seedValeriaDemoData(): boolean {
   if (usersRepository.findByEmail(DEMO_EMAIL)) return false;
 
   const demoUserId = LEGACY_DEMO_USER_ID;
@@ -279,13 +289,195 @@ export function seedDemoData(): boolean {
     clients.forEach(c => clientsRepository.insert(c as Client));
     services.forEach(s => serviceHistoryRepository.insert(s as Service));
   });
+  ensureProfessionalSetup(demoUserId, {
+    businessName: demoProfile.business_name,
+    phone: demoProfile.phone,
+    fullName: demoProfile.full_name,
+    isDemo: true,
+  });
+  const valeriaBusiness = businessesRepository.listForUser(demoUserId)[0];
+  if (!valeriaBusiness?.id) throw new Error('No se pudo crear el negocio demo de Valeria.');
+  businessesRepository.update(valeriaBusiness.id, {
+    name: 'Valeria Henríquez Color Studio',
+    slug: 'valeria-henriquez-color-studio',
+    description: 'Color, balayage y cuidado capilar personalizado en Providencia.',
+    primary_category: 'Peluquería',
+    specialties: ['Coloración', 'Balayage'],
+    address: 'Av. Providencia 1234',
+    commune: 'Providencia',
+    region: 'Región Metropolitana',
+    latitude: -33.4314,
+    longitude: -70.6093,
+    offers_in_store: true,
+    offers_home_visit: true,
+    home_service_communes: ['Providencia', 'Ñuñoa', 'Las Condes'],
+    hide_exact_address: true,
+    status: 'PUBLISHED',
+    published_at: new Date().toISOString(),
+  });
   if (process.env.NODE_ENV !== 'test') console.log('Datos demo cargados para el entorno de pruebas chileno.');
   return true;
+}
+
+function demoProfile(userId: string, fullName: string, businessName: string, phone = ''): Profile {
+  const now = new Date().toISOString();
+  return {
+    id: generateId('prof'),
+    user_id: userId,
+    full_name: fullName,
+    business_name: businessName,
+    phone,
+    country: 'Chile',
+    currency: 'CLP',
+    timezone: 'America/Santiago',
+    default_interval_days: 30,
+    whatsapp_template: '',
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function insertDemoAccount(email: string, password: string, name: string, businessName = name) {
+  const existing = usersRepository.findByEmail(email);
+  if (existing) return undefined;
+  const now = new Date().toISOString();
+  const user: User = {
+    id: generateId('usr'),
+    email,
+    password_hash: hashPassword(password),
+    is_demo: true,
+    created_at: now,
+    updated_at: now,
+  };
+  transaction(() => {
+    usersRepository.insert(user);
+    profilesRepository.insert(demoProfile(user.id, name, businessName));
+  });
+  return user;
+}
+
+function demoBusiness(ownerId: string, fields: Partial<import('../services/businesses.js').Business> & Pick<import('../services/businesses.js').Business, 'name' | 'slug' | 'primary_category' | 'commune' | 'region'>) {
+  const current = new Date().toISOString();
+  const business = businessesRepository.insert({
+    id: generateId('biz'),
+    slug: fields.slug,
+    name: fields.name,
+    description: '',
+    logo_url: null,
+    cover_url: null,
+    primary_category: fields.primary_category,
+    specialties: [],
+    phone: '+56955550000',
+    whatsapp: '+56955550000',
+    email: null,
+    website: null,
+    instagram: null,
+    facebook: null,
+    address: null,
+    commune: fields.commune,
+    region: fields.region,
+    country: 'Chile',
+    latitude: null,
+    longitude: null,
+    offers_in_store: true,
+    offers_home_visit: false,
+    offers_remote: false,
+    home_service_communes: [],
+    home_service_radius_km: null,
+    hide_exact_address: false,
+    status: 'DRAFT',
+    status_reason: null,
+    published_at: null,
+    is_demo: true,
+    created_by: ownerId,
+    created_at: current,
+    updated_at: current,
+  });
+  return businessesRepository.update(business.id, fields)!;
+}
+
+/** Siembra cada cuenta demo de manera independiente e idempotente por correo. */
+export function seedDemoData(): boolean {
+  let changed = seedValeriaDemoData();
+
+  const admin = insertDemoAccount(DEMO_ACCOUNTS[0].email, DEMO_ACCOUNTS[0].password, DEMO_ACCOUNTS[0].name);
+  if (admin) {
+    rolesRepository.addRole(admin.id, 'CUSTOMER');
+    rolesRepository.addRole(admin.id, 'PLATFORM_ADMIN');
+    changed = true;
+  }
+  const customer = insertDemoAccount(DEMO_ACCOUNTS[1].email, DEMO_ACCOUNTS[1].password, DEMO_ACCOUNTS[1].name);
+  if (customer) {
+    rolesRepository.addRole(customer.id, 'CUSTOMER');
+    changed = true;
+  }
+  const owner = insertDemoAccount(DEMO_ACCOUNTS[2].email, DEMO_ACCOUNTS[2].password, DEMO_ACCOUNTS[2].name, 'Barbería Central');
+  if (owner) {
+    ensureProfessionalSetup(owner.id, { businessName: 'Barbería Central', phone: '+56955550001', fullName: DEMO_ACCOUNTS[2].name, isDemo: true });
+    const barberia = businessesRepository.listForUser(owner.id)[0];
+    if (!barberia?.id) throw new Error('No se pudo crear Barbería Central.');
+    businessesRepository.update(barberia.id, {
+      slug: 'barberia-central',
+      description: 'Barbería clásica en Santiago centro.',
+      phone: '+56955550001',
+      whatsapp: '+56955550001',
+      address: "Av. Libertador Bernardo O'Higgins 1234",
+      latitude: -33.4446,
+      longitude: -70.6536,
+      primary_category: 'Barbería',
+      commune: 'Santiago',
+      region: 'Región Metropolitana',
+      status: 'PUBLISHED',
+      published_at: new Date().toISOString(),
+    });
+    const spa = demoBusiness(owner.id, {
+      slug: 'spa-nunoa-bienestar',
+      name: 'Spa Ñuñoa Bienestar',
+      primary_category: 'Masajes',
+      commune: 'Ñuñoa',
+      region: 'Región Metropolitana',
+    });
+    membersRepository.insert({
+      id: generateId('mem'),
+      business_id: spa.id,
+      user_id: owner.id,
+      role: 'OWNER',
+      display_name: DEMO_ACCOUNTS[2].name,
+      title: '',
+      specialties: [],
+      status: 'ACTIVE',
+      created_at: spa.created_at,
+      updated_at: spa.updated_at,
+    });
+    changed = true;
+  }
+  const staff = insertDemoAccount(DEMO_ACCOUNTS[3].email, DEMO_ACCOUNTS[3].password, DEMO_ACCOUNTS[3].name);
+  if (staff) {
+    rolesRepository.addRole(staff.id, 'PROFESSIONAL');
+    const barberia = businessesRepository.findBySlug('barberia-central');
+    if (barberia) {
+      membersRepository.insert({
+        id: generateId('mem'),
+        business_id: barberia.id,
+        user_id: staff.id,
+        role: 'PROFESSIONAL',
+        display_name: DEMO_ACCOUNTS[3].name,
+        title: 'Barbero',
+        specialties: [],
+        status: 'ACTIVE',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+    changed = true;
+  }
+  return changed;
 }
 
 /** Elimina únicamente las cuentas demo (y sus datos en cascada) y las vuelve a crear. */
 export function resetDemoData(): { removedUsers: number } {
   return transaction(() => {
+    businessesRepository.deleteDemo();
     const removedUsers = usersRepository.deleteDemoUsers();
     seedDemoData();
     return { removedUsers };

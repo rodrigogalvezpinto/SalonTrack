@@ -9,11 +9,12 @@ import { badRequest, notFound } from '../lib/errors.js';
 import { isNonEmptyString, oneOf, optionalInt, optionalString } from '../lib/validation.js';
 import { daysBetween, getSantiagoDateString } from '../lib/dates.js';
 import { DEFAULT_RE_ENGAGEMENT_TEMPLATE, groupBy } from './helpers.js';
+import { requireRole } from '../lib/permissions.js';
 
 const router = Router();
 const RE_ENGAGEMENT_STATUSES = ['none', 'inactive', 'recontacted', 'reactivated', 'dismissed'] as const;
 
-router.get('/re-engagement', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/re-engagement', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const profile = profilesRepository.findByUserId(userId);
   const todayStr = getSantiagoDateString();
@@ -72,7 +73,7 @@ router.get('/re-engagement', requireAuth, (req: AuthRequest, res: Response) => {
   });
 });
 
-router.post('/re-engagement/status', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/re-engagement/status', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { client_id, status, notes } = req.body ?? {};
   if (!isNonEmptyString(client_id) || !status) throw badRequest('client_id y status son requeridos.');
@@ -102,7 +103,7 @@ router.post('/re-engagement/status', requireAuth, (req: AuthRequest, res: Respon
   return res.json({ message: `Clienta ${client.full_name} actualizada a estado '${newStatus}'.`, client, log });
 });
 
-router.put('/re-engagement/template', requireAuth, (req: AuthRequest, res: Response) => {
+router.put('/re-engagement/template', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const current = profilesRepository.findByUserId(req.userId!);
   if (!current) throw notFound('Perfil no encontrado.');
   const { template, threshold_days } = req.body ?? {};

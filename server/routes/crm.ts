@@ -10,6 +10,7 @@ import {
 } from '../lib/validation.js';
 import { calculateNextDate, getRetouchStatus, getSantiagoDateString } from '../lib/dates.js';
 import { groupBy } from './helpers.js';
+import { requireRole } from '../lib/permissions.js';
 
 const router = Router();
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -36,7 +37,7 @@ function buildServiceRecord(userId: string, clientId: string, input: any, now: s
   };
 }
 
-router.get('/clients', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/clients', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { filter, search } = req.query;
   const todayStr = getSantiagoDateString();
@@ -74,7 +75,7 @@ router.get('/clients', requireAuth, (req: AuthRequest, res: Response) => {
   return res.json({ clients: filtered, total: filtered.length, santiago_date: todayStr });
 });
 
-router.post('/clients', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/clients', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { full_name, phone, notes, initial_service } = req.body ?? {};
   if (!isNonEmptyString(full_name) || !isNonEmptyString(phone)) {
@@ -103,7 +104,7 @@ router.post('/clients', requireAuth, (req: AuthRequest, res: Response) => {
   return res.status(201).json({ message: 'Clienta registrada con éxito.', client: newClient, service: createdService });
 });
 
-router.get('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/clients/:id', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const client = clientsRepository.findForUser(req.params.id, userId);
   if (!client) throw notFound('Clienta no encontrada.');
@@ -121,7 +122,7 @@ router.get('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
   });
 });
 
-router.put('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
+router.put('/clients/:id', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const current = clientsRepository.findForUser(req.params.id, userId);
   if (!current) throw notFound('Clienta no encontrada.');
@@ -142,12 +143,12 @@ router.put('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
   return res.json({ message: 'Clienta actualizada con éxito.', client });
 });
 
-router.delete('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
+router.delete('/clients/:id', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   if (!clientsRepository.deleteForUser(req.params.id, req.userId!)) throw notFound('Clienta no encontrada.');
   return res.json({ message: 'Clienta y su historial han sido eliminados correctamente.' });
 });
 
-router.post('/services', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/services', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { client_id, service_type } = req.body ?? {};
   if (!isNonEmptyString(client_id) || !isNonEmptyString(service_type)) {
@@ -165,12 +166,12 @@ router.post('/services', requireAuth, (req: AuthRequest, res: Response) => {
   return res.status(201).json({ message: 'Servicio registrado correctamente en el historial.', service: newService });
 });
 
-router.delete('/services/:id', requireAuth, (req: AuthRequest, res: Response) => {
+router.delete('/services/:id', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   if (!serviceHistoryRepository.deleteForUser(req.params.id, req.userId!)) throw notFound('Servicio no encontrado.');
   return res.json({ message: 'Servicio eliminado del historial.' });
 });
 
-router.post('/contact-logs', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/contact-logs', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { client_id, status, notes } = req.body ?? {};
   if (!isNonEmptyString(client_id)) throw badRequest('ID de clienta requerido.');

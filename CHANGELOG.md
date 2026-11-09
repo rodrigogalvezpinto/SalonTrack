@@ -1,5 +1,18 @@
 # CHANGELOG.md — Registro de Versiones de SalonTrack
 
+## [2.0.0-alpha.2] - 2026-11-09 — Fase 2: Usuarios, roles y negocios
+
+### Añadido
+- Migración `002_roles_businesses.sql` con roles de plataforma, negocios, membresías de equipo y configuración.
+- Registro diferenciado de clientes y profesionales, permisos por rol y administración de plataforma.
+- Perfiles públicos de negocios publicados, panel profesional y panel administrativo.
+- Cuentas demo de cliente, administración, propietario y trabajador; comando `admin:grant`.
+- Endpoints privados de negocio/equipo y perfiles públicos con protección de dirección exacta.
+
+### Seguridad
+- CRM limitado a usuarios con rol profesional; negocios privados responden 404 a usuarios sin membresía activa.
+- Los datos públicos usan una lista permitida y omiten identificadores personales y metadatos administrativos.
+
 ## [2.0.0-alpha.1] - 2026-11-09 — Roadmap 2.0, Fases 0 y 1
 
 ### Añadido

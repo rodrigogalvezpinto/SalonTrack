@@ -7,11 +7,12 @@ import { serviceHistoryRepository } from '../repositories/serviceHistory.js';
 import { contactLogsRepository } from '../repositories/contactLogs.js';
 import { subscriptionsRepository, subscriptionPaymentsRepository } from '../repositories/subscriptions.js';
 import { getSantiagoDateString } from '../lib/dates.js';
+import { requireRole } from '../lib/permissions.js';
 
 const router = Router();
 
 /** Exportación de los datos del usuario autenticado (portabilidad / privacidad). */
-router.get('/backup/export', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/backup/export', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const user = usersRepository.findById(userId);
   const exportData = {

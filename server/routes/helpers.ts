@@ -1,6 +1,8 @@
 import { profilesRepository } from '../repositories/profiles.js';
 import { subscriptionsRepository } from '../repositories/subscriptions.js';
 import type { Subscription, User } from '../db.js';
+import { rolesRepository } from '../repositories/roles.js';
+import { businessesRepository } from '../repositories/businesses.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -22,6 +24,14 @@ export function buildUserPayload(user: User) {
     email: user.email,
     profile: profilesRepository.findByUserId(user.id),
     subscription: withSubscriptionStatus(subscriptionsRepository.findByUserId(user.id)),
+    roles: rolesRepository.listRoles(user.id),
+    memberships: businessesRepository.listForUser(user.id).map(business => ({
+      business_id: business.id,
+      business_name: business.name,
+      slug: business.slug,
+      status: business.status,
+      role: business.my_role,
+    })),
   };
 }
 

@@ -8,10 +8,12 @@ import { passwordResetsRepository } from '../repositories/passwordResets.js';
 import { getEmailProvider } from '../providers/index.js';
 import { getConfig } from '../config.js';
 import { badRequest, conflict, notFound, unauthorized, asyncHandler } from '../lib/errors.js';
-import { normalizeChileanPhone, normalizeEmail, optionalString, requireString, validatePassword, isNonEmptyString } from '../lib/validation.js';
+import { normalizeChileanPhone, normalizeEmail, oneOf, optionalString, requireString, validatePassword, isNonEmptyString } from '../lib/validation.js';
 import { rateLimit } from '../lib/rateLimit.js';
 import { recordAudit } from '../lib/audit.js';
-import { buildUserPayload, DEFAULT_WHATSAPP_TEMPLATE, withSubscriptionStatus } from './helpers.js';
+import { buildUserPayload, DEFAULT_WHATSAPP_TEMPLATE } from './helpers.js';
+import { ensureProfessionalSetup } from '../services/businesses.js';
+import { rolesRepository } from '../repositories/roles.js';
 
 const router = Router();
 const FIFTEEN_MIN = 15 * 60 * 1000;
@@ -19,13 +21,14 @@ const emailKey = (req: any) => `${req.ip}:${String(req.body?.email ?? '').trim()
 
 router.post('/auth/register', rateLimit({ name: 'register', windowMs: 60 * 60 * 1000, max: 20 }), (req, res) => {
   const { email: rawEmail, password: rawPassword, full_name, business_name, phone } = req.body ?? {};
+  const accountType = oneOf(req.body?.account_type ?? 'professional', ['professional', 'customer'] as const, 'account_type');
   if (!rawEmail || !rawPassword || !full_name) {
     throw badRequest('Nombre, correo y contraseña son obligatorios.');
   }
   const email = normalizeEmail(rawEmail);
   const password = validatePassword(rawPassword);
   const fullName = requireString(full_name, 'El nombre es obligatorio.', 120);
-  const businessName = optionalString(business_name, 'business_name', 120) || fullName;
+  const businessName = accountType === 'customer' ? fullName : optionalString(business_name, 'business_name', 120) || fullName;
   const cleanPhone = isNonEmptyString(phone) && phone.replace(/[^\d]/g, '').length > 3 ? normalizeChileanPhone(phone) : '+56900000000';
 
   if (usersRepository.findByEmail(email)) {
@@ -65,14 +68,19 @@ router.post('/auth/register', rateLimit({ name: 'register', windowMs: 60 * 60 * 
   transaction(() => {
     usersRepository.insert(newUser);
     profilesRepository.insert(newProfile);
-    subscriptionsRepository.insert(newSubscription);
+    if (accountType === 'professional') {
+      subscriptionsRepository.insert(newSubscription);
+      ensureProfessionalSetup(userId, { businessName, phone: cleanPhone, fullName, isDemo: false });
+    } else {
+      rolesRepository.addRole(userId, 'CUSTOMER');
+    }
     recordAudit({ userId, action: 'user.registered', entityType: 'user', entityId: userId });
   });
 
   return res.status(201).json({
     message: 'Cuenta creada exitosamente en SalonTrack.',
     token: generateToken(newUser),
-    user: { id: newUser.id, email: newUser.email, profile: newProfile, subscription: withSubscriptionStatus(newSubscription) },
+    user: buildUserPayload(newUser),
   });
 });
 

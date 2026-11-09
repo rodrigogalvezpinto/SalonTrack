@@ -2,6 +2,63 @@ export interface User {
   id: string;
   email: string;
   created_at: string;
+  roles: string[];
+  memberships: Membership[];
+}
+
+export interface Membership {
+  business_id: string;
+  business_name: string;
+  slug: string;
+  status: string;
+  role: 'OWNER' | 'ADMIN' | 'PROFESSIONAL' | 'RECEPTION';
+}
+
+export interface Business {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  logo_url: string | null;
+  cover_url: string | null;
+  primary_category: string | null;
+  specialties: string[];
+  phone: string | null;
+  whatsapp: string | null;
+  email: string | null;
+  website: string | null;
+  instagram: string | null;
+  facebook: string | null;
+  address: string | null;
+  commune: string | null;
+  region: string | null;
+  country: string;
+  latitude: number | null;
+  longitude: number | null;
+  offers_in_store: boolean;
+  offers_home_visit: boolean;
+  offers_remote: boolean;
+  home_service_communes: string[];
+  home_service_radius_km: number | null;
+  hide_exact_address: boolean;
+  status: 'DRAFT' | 'PENDING_REVIEW' | 'PUBLISHED' | 'SUSPENDED' | 'INACTIVE';
+  status_reason: string | null;
+  published_at: string | null;
+  created_at: string;
+  updated_at: string;
+  my_role?: Membership['role'];
+}
+
+export interface BusinessMember {
+  id: string;
+  business_id: string;
+  user_id: string;
+  role: Membership['role'];
+  display_name: string;
+  title: string;
+  specialties: string[];
+  status: 'ACTIVE' | 'INACTIVE';
+  email?: string;
 }
 
 export interface Profile {
@@ -10,6 +67,11 @@ export interface Profile {
   full_name: string;
   business_name: string;
   phone: string;
+  avatar_url?: string | null;
+  address?: string | null;
+  preferred_commune?: string | null;
+  preferred_latitude?: number | null;
+  preferred_longitude?: number | null;
   country: string;
   currency: string;
   timezone: string;
@@ -178,4 +240,3 @@ export interface NotificationItem {
   urgency: 'high' | 'medium' | 'low';
   date: string;
 }
-

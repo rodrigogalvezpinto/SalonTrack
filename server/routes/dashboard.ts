@@ -5,11 +5,12 @@ import { serviceHistoryRepository } from '../repositories/serviceHistory.js';
 import { contactLogsRepository } from '../repositories/contactLogs.js';
 import { getRetouchStatus, getSantiagoDateString } from '../lib/dates.js';
 import { groupBy } from './helpers.js';
+import { requireRole } from '../lib/permissions.js';
 
 const router = Router();
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-router.get('/dashboard/stats', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/dashboard/stats', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const todayStr = getSantiagoDateString();
   const userClients = clientsRepository.listByUser(userId);
@@ -78,7 +79,7 @@ router.get('/dashboard/stats', requireAuth, (req: AuthRequest, res: Response) =>
   });
 });
 
-router.get('/calendar', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/calendar', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const todayStr = getSantiagoDateString();
   const servicesByClient = groupBy(serviceHistoryRepository.listByUser(userId), s => s.client_id);

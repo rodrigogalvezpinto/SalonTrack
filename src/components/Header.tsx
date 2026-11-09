@@ -12,7 +12,8 @@ export const Header: React.FC<HeaderProps> = ({
   onNewClientClick,
   onOpenCheckout,
 }) => {
-  const { profile, subscription, logout } = useAuth();
+  const { profile, subscription, logout, roles } = useAuth();
+  const isProfessional = roles.includes('PROFESSIONAL');
 
   const getSubBadge = () => {
     if (!subscription) return null;
@@ -77,10 +78,10 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Actions */}
         <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-          {getSubBadge()}
+          {isProfessional && getSubBadge()}
           <PWAInstallButton variant="header" />
 
-          <button
+          {isProfessional && <button
             onClick={onNewClientClick}
             className="inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs sm:text-sm font-semibold shadow-xs hover:shadow-rose-600/20 active:scale-95 transition"
             title="Registrar nueva clienta"
@@ -88,7 +89,7 @@ export const Header: React.FC<HeaderProps> = ({
             <UserPlus className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
             <span className="hidden md:inline">Nueva Clienta</span>
             <span className="hidden sm:inline md:hidden">Clienta</span>
-          </button>
+          </button>}
 
           <button
             onClick={logout}

@@ -8,6 +8,9 @@ import subscriptionRoutes from './subscriptions.js';
 import reEngagementRoutes from './reEngagement.js';
 import notificationRoutes from './notifications.js';
 import backupRoutes from './backup.js';
+import businessRoutes from './businesses.js';
+import publicBusinessRoutes from './publicBusinesses.js';
+import adminRoutes from './admin.js';
 
 const router = Router();
 
@@ -25,6 +28,9 @@ router.get('/health', (req, res) => {
 });
 
 router.use(authRoutes);
+router.use(publicBusinessRoutes);
+router.use(businessRoutes);
+router.use(adminRoutes);
 router.use(profileRoutes);
 router.use(crmRoutes);
 router.use(dashboardRoutes);

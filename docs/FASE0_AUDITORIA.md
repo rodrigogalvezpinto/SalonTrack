@@ -50,7 +50,7 @@ Vistas: Landing, Auth, Dashboard, Clientas, Ficha de clienta, Retoques, Re-engag
 |---|---|
 | 0 Auditoría y respaldo | ✅ Este documento; respaldo automático del JSON antes de migrar |
 | 1 Persistencia y arquitectura | ✅ SQLite, migraciones, repositorios, transacciones, validación/errores centralizados, auth endurecida, adaptadores locales |
-| 2 Usuarios, roles y negocios | ⏳ Pendiente |
+| 2 Usuarios, roles y negocios | ✅ Roles, negocios, equipo, perfiles públicos y administración |
 | 3 Categorías y servicios | ⏳ Pendiente |
 | 4 Agenda y disponibilidad | ⏳ Pendiente |
 | 5 Marketplace | ⏳ Pendiente |

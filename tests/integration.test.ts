@@ -297,8 +297,8 @@ describe('Datos demo', () => {
     assert.equal((await api('GET', '/api/clients', undefined, demoLogin.data.token)).data.total, 7);
 
     const { removedUsers } = resetDemoData();
-    assert.equal(removedUsers, 1);
-    assert.equal(count('SELECT COUNT(*) AS n FROM users WHERE is_demo = 1'), 1);
+    assert.equal(removedUsers, 5);
+    assert.equal(count('SELECT COUNT(*) AS n FROM users WHERE is_demo = 1'), 5);
     assert.equal(count('SELECT COUNT(*) AS n FROM users WHERE id = ?', real.userId), 1);
   });
 });

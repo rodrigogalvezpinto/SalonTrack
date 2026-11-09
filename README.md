@@ -93,10 +93,19 @@ Al iniciar, el servidor crea `data/salontrack.sqlite`, aplica las migraciones pe
 | `npm run db:backup [-- destino]` | Respaldo consistente en caliente en `data/backups/` |
 | `npm run db:restore -- <archivo>` | Restaura un respaldo (con el servidor detenido); antes guarda una copia `pre-restore-*` |
 | `npm run db:import-json [-- archivo] [--force]` | Importa el JSON v1 de forma idempotente |
+| `npm run admin:grant -- <correo>` | Otorga el rol de administración de plataforma a una cuenta existente |
 
 ### Cuenta de prueba (solo desarrollo local)
 
-- Profesional: `contacto@valeriaestudio.cl` / `Salon1234`
+| Cuenta | Correo | Contraseña | Roles / uso |
+|---|---|---|---|
+| Profesional | `contacto@valeriaestudio.cl` | `Salon1234` | CRM y negocio publicado de Valeria |
+| Administración | `admin@demo.salontrack.cl` | `Admin1234` | Cliente y administración de plataforma |
+| Cliente | `cliente@demo.salontrack.cl` | `Cliente1234` | Cuenta de cliente |
+| Dueño | `dueno@demo.salontrack.cl` | `Dueno1234` | Propietario de Barbería Central y Spa Ñuñoa Bienestar |
+| Equipo | `trabajador@demo.salontrack.cl` | `Staff1234` | Profesional de Barbería Central |
+
+Estas cuentas se crean únicamente para desarrollo local y pruebas.
 
 ### Recuperación de contraseña en local
 
