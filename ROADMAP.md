@@ -3,7 +3,7 @@
 ## SalonTrack 2.0 (en curso)
 - [x] Fase 0 — Auditoría y protección de lo existente (`docs/FASE0_AUDITORIA.md`)
 - [x] Fase 1 — Persistencia SQLite y arquitectura
-- [ ] Fase 2 — Usuarios, roles y negocios
+- [x] Fase 2 — Usuarios, roles y negocios
 - [ ] Fase 3 — Categorías y servicios
 - [ ] Fase 4 — Agenda y disponibilidad
 - [ ] Fase 5 — Marketplace

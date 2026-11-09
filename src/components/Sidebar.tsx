@@ -6,21 +6,26 @@ import {
   Calculator, 
   Calendar as CalendarIcon, 
   Settings, 
-  CreditCard 
+  CreditCard,
+  Building2,
+  ShieldCheck,
+  UserCircle,
 } from 'lucide-react';
 
 interface SidebarProps {
   currentView: string;
   onSelectView: (view: string) => void;
   pendingRetouchesCount?: number;
+  roles?: string[];
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   currentView,
   onSelectView,
   pendingRetouchesCount = 0,
+  roles = [],
 }) => {
-  const navItems = [
+  const navItems = roles.includes('PROFESSIONAL') ? [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'clients', label: 'Mis Clientas', icon: Users },
     { 
@@ -37,6 +42,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'revenue', label: 'Ingresos Potenciales', icon: Calculator },
     { id: 'calendar', label: 'Calendario', icon: CalendarIcon },
     { id: 'settings', label: 'Configuración & Salón', icon: Settings },
+    { id: 'business', label: 'Mi negocio', icon: Building2 },
+    ...(roles.includes('PLATFORM_ADMIN') ? [{ id: 'admin', label: 'Administración', icon: ShieldCheck }] : []),
+  ] : [
+    { id: 'account', label: 'Mi cuenta', icon: UserCircle },
+    ...(roles.includes('PLATFORM_ADMIN') ? [{ id: 'admin', label: 'Administración', icon: ShieldCheck }] : []),
   ];
 
   return (

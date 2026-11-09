@@ -25,6 +25,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [fullName, setFullName] = useState('');
   const [businessName, setBusinessName] = useState('');
   const [phone, setPhone] = useState('+56 9 ');
+  const [accountType, setAccountType] = useState<'professional' | 'customer'>('professional');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,8 +48,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           email,
           password,
           full_name: fullName,
-          business_name: businessName || fullName,
+          ...(accountType === 'professional' ? { business_name: businessName || fullName } : {}),
           phone,
+          account_type: accountType,
         });
         onClose();
       } else if (mode === 'forgot') {
@@ -86,7 +88,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <div>
               <h3 className="font-bold text-base leading-tight">
                 {mode === 'login' && 'Iniciar Sesión'}
-                {mode === 'register' && 'Crear Cuenta Profesional'}
+                {mode === 'register' && (accountType === 'professional' ? 'Crear Cuenta Profesional' : 'Crear Cuenta de Cliente')}
                 {mode === 'forgot' && 'Recuperar Contraseña'}
                 {mode === 'reset' && 'Nueva Contraseña'}
               </h3>
@@ -135,7 +137,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
           {mode === 'register' && (
             <>
-              <div>
+              <div className="grid grid-cols-2 gap-2">
+                <button type="button" onClick={() => setAccountType('professional')} className={`rounded-xl border p-2.5 text-xs font-bold ${accountType === 'professional' ? 'border-rose-500 bg-rose-50 text-rose-700' : 'border-slate-200 text-slate-600'}`}>Soy profesional</button>
+                <button type="button" onClick={() => setAccountType('customer')} className={`rounded-xl border p-2.5 text-xs font-bold ${accountType === 'customer' ? 'border-rose-500 bg-rose-50 text-rose-700' : 'border-slate-200 text-slate-600'}`}>Soy cliente</button>
+              </div>
+              {accountType === 'professional' && <div>
                 <label className="text-xs font-bold text-slate-700 uppercase tracking-wide block mb-1">
                   Tu Nombre Completo *
                 </label>
@@ -150,7 +156,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     className="w-full text-xs rounded-xl border border-slate-300 pl-9 p-2.5 text-slate-800 focus:border-rose-500 outline-none"
                   />
                 </div>
-              </div>
+              </div>}
 
               <div>
                 <label className="text-xs font-bold text-slate-700 uppercase tracking-wide block mb-1">

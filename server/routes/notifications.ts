@@ -7,16 +7,17 @@ import { notFound } from '../lib/errors.js';
 import { optionalInt, optionalTime } from '../lib/validation.js';
 import { getRetouchStatus, getSantiagoDateString } from '../lib/dates.js';
 import { groupBy } from './helpers.js';
+import { requireRole } from '../lib/permissions.js';
 
 const router = Router();
 
-router.get('/notifications/preferences', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/notifications/preferences', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const profile = profilesRepository.findByUserId(req.userId!);
   const defaultPrefs = { push_enabled: true, alert_time: '09:00', notify_days_before: 3, sound_enabled: true, timezone: 'America/Santiago' };
   return res.json({ preferences: profile?.notification_preferences || defaultPrefs, timezone: profile?.timezone || 'America/Santiago' });
 });
 
-router.put('/notifications/preferences', requireAuth, (req: AuthRequest, res: Response) => {
+router.put('/notifications/preferences', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const current = profilesRepository.findByUserId(req.userId!);
   if (!current) throw notFound('Perfil no encontrado.');
   const { push_enabled, alert_time, notify_days_before, sound_enabled, push_subscription } = req.body ?? {};
@@ -35,7 +36,7 @@ router.put('/notifications/preferences', requireAuth, (req: AuthRequest, res: Re
   return res.json({ message: 'Preferencias de notificación guardadas correctamente.', preferences: profile.notification_preferences });
 });
 
-router.get('/notifications/upcoming', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/notifications/upcoming', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const profile = profilesRepository.findByUserId(userId);
   const todayStr = getSantiagoDateString();
@@ -91,7 +92,7 @@ router.get('/notifications/upcoming', requireAuth, (req: AuthRequest, res: Respo
   });
 });
 
-router.post('/notifications/test', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/notifications/test', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const profile = profilesRepository.findByUserId(req.userId!);
   return res.json({
     success: true,

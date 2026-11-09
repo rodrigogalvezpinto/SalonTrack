@@ -1,25 +1,37 @@
 import React from 'react';
-import { LayoutDashboard, Users, Clock, RotateCcw, Calendar, Settings } from 'lucide-react';
+import { LayoutDashboard, Users, Clock, RotateCcw, Settings, Building2, ShieldCheck, UserCircle } from 'lucide-react';
 
 interface BottomNavProps {
   currentView: string;
   onSelectView: (view: string) => void;
   pendingCount?: number;
+  roles?: string[];
 }
 
 export const BottomNav: React.FC<BottomNavProps> = ({
   currentView,
   onSelectView,
   pendingCount = 0,
+  roles = [],
 }) => {
-  const items = [
-    { id: 'dashboard', label: 'Inicio', icon: LayoutDashboard },
-    { id: 'clients', label: 'Clientas', icon: Users },
-    { id: 'retouches', label: 'Retoques', icon: Clock, badge: pendingCount > 0 ? pendingCount : undefined },
-    { id: 're-engagement', label: 'Recuperar', icon: RotateCcw },
-    { id: 'calendar', label: 'Agenda', icon: Calendar },
-    { id: 'settings', label: 'Ajustes', icon: Settings },
-  ];
+  const isProfessional = roles.includes('PROFESSIONAL');
+  const items = isProfessional
+    ? [
+        { id: 'dashboard', label: 'Inicio', icon: LayoutDashboard },
+        { id: 'clients', label: 'Clientas', icon: Users },
+        { id: 'retouches', label: 'Retoques', icon: Clock, badge: pendingCount > 0 ? pendingCount : undefined },
+        ...(roles.includes('PLATFORM_ADMIN')
+          ? [{ id: 'admin', label: 'Admin', icon: ShieldCheck }]
+          : [{ id: 're-engagement', label: 'Recuperar', icon: RotateCcw }]),
+        { id: 'business', label: 'Negocio', icon: Building2 },
+        ...(roles.includes('PLATFORM_ADMIN')
+          ? [{ id: 'settings', label: 'Ajustes', icon: Settings }]
+          : [{ id: 'settings', label: 'Ajustes', icon: Settings }]),
+      ]
+    : [
+        { id: 'account', label: 'Mi cuenta', icon: UserCircle },
+        ...(roles.includes('PLATFORM_ADMIN') ? [{ id: 'admin', label: 'Admin', icon: ShieldCheck }] : []),
+      ];
 
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 px-1 pt-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] shadow-xl flex items-center justify-around transition-all">

@@ -10,6 +10,7 @@ import { asyncHandler, badRequest, conflict, forbidden } from '../lib/errors.js'
 import { optionalString } from '../lib/validation.js';
 import { recordAudit } from '../lib/audit.js';
 import { withSubscriptionStatus } from './helpers.js';
+import { requireRole } from '../lib/permissions.js';
 
 const router = Router();
 
@@ -42,7 +43,7 @@ router.get('/subscriptions/plans', (req, res) => {
   res.json({ plans: PLANS, currency: 'CLP', tax_info: 'Precios expresados en Pesos Chilenos (CLP). Sujeto a comprobante digital.' });
 });
 
-router.get('/subscriptions/current', requireAuth, (req: AuthRequest, res: Response) => {
+router.get('/subscriptions/current', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   let sub = subscriptionsRepository.findByUserId(userId);
   if (!sub) {
@@ -71,6 +72,7 @@ router.get('/subscriptions/current', requireAuth, (req: AuthRequest, res: Respon
 router.post(
   '/payments/create-preference',
   requireAuth,
+  requireRole('PROFESSIONAL'),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.userId!;
     const { plan_id } = req.body ?? {};
@@ -124,7 +126,7 @@ router.post('/payments/webhook', (req, res) => {
   return res.status(200).send('Webhook received');
 });
 
-router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/subscriptions/activate-license', requireAuth, requireRole('PROFESSIONAL'), (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { plan_id, payment_ref } = req.body ?? {};
   const provider = getPaymentProvider();

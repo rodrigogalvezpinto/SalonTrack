@@ -4,12 +4,16 @@ import jwt from 'jsonwebtoken';
 import { getConfig } from './config.js';
 import type { User } from './db.js';
 import { usersRepository } from './repositories/users.js';
+import type { Business } from './services/businesses.js';
+import type { BusinessMember } from './repositories/members.js';
 
 const JWT_EXPIRES_IN = '30d';
 
 export interface AuthRequest extends Request {
   userId?: string;
   userEmail?: string;
+  business?: Business;
+  membership?: BusinessMember;
 }
 
 export function hashPassword(password: string): string {

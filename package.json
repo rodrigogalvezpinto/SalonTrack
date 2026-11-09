@@ -15,7 +15,8 @@
     "db:reset": "tsx scripts/db.ts reset",
     "db:backup": "tsx scripts/db.ts backup",
     "db:restore": "tsx scripts/db.ts restore",
-    "db:import-json": "tsx scripts/db.ts import-json"
+    "db:import-json": "tsx scripts/db.ts import-json",
+    "admin:grant": "tsx scripts/db.ts grant-admin"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

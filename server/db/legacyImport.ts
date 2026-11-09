@@ -7,6 +7,7 @@ import { calculateNextDate, isValidIsoDateSafe } from './legacyHelpers.js';
 import { getDatabase } from './connection.js';
 import { recordAudit } from '../lib/audit.js';
 import { DEMO_EMAIL, LEGACY_DEMO_USER_ID } from './seed.js';
+import { ensureProfessionalSetup } from '../services/businesses.js';
 
 type EntityName = 'users' | 'profiles' | 'clients' | 'services' | 'contact_logs' | 'subscriptions' | 'payments';
 const ENTITIES: EntityName[] = ['users', 'profiles', 'clients', 'services', 'contact_logs', 'subscriptions', 'payments'];
@@ -76,6 +77,7 @@ export function importLegacyJson(file = getConfig().legacyJsonFile, options: { f
   };
   const exists = (table: string, id: string) => !!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id);
   const now = new Date().toISOString();
+  const newlyInsertedUsers = new Set<string>();
 
   const run = (entity: EntityName, table: string, id: string, insert: () => number) => {
     if (exists(table, id)) {
@@ -91,10 +93,12 @@ export function importLegacyJson(file = getConfig().legacyJsonFile, options: { f
       if (!u?.id || !u?.email || !u?.password_hash) { skip('users', u?.id, 'campos obligatorios faltantes'); continue; }
       const email = String(u.email).trim().toLowerCase();
       const isDemo = u.id === LEGACY_DEMO_USER_ID || email === DEMO_EMAIL ? 1 : 0;
+      const userExisted = exists('users', u.id) || !!db.prepare('SELECT 1 FROM users WHERE email = ?').get(email);
       run('users', 'users', u.id, () =>
         db.prepare(`INSERT OR IGNORE INTO users (id, email, password_hash, is_demo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
           .run(u.id, email, u.password_hash, isDemo, str(u.created_at, now), str(u.updated_at, str(u.created_at, now))).changes
       );
+      if (!userExisted && exists('users', u.id)) newlyInsertedUsers.add(u.id);
     }
 
     for (const p of data.profiles ?? []) {
@@ -113,6 +117,20 @@ export function importLegacyJson(file = getConfig().legacyJsonFile, options: { f
             str(p.created_at, now), str(p.updated_at, now)
           ).changes
       );
+    }
+
+    for (const userId of newlyInsertedUsers) {
+      const profile = db.prepare('SELECT full_name, business_name, phone FROM user_profiles WHERE user_id = ?').get(userId) as
+        | { full_name: string; business_name: string; phone: string }
+        | undefined;
+      if (!profile) continue;
+      const user = db.prepare('SELECT is_demo FROM users WHERE id = ?').get(userId) as { is_demo: number };
+      ensureProfessionalSetup(userId, {
+        businessName: profile.business_name,
+        phone: profile.phone,
+        fullName: profile.full_name,
+        isDemo: user.is_demo === 1,
+      });
     }
 
     for (const c of data.clients ?? []) {
