@@ -50,6 +50,8 @@ function MainApp() {
 
   const [newClientModalOpen, setNewClientModalOpen] = useState(false);
   const [newServiceModalOpen, setNewServiceModalOpen] = useState(false);
+  const [dataVersion, setDataVersion] = useState(0);
+  const bumpDataVersion = () => setDataVersion(v => v + 1);
   const [serviceTargetClient, setServiceTargetClient] = useState<Client | null>(null);
 
   const [whatsAppModalOpen, setWhatsAppModalOpen] = useState(false);
@@ -187,6 +189,7 @@ function MainApp() {
           {currentView === 'client_detail' && selectedClientId && (
             <ClientDetailView
               clientId={selectedClientId}
+              refreshKey={dataVersion}
               onBack={() => {
                 setSelectedClientId(null);
                 setCurrentView('clients');
@@ -248,13 +251,14 @@ function MainApp() {
         client={whatsAppTargetClient}
         service={whatsAppTargetService}
         onClose={() => setWhatsAppModalOpen(false)}
+        onContactLogged={bumpDataVersion}
       />
 
       <NewClientModal
         isOpen={newClientModalOpen}
         onClose={() => setNewClientModalOpen(false)}
         onClientCreated={() => {
-          // Trigger refresh by updating view or notifying child views
+          bumpDataVersion();
           setCurrentView('clients');
         }}
       />
@@ -263,11 +267,7 @@ function MainApp() {
         isOpen={newServiceModalOpen}
         client={serviceTargetClient}
         onClose={() => setNewServiceModalOpen(false)}
-        onServiceCreated={() => {
-          if (selectedClientId) {
-            // will auto reload in ClientDetailView
-          }
-        }}
+        onServiceCreated={bumpDataVersion}
       />
 
       <CheckoutModal

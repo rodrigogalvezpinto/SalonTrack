@@ -11,7 +11,7 @@ import { badRequest, conflict, notFound, unauthorized, asyncHandler } from '../l
 import { normalizeChileanPhone, normalizeEmail, optionalString, requireString, validatePassword, isNonEmptyString } from '../lib/validation.js';
 import { rateLimit } from '../lib/rateLimit.js';
 import { recordAudit } from '../lib/audit.js';
-import { buildUserPayload, DEFAULT_WHATSAPP_TEMPLATE } from './helpers.js';
+import { buildUserPayload, DEFAULT_WHATSAPP_TEMPLATE, withSubscriptionStatus } from './helpers.js';
 
 const router = Router();
 const FIFTEEN_MIN = 15 * 60 * 1000;
@@ -72,7 +72,7 @@ router.post('/auth/register', rateLimit({ name: 'register', windowMs: 60 * 60 * 
   return res.status(201).json({
     message: 'Cuenta creada exitosamente en SalonTrack.',
     token: generateToken(newUser),
-    user: { id: newUser.id, email: newUser.email, profile: newProfile, subscription: newSubscription },
+    user: { id: newUser.id, email: newUser.email, profile: newProfile, subscription: withSubscriptionStatus(newSubscription) },
   });
 });
 

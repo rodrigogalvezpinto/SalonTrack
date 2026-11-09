@@ -60,6 +60,8 @@ describe('Autenticación', () => {
     assert.ok(login.data.token);
     assert.equal(login.data.user.profile.business_name, 'Salón Test');
     assert.equal(login.data.user.subscription.status, 'trial');
+    assert.equal(login.data.user.subscription.days_remaining, 14);
+    assert.equal(login.data.user.subscription.is_active, true);
 
     assert.equal((await api('POST', '/api/auth/login', { email, password: 'incorrecta' })).status, 401);
 

@@ -9,6 +9,7 @@ import { getPaymentProvider } from '../providers/index.js';
 import { asyncHandler, badRequest, conflict, forbidden } from '../lib/errors.js';
 import { optionalString } from '../lib/validation.js';
 import { recordAudit } from '../lib/audit.js';
+import { withSubscriptionStatus } from './helpers.js';
 
 const router = Router();
 
@@ -61,13 +62,8 @@ router.get('/subscriptions/current', requireAuth, (req: AuthRequest, res: Respon
     subscriptionsRepository.insert(sub);
   }
 
-  const expDate = new Date(sub.expiration_date);
-  const now = new Date();
-  const daysRemaining = Math.max(0, Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
-  const isExpired = expDate.getTime() < now.getTime();
-
   return res.json({
-    subscription: { ...sub, days_remaining: daysRemaining, is_active: !isExpired && (sub.status === 'active' || sub.status === 'trial') },
+    subscription: withSubscriptionStatus(sub),
     payments: subscriptionPaymentsRepository.listByUser(userId),
   });
 });
@@ -188,7 +184,7 @@ router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, r
   if (result.duplicated) return res.json({ message: 'Este pago ya fue procesado.', payment: result.payment });
   return res.json({
     message: `¡Licencia activada con éxito! Acceso habilitado hasta el ${result.expiresAt.toLocaleDateString('es-CL')}.`,
-    subscription: result.subscription,
+    subscription: withSubscriptionStatus(result.subscription),
     payment: result.payment,
   });
 });

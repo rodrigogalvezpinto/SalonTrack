@@ -23,6 +23,7 @@ interface ClientDetailViewProps {
   onOpenWhatsApp: (client: Client, service?: any) => void;
   onAddService: (client: Client) => void;
   onClientDeleted?: () => void;
+  refreshKey?: number;
 }
 
 export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
@@ -31,6 +32,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
   onOpenWhatsApp,
   onAddService,
   onClientDeleted,
+  refreshKey,
 }) => {
   const [client, setClient] = useState<Client | null>(null);
   const [services, setServices] = useState<Service[]>([]);
@@ -69,7 +71,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
 
   useEffect(() => {
     fetchClientDetails();
-  }, [clientId]);
+  }, [clientId, refreshKey]);
 
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
