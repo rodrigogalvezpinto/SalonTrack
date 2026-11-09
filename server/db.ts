@@ -1,12 +1,12 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 
 export interface User {
   id: string;
   email: string;
   password_hash: string;
+  is_demo?: boolean;
   created_at: string;
+  updated_at?: string;
 }
 
 export interface Profile {
@@ -78,7 +78,8 @@ export interface Subscription {
   status: 'trial' | 'active' | 'expired' | 'pending';
   start_date: string;
   expiration_date: string;
-  payment_provider: 'mercadopago' | 'transfer' | 'manual';
+  payment_provider: 'mercadopago' | 'transfer' | 'manual' | 'local';
+  updated_at?: string;
   created_at: string;
 }
 
@@ -87,74 +88,15 @@ export interface Payment {
   user_id: string;
   amount_clp: number;
   currency: string;
-  provider: 'mercadopago';
+  provider: string;
   provider_payment_id: string;
   status: 'approved' | 'pending' | 'rejected';
   plan: string;
   created_at: string;
 }
 
-export interface DatabaseSchema {
-  users: User[];
-  profiles: Profile[];
-  clients: Client[];
-  services: Service[];
-  contact_logs: ContactLog[];
-  subscriptions: Subscription[];
-  payments: Payment[];
-}
-
-const DB_FILE = process.env.DATABASE_FILE || path.resolve('data/salontrack.json');
-
-// Ensure database directory exists
-const dbDir = path.dirname(DB_FILE);
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-}
-
-let dbInstance: DatabaseSchema;
-
-export function saveDb(data?: DatabaseSchema) {
-  if (data) {
-    dbInstance = data;
-  }
-  const tempFile = `${DB_FILE}.tmp.${Date.now()}`;
-  fs.writeFileSync(tempFile, JSON.stringify(dbInstance, null, 2), 'utf-8');
-  fs.renameSync(tempFile, DB_FILE);
-}
-
-function initDb(): DatabaseSchema {
-  if (fs.existsSync(DB_FILE)) {
-    try {
-      const data = fs.readFileSync(DB_FILE, 'utf-8');
-      return JSON.parse(data);
-    } catch (e) {
-      console.error('Error reading DB, reinitializing:', e);
-    }
-  }
-
-  const defaultDb: DatabaseSchema = {
-    users: [],
-    profiles: [],
-    clients: [],
-    services: [],
-    contact_logs: [],
-    subscriptions: [],
-    payments: []
-  };
-
-  dbInstance = defaultDb;
-  saveDb(defaultDb);
-  return defaultDb;
-}
-
-dbInstance = initDb();
-
-
-export function getDb(): DatabaseSchema {
-  return dbInstance;
-}
-
 export function generateId(prefix = ''): string {
   return prefix ? `${prefix}_${crypto.randomUUID()}` : crypto.randomUUID();
 }
+
+export { getDatabase, initDatabase, closeDatabase, transaction } from './db/connection.js';

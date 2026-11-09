@@ -1,23 +1,16 @@
 import assert from 'node:assert';
+import { test as nodeTest } from 'node:test';
+import { setupTestEnv } from './helpers.js';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
 import { hashPassword, verifyPassword, generateToken } from '../server/auth.js';
-import { getDb, saveDb, generateId, User, Profile, Client, Service } from '../server/db.js';
+import { generateId, Client } from '../server/db.js';
+import { usersRepository } from '../server/repositories/users.js';
+import { clientsRepository } from '../server/repositories/clients.js';
+import { calculateNextDate, daysBetween, getSantiagoDateString } from '../server/lib/dates.js';
 
-console.log('🧪 Iniciando Suite de Pruebas Automatizadas de SalonTrack Chile...\n');
+setupTestEnv('unit');
 
-let passed = 0;
-let failed = 0;
-
-function test(name: string, fn: () => void) {
-  try {
-    fn();
-    console.log(`  ✅ [PASS] ${name}`);
-    passed++;
-  } catch (err: any) {
-    console.error(`  ❌ [FAIL] ${name}: ${err.message}`);
-    failed++;
-  }
-}
+const test = (name: string, fn: () => void) => nodeTest(name, fn);
 
 // 1. Formateo de Peso Chileno (CLP)
 test('Formato CLP: Enteros con separador de miles en punto, sin decimales', () => {
@@ -91,13 +84,17 @@ test('Aislamiento de Datos (RLS): Un estilista no puede ver datos de otro estili
     updated_at: new Date().toISOString(),
   };
 
-  const db = getDb();
-  db.clients.push(client1, client2);
+  const now = new Date().toISOString();
+  for (const id of [user1Id, user2Id]) {
+    usersRepository.insert({ id, email: `${id}@test.cl`, password_hash: 'x', created_at: now });
+  }
+  clientsRepository.insert(client1);
+  clientsRepository.insert(client2);
 
-  // Consulta simulada para user1
-  const user1Clients = db.clients.filter(c => c.user_id === user1Id);
+  const user1Clients = clientsRepository.listByUser(user1Id);
   assert.ok(user1Clients.some(c => c.id === client1.id));
   assert.ok(!user1Clients.some(c => c.id === client2.id));
+  assert.strictEqual(clientsRepository.findForUser(client2.id, user1Id), undefined);
 });
 
 // 8. Cálculo de Retoques según Intervalo
@@ -109,6 +106,14 @@ test('Cálculo de Retoque: Fecha exacta sumando días recomendados', () => {
   next.setUTCDate(next.getUTCDate() + interval);
   const nextDateStr = next.toISOString().split('T')[0];
   assert.strictEqual(nextDateStr, '2026-11-09');
+  assert.strictEqual(calculateNextDate(startDate, interval), '2026-11-09');
+  assert.strictEqual(calculateNextDate('2026-12-20', 20), '2027-01-09');
+  assert.strictEqual(daysBetween('2026-10-10', '2026-11-09'), 30);
+});
+
+test('Fecha Santiago: usa America/Santiago y no la fecha UTC', () => {
+  // 02:00 UTC del 10/11 sigue siendo 9/11 en Chile (UTC-3 en horario de verano).
+  assert.strictEqual(getSantiagoDateString(new Date('2026-11-10T02:00:00Z')), '2026-11-09');
 });
 
 // 9. Módulo Re-engagement: Detección de clientas inactivas (>90 días)
@@ -135,10 +140,3 @@ test('Licencia y Pagos: Extensión correcta de días y prevención de duplicados
   assert.strictEqual(diffDays, 90);
 });
 
-console.log(`\n---------------------------------------`);
-console.log(`Resultados de pruebas: ${passed} aprobadas, ${failed} fallidas.`);
-if (failed > 0) {
-  process.exit(1);
-} else {
-  console.log('🎉 Todas las pruebas pasaron satisfactoriamente.\n');
-}

@@ -1,5 +1,32 @@
 # CHANGELOG.md — Registro de Versiones de SalonTrack
 
+## [2.0.0-alpha.1] - 2026-11-09 — Roadmap 2.0, Fases 0 y 1
+
+### Añadido
+- Auditoría técnica v1 y brecha con el roadmap 2.0 (`docs/FASE0_AUDITORIA.md`).
+- Persistencia SQLite (`better-sqlite3`) con migraciones versionadas y verificadas por checksum, claves foráneas, índices, restricciones CHECK y WAL.
+- Capa de repositorios y rutas separadas por dominio; `createApp()` reutilizable en pruebas.
+- Importación idempotente del JSON v1 con respaldo previo y reporte de verificación (`legacy_imports`).
+- Comandos `db:migrate`, `db:seed`, `db:reset`, `db:backup`, `db:restore`, `db:import-json`.
+- Adaptadores de proveedores (pagos, email, WhatsApp) con implementaciones locales; registro de envíos en `notification_delivery_logs`.
+- Auditoría de operaciones críticas (`audit_logs`), manejo centralizado de errores, validación de entrada y rate limiting en autenticación.
+- 35 pruebas unitarias y de integración.
+
+### Cambiado
+- El historial de atenciones del CRM se almacena en `client_service_history` y los pagos de licencias en `subscription_payments` (las rutas `/api/*` mantienen su contrato).
+- El registro con correo duplicado responde 409.
+- El checkout local se identifica como `mode: "local_simulation"`.
+
+### Seguridad
+- `reset-password` exige un token de un solo uso (hasheado, 30 min) enviado por el proveedor de email; `forgot-password` ya no revela si el correo existe.
+- En producción el servidor exige `JWT_SECRET` robusto.
+- `activate-license` solo funciona con el proveedor de pagos local.
+
+### Corregido
+- `npm install` fallaba por conflicto de dependencias con esbuild.
+- El modal de autenticación no cambiaba de modo al reabrirse.
+
+
 ## [1.0.0] - 2026-11-08
 
 ### Añadido

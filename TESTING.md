@@ -19,38 +19,12 @@ La suite de pruebas automatizadas de SalonTrack valida los aspectos críticos de
 
 ## 2. Ejecución de Pruebas
 
-Para correr todas las pruebas automatizadas:
-
 ```bash
-npm test
-```
-
-Salida esperada:
-```
-🧪 Iniciando Suite de Pruebas Automatizadas de SalonTrack Chile...
-
-  ✅ [PASS] Formato CLP: Enteros con separador de miles en punto, sin decimales
-  ✅ [PASS] Formato de Fechas: Estándar chileno DD/MM/AAAA
-  ✅ [PASS] Formato de Teléfono Chileno: +56 9 XXXX XXXX
-  ✅ [PASS] Enlace de WhatsApp: Codificación y número internacional chileno
-  ✅ [PASS] Personalización de plantilla WhatsApp: Reemplaza tags {nombre}, {salon}, {servicio}
-  ✅ [PASS] Autenticación Segura: Hash bcrypt y verificación de contraseñas
-  ✅ [PASS] Aislamiento de Datos (RLS): Un estilista no puede ver datos de otro estilista
-  ✅ [PASS] Cálculo de Retoque: Fecha exacta sumando días recomendados
-  ✅ [PASS] Módulo Re-engagement: Filtra correctamente clientas inactivas hace más de 90 días
-  ✅ [PASS] Licencia y Pagos: Extensión correcta de días y prevención de duplicados
-
----------------------------------------
-Resultados de pruebas: 10 aprobadas, 0 fallidas.
-🎉 Todas las pruebas pasaron satisfactoriamente.
-```
-
----
-
-## 3. Pruebas de Compilación y Tipado
-
-```bash
-npm run lint
+npm test     # node:test vía tsx: tests/unit.test.ts + tests/integration.test.ts
+npm run lint # tsc --noEmit
 npm run build
 ```
-Ambas herramientas validan que no existan errores de sintaxis, tipos incompatibles o módulos faltantes.
+
+Cada archivo de pruebas usa una base SQLite temporal propia (ver `tests/helpers.ts`); nunca toca `data/salontrack.sqlite`.
+
+Las pruebas de integración levantan la API real (`createApp()`) en un puerto aleatorio y cubren: autenticación y recuperación de contraseña, rate limiting, aislamiento entre profesionales, transacciones y cascadas, escrituras concurrentes, idempotencia de licencias, migración JSON v1 (incluida re-ejecución), datos demo, persistencia tras reabrir la base, backup/restore y errores centralizados.

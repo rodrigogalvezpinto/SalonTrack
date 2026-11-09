@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# SQLite local (datos reales del usuario) y respaldos
+data/*.sqlite
+data/*.sqlite-*
+data/backups/

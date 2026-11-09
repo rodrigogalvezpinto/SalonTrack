@@ -33,7 +33,17 @@ function MainApp() {
 
   // Modals
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'reset'>('login');
+  const [resetToken, setResetToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get('reset_token');
+    if (token) {
+      setResetToken(token);
+      setAuthModalMode('reset');
+      setAuthModalOpen(true);
+    }
+  }, []);
   
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
   const [checkoutDefaultPlan, setCheckoutDefaultPlan] = useState<string>('pro_quarterly');
@@ -104,8 +114,10 @@ function MainApp() {
         />
 
         <AuthModal
+          key={`${authModalMode}-${authModalOpen}`}
           isOpen={authModalOpen}
           initialMode={authModalMode}
+          resetToken={resetToken}
           onClose={() => setAuthModalOpen(false)}
         />
 
