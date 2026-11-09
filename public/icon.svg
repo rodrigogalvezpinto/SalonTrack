@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#be185d" />
+      <stop offset="50%" stop-color="#ec4899" />
+      <stop offset="100%" stop-color="#8b5cf6" />
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.3" />
+    </filter>
+  </defs>
+
+  <!-- Background rounded squircle -->
+  <rect width="512" height="512" rx="128" fill="url(#bg)" />
+
+  <!-- Inner glow & decorative subtle hair strand curve -->
+  <path d="M 64 360 C 140 220 280 140 448 180" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="24" stroke-linecap="round" />
+  <path d="M 96 420 C 180 320 320 260 448 300" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="16" stroke-linecap="round" />
+
+  <!-- Scissors & Salon Track Symbol -->
+  <g filter="url(#shadow)" transform="translate(100, 100) scale(0.61)">
+    <!-- Scissor blades and beauty comb abstraction -->
+    <path d="M 120 400 L 260 260 L 400 120" stroke="#ffffff" stroke-width="36" stroke-linecap="round" />
+    <path d="M 400 400 L 260 260 L 120 120" stroke="#ffffff" stroke-width="36" stroke-linecap="round" />
+    
+    <!-- Scissor handles -->
+    <circle cx="100" cy="420" r="48" fill="none" stroke="#ffffff" stroke-width="28" />
+    <circle cx="420" cy="420" r="48" fill="none" stroke="#ffffff" stroke-width="28" />
+    
+    <!-- Pivot golden pin with sparkle -->
+    <circle cx="260" cy="260" r="28" fill="url(#gold)" stroke="#ffffff" stroke-width="8" />
+    
+    <!-- Retouch Sparkle / Clock indicator -->
+    <path d="M 260 60 L 275 105 L 320 120 L 275 135 L 260 180 L 245 135 L 200 120 L 245 105 Z" fill="url(#gold)" />
+    <path d="M 380 200 L 390 225 L 415 235 L 390 245 L 380 270 L 370 245 L 345 235 L 370 225 Z" fill="#ffffff" />
+  </g>
+
+  <!-- Brand Subtitle Badge -->
+  <text x="256" y="446" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="42" fill="#ffffff" text-anchor="middle" letter-spacing="4">SALONTRACK</text>
+</svg>
