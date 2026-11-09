@@ -1,5 +1,21 @@
 # ROADMAP.md — Hoja de Ruta de Evolución de SalonTrack
 
+## SalonTrack 2.0 (en curso)
+- [x] Fase 0 — Auditoría y protección de lo existente (`docs/FASE0_AUDITORIA.md`)
+- [x] Fase 1 — Persistencia SQLite y arquitectura
+- [ ] Fase 2 — Usuarios, roles y negocios
+- [ ] Fase 3 — Categorías y servicios
+- [ ] Fase 4 — Agenda y disponibilidad
+- [ ] Fase 5 — Marketplace
+- [ ] Fase 6 — Reservas
+- [ ] Fase 7 — Pagos locales
+- [ ] Fase 8 — Paneles y estadísticas
+- [ ] Fase 9 — Notificaciones y reputación
+- [ ] Fase 10 — Suscripciones y monetización
+- [ ] Fase 11 — Calidad y estabilización
+
+## Ideas previas (v1.x)
+
 ## Versión 1.1 (Corto Plazo — Próximas 4 semanas)
 - [ ] **WhatsApp Business Cloud API (Opcional):** Posibilidad de conectar la API de Meta para enviar mensajes con botones interactivos cuando el volumen del salón lo justifique.
 - [ ] **Galería Fotográfica de Resultados:** Almacenamiento de fotos antes/después asociadas a cada visita para apreciar la evolución del color.

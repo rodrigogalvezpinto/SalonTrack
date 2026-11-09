@@ -32,7 +32,7 @@ RESEND_API_KEY="re_..."
 RESEND_FROM_EMAIL="SalonTrack Chile <notificaciones@salontrack.cl>"
 
 # Ruta de almacenamiento
-DATABASE_FILE="./data/salontrack.json"
+DATABASE_FILE="./data/salontrack.sqlite"
 ```
 
 ---

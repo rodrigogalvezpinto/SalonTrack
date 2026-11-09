@@ -33,13 +33,25 @@ function MainApp() {
 
   // Modals
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'reset'>('login');
+  const [resetToken, setResetToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get('reset_token');
+    if (token) {
+      setResetToken(token);
+      setAuthModalMode('reset');
+      setAuthModalOpen(true);
+    }
+  }, []);
   
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
   const [checkoutDefaultPlan, setCheckoutDefaultPlan] = useState<string>('pro_quarterly');
 
   const [newClientModalOpen, setNewClientModalOpen] = useState(false);
   const [newServiceModalOpen, setNewServiceModalOpen] = useState(false);
+  const [dataVersion, setDataVersion] = useState(0);
+  const bumpDataVersion = () => setDataVersion(v => v + 1);
   const [serviceTargetClient, setServiceTargetClient] = useState<Client | null>(null);
 
   const [whatsAppModalOpen, setWhatsAppModalOpen] = useState(false);
@@ -104,8 +116,10 @@ function MainApp() {
         />
 
         <AuthModal
+          key={`${authModalMode}-${authModalOpen}`}
           isOpen={authModalOpen}
           initialMode={authModalMode}
+          resetToken={resetToken}
           onClose={() => setAuthModalOpen(false)}
         />
 
@@ -175,6 +189,7 @@ function MainApp() {
           {currentView === 'client_detail' && selectedClientId && (
             <ClientDetailView
               clientId={selectedClientId}
+              refreshKey={dataVersion}
               onBack={() => {
                 setSelectedClientId(null);
                 setCurrentView('clients');
@@ -236,13 +251,14 @@ function MainApp() {
         client={whatsAppTargetClient}
         service={whatsAppTargetService}
         onClose={() => setWhatsAppModalOpen(false)}
+        onContactLogged={bumpDataVersion}
       />
 
       <NewClientModal
         isOpen={newClientModalOpen}
         onClose={() => setNewClientModalOpen(false)}
         onClientCreated={() => {
-          // Trigger refresh by updating view or notifying child views
+          bumpDataVersion();
           setCurrentView('clients');
         }}
       />
@@ -251,11 +267,7 @@ function MainApp() {
         isOpen={newServiceModalOpen}
         client={serviceTargetClient}
         onClose={() => setNewServiceModalOpen(false)}
-        onServiceCreated={() => {
-          if (selectedClientId) {
-            // will auto reload in ClientDetailView
-          }
-        }}
+        onServiceCreated={bumpDataVersion}
       />
 
       <CheckoutModal

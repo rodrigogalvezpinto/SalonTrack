@@ -22,7 +22,7 @@ Muchas peluqueras en Chile gestionan sus clientas en libretas de papel, notas de
 - **Zona Horaria:** `America/Santiago` con soporte para cambios de horario de verano.
 - **Formato de Fechas:** `DD/MM/AAAA`.
 - **Formato de Teléfono:** Prefijo internacional de Chile `+56 9 XXXX XXXX`.
-- **Pasarela de Pagos:** Integración con **Mercado Pago Chile** (Webpay Plus, Tarjetas de Débito Redcompra y Crédito en cuotas).
+- **Pasarela de Pagos:** checkout local simulado; integración con **Mercado Pago Chile** diseñada como adaptador intercambiable (no activa por defecto).
 
 ---
 
@@ -65,29 +65,57 @@ Muchas peluqueras en Chile gestionan sus clientas en libretas de papel, notas de
 
 - **Frontend:** React 19, TypeScript, Tailwind CSS, Lucide React, Motion.
 - **Backend:** Express, Node.js 22, TypeScript (tsx).
-- **Persistencia:** Almacenamiento transaccional atómico persistente con esquemas tipados (`data/salontrack.json`), preparado para migración a PostgreSQL / Supabase.
+- **Persistencia:** SQLite (`better-sqlite3`) con migraciones versionadas, claves foráneas, transacciones y capa de repositorios, preparado para migrar a PostgreSQL. Los datos del JSON v1 se importan automáticamente.
 - **Seguridad:** JWT (JSON Web Tokens), contraseñas con hashing `bcryptjs`, aislamiento multi-tenant RLS por `user_id`.
-- **Pagos:** Mercado Pago Chile API & Webhooks con verificación de estado e idempotencia.
+- **Pagos:** proveedor local simulado por defecto (`PAYMENT_PROVIDER=local`); adaptador de Mercado Pago preparado para una etapa posterior.
 
 ---
 
 ## 🏃‍♂️ Puesta en Marcha (Desarrollo Local)
 
+Requisitos: Node.js 22 o superior y npm. No se necesitan credenciales externas.
+
 ```bash
-# 1. Instalar dependencias
-npm install
-
-# 2. Configurar variables de entorno
-cp .env.example .env
-
-# 3. Ejecutar pruebas automatizadas
-npm test
-
-# 4. Iniciar servidor full-stack unificado (puerto 3000)
-npm run dev
+npm install          # instala dependencias (incluye SQLite embebido)
+cp .env.example .env # opcional: valores locales por defecto
+npm run dev          # servidor full-stack en http://localhost:3000
 ```
 
-Abre tu navegador en `http://localhost:3000`.
+Al iniciar, el servidor crea `data/salontrack.sqlite`, aplica las migraciones pendientes, importa los datos de `data/salontrack.json` (v1) si existen y, si la base está vacía, carga la cuenta demo.
+
+### Base de datos
+
+| Comando | Descripción |
+|---|---|
+| `npm run db:migrate` | Aplica migraciones pendientes y muestra las aplicadas |
+| `npm run db:seed` | Carga los datos demo (idempotente) |
+| `npm run db:reset` | Elimina y recrea **solo** las cuentas demo (los datos reales no se tocan) |
+| `npm run db:backup [-- destino]` | Respaldo consistente en caliente en `data/backups/` |
+| `npm run db:restore -- <archivo>` | Restaura un respaldo (con el servidor detenido); antes guarda una copia `pre-restore-*` |
+| `npm run db:import-json [-- archivo] [--force]` | Importa el JSON v1 de forma idempotente |
+
+### Cuenta de prueba (solo desarrollo local)
+
+- Profesional: `contacto@valeriaestudio.cl` / `Salon1234`
+
+### Recuperación de contraseña en local
+
+El correo se simula: el enlace con el token aparece en la consola del servidor y queda registrado en la tabla `notification_delivery_logs`.
+
+### Estructura
+
+```
+server.ts               arranque (Vite en desarrollo, estáticos en producción)
+server/app.ts           app Express de la API (usada también por las pruebas)
+server/config.ts        configuración desde variables de entorno
+server/db/              conexión SQLite, migraciones, importación JSON v1, seed, backup
+server/repositories/    acceso a datos (SQL parametrizado)
+server/routes/          endpoints REST por dominio
+server/providers/       adaptadores de pagos, email y WhatsApp (local / reales)
+server/lib/             errores, validación, fechas Chile, rate limit, auditoría
+scripts/db.ts           comandos db:*
+docs/                   auditoría y documentación de fases
+```
 
 ---
 
@@ -99,7 +127,13 @@ Para ejecutar la suite de pruebas unitarias y de integración:
 npm test
 ```
 
-Verifica:
+Pruebas unitarias y de integración (`node:test`) contra una base SQLite temporal. Verifica, entre otros:
+- Registro, correo duplicado, login, contraseña incorrecta, tokens inválidos y rate limiting.
+- Recuperación de contraseña con token de un solo uso.
+- Aislamiento entre profesionales (lectura, edición, borrado y escritura sobre clientas ajenas).
+- Transacciones, borrado en cascada y escrituras concurrentes.
+- Migración JSON v1 → SQLite sin duplicados al re-ejecutarse.
+- Persistencia tras reabrir la base, respaldo y restauración.
 - Formato de moneda chilena CLP ($45.000).
 - Fechas chilenas DD/MM/AAAA y zonas horarias.
 - Formato de teléfono chileno (+56 9).
@@ -107,4 +141,4 @@ Verifica:
 - Hashing y autenticación bcrypt.
 - Aislamiento multi-tenant entre profesionales.
 - Cálculo de días de inactividad para Re-engagement.
-- Idempotencia en la activación de licencias de Mercado Pago.
+- Idempotencia en la activación de licencias (sin pagos duplicados).

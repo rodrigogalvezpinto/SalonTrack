@@ -30,7 +30,7 @@ SalonTrack está construido como una aplicación full-stack moderna y desacoplad
                                │
 ┌──────────────────────────────▼──────────────────────────────┐
 │              Capa de Persistencia & Seguridad                │
-│  - Motor Atómico con Escritura Transaccional (.tmp -> rename)│
+│  - SQLite (WAL) + migraciones versionadas + repositorios    │
 │  - Esquema Relacional Tipado (users, profiles, services...) │
 │  - Hashing Bcrypt + Firma JWT 256-bit                       │
 │  - Aislamiento Multi-Tenant (User ID verificado en JWT)     │
@@ -45,13 +45,13 @@ Ninguna consulta a la base de datos confía en un `user_id` enviado en el cuerpo
 - Inyecta `req.userId` en el objeto de la petición.
 - Todos los métodos de consulta filtran obligatoriamente por `req.userId`:
   ```typescript
-  const userClients = db.clients.filter(c => c.user_id === req.userId);
+  clientsRepository.listByUser(req.userId) // SELECT ... WHERE user_id = ?
   ```
 
 ## 3. Flujo Comercial con Mercado Pago Chile
 
 1. **Creación de Preferencia:** El frontend solicita crear una orden para el plan seleccionado ($9.990, $14.990 o $19.990 CLP).
-2. **Backend Gateway:** El backend genera la preferencia en Mercado Pago con `notification_url` hacia `/api/payments/webhook`.
+2. **Backend Gateway:** El backend crea el checkout mediante el adaptador configurado en `PAYMENT_PROVIDER` (`local` simulado por defecto; `mercadopago` para la integración real).
 3. **Webhook de Confirmación:**
    - Mercado Pago notifica el ID del pago.
    - El backend consulta el estado real en la API de Mercado Pago.

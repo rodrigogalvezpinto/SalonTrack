@@ -10,7 +10,7 @@ Authorization: Bearer <TOKEN_JWT>
 ## 1. Autenticación (`/api/auth`)
 
 ### `POST /api/auth/register`
-Registra una nueva cuenta profesional.
+Registra una nueva cuenta profesional. Responde **409** si el correo ya existe.
 - **Body:** `{ email, password, full_name, business_name, phone }`
 - **Respuesta (201):** `{ message, token, user: { id, email, profile, subscription } }`
 
@@ -24,6 +24,14 @@ Obtiene los datos del usuario en sesión, perfil y días de licencia activa.
 
 ### `POST /api/auth/forgot-password`
 Solicitud de recuperación de acceso.
+- **Body:** `{ email }`
+- **Respuesta (200):** siempre el mismo mensaje genérico (no revela si el correo existe). Si existe, se envía un enlace `/?reset_token=…` mediante el proveedor de email (en local: consola + `notification_delivery_logs`).
+
+### `POST /api/auth/reset-password`
+- **Body:** `{ token, new_password }` — el token es de un solo uso y expira en 30 minutos.
+
+### Errores
+Todas las respuestas de error tienen la forma `{ error: string, code: string }`. Códigos HTTP: 400 validación, 401 no autenticado, 403 sin permiso, 404 no encontrado (también para recursos de otro usuario), 409 conflicto/duplicado, 429 demasiados intentos, 500 error interno.
 
 ---
 
@@ -131,13 +139,13 @@ Envía o simula una notificación push de verificación.
 ## 7. Pagos y Mercado Pago (`/api/payments`)
 
 ### `POST /api/payments/create-preference`
-Crea una preferencia de pago en Mercado Pago Chile para planes en CLP:
+Crea un checkout con el proveedor configurado (`PAYMENT_PROVIDER`). Con `local` (por defecto) responde `mode: "local_simulation"` y no hay cobro real; con `mercadopago` responde `mode: "mercadopago_live"` e `init_point`. Planes en CLP (el precio siempre se toma del backend):
 - `basic_monthly` ($9.990 CLP)
 - `pro_quarterly` ($14.990 CLP)
 - `annual` ($19.990 CLP)
 
 ### `POST /api/payments/webhook`
-Recibe notificaciones de pago de Mercado Pago, verifica el estado real del cobro en el backend y extiende la licencia automáticamente de forma idempotente.
+Recibe notificaciones de Mercado Pago de forma idempotente. La verificación del cobro contra la API de Mercado Pago se implementará al activar la integración real.
 
 ### `POST /api/subscriptions/activate-license`
-Endpoint seguro para activación y extensión de licencias.
+Confirma el pago simulado y extiende la licencia. Solo disponible con `PAYMENT_PROVIDER=local` (403 en otro caso). Idempotente por `payment_ref`: repetir la referencia no duplica pagos; usar una referencia de otro usuario responde 409.

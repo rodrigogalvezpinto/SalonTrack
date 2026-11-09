@@ -15,7 +15,7 @@
 
 - SalonTrack **nunca** recibe, transmite ni almacena datos de tarjetas de crédito o débito.
 - Todo el procesamiento bancario y la captura de credenciales financieras ocurre dentro del entorno certificado PCI-DSS de Mercado Pago Chile (Redcompra / Webpay Plus).
-- La activación de licencias comerciales requiere validación desde el backend; nunca se confía en respuestas del lado del cliente.
+- El precio de los planes se toma siempre del backend. En local, la activación de licencias usa un checkout simulado declarado como tal; con un proveedor real la activación desde el cliente está deshabilitada (403).
 
 ## 4. Protección de Datos Personales (Ley 19.628 de Chile)
 
@@ -29,3 +29,16 @@
 
 - Todos los importes monetarios son validados y transformados a enteros en CLP (`Math.round` / `parseInt`).
 - Los números de teléfono se formatean con el código de país chileno (+56) para evitar llamadas o enlaces malformados.
+
+## 6. Autenticación y sesiones
+
+- En producción el servidor no arranca sin un `JWT_SECRET` de al menos 32 caracteres distinto de los valores de ejemplo.
+- La recuperación de contraseña usa tokens aleatorios de un solo uso, almacenados como hash SHA-256 y con expiración de 30 minutos. La respuesta de `forgot-password` no revela si el correo existe.
+- Rate limiting en memoria para registro, login, recuperación y restablecimiento de contraseña.
+- Operaciones críticas (registro, recuperación de contraseña, activación de licencias, importaciones) quedan en `audit_logs`.
+
+## 7. Integridad de datos
+
+- Consultas SQL parametrizadas en la capa de repositorios.
+- Claves foráneas compuestas `(client_id, user_id)` impiden asociar historial o contactos a clientas de otro profesional.
+- Las operaciones de varios pasos se ejecutan en transacciones SQLite.
