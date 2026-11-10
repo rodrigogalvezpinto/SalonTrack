@@ -79,3 +79,14 @@ export function prepareWhatsAppMessage(
 
   return msg;
 }
+
+// Formateo de duración en minutos (e.g. 45 min, 1h 30min)
+export function formatDuration(minutes: number | undefined | null): string {
+  if (!minutes || minutes <= 0) return '0 min';
+  if (minutes < 60) return `${minutes} min`;
+  const hrs = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  if (rem === 0) return `${hrs}h`;
+  return `${hrs}h ${rem}min`;
+}
+

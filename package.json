@@ -9,7 +9,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "tsx tests/run-tests.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "db:migrate": "tsx scripts/db-migrate.ts",
+    "db:seed": "tsx scripts/db-seed.ts",
+    "db:reset": "tsx scripts/db-reset.ts",
+    "db:backup": "tsx scripts/db-backup.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

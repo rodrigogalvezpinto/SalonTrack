@@ -8,6 +8,7 @@ import { WhatsAppModal } from './components/WhatsAppModal';
 import { NewClientModal } from './components/NewClientModal';
 import { NewServiceModal } from './components/NewServiceModal';
 import { CheckoutModal } from './components/CheckoutModal';
+import { DemoAccountsModal } from './components/DemoAccountsModal';
 import { AuthModal } from './views/AuthModal';
 
 import { LandingPage } from './views/LandingPage';
@@ -20,16 +21,25 @@ import { RevenueCalculatorView } from './views/RevenueCalculatorView';
 import { CalendarView } from './views/CalendarView';
 import { SettingsView } from './views/SettingsView';
 
+// SalonTrack 2.0 Views
+import { MarketplaceView } from './views/MarketplaceView';
+import { BusinessProfileView } from './views/BusinessProfileView';
+import { CustomerPortalView } from './views/CustomerPortalView';
+import { BusinessBookingsView } from './views/BusinessBookingsView';
+import { BusinessCatalogView } from './views/BusinessCatalogView';
+import { AdminDashboardView } from './views/AdminDashboardView';
+
 import { Client, Service } from './types';
 import { apiRequest } from './utils/api';
 import { showPushNotification, playNotificationChime } from './utils/notifications';
 
 function MainApp() {
-  const { user, profile, isLoading } = useAuth();
+  const { user, profile, isCustomer, isPlatformAdmin, isBusinessOwner, isStaff, business, isLoading } = useAuth();
 
-  // Navigation
+  // Navigation state
   const [currentView, setCurrentView] = useState<string>('dashboard');
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const [selectedBusinessSlug, setSelectedBusinessSlug] = useState<string>('valeria-henriquez-studio');
 
   // Modals
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -38,6 +48,8 @@ function MainApp() {
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
   const [checkoutDefaultPlan, setCheckoutDefaultPlan] = useState<string>('pro_quarterly');
 
+  const [demoAccountsModalOpen, setDemoAccountsModalOpen] = useState(false);
+
   const [newClientModalOpen, setNewClientModalOpen] = useState(false);
   const [newServiceModalOpen, setNewServiceModalOpen] = useState(false);
   const [serviceTargetClient, setServiceTargetClient] = useState<Client | null>(null);
@@ -45,6 +57,18 @@ function MainApp() {
   const [whatsAppModalOpen, setWhatsAppModalOpen] = useState(false);
   const [whatsAppTargetClient, setWhatsAppTargetClient] = useState<Client | null>(null);
   const [whatsAppTargetService, setWhatsAppTargetService] = useState<Service | null>(null);
+
+  // Set default view depending on user role once authenticated
+  useEffect(() => {
+    if (!user) return;
+    if (isCustomer) {
+      setCurrentView('marketplace');
+    } else if (isPlatformAdmin) {
+      setCurrentView('admin_dashboard');
+    } else {
+      setCurrentView('dashboard');
+    }
+  }, [user?.id, isCustomer, isPlatformAdmin]);
 
   // Periodic notification check for Santiago timezone
   useEffect(() => {
@@ -67,9 +91,7 @@ function MainApp() {
       }
     };
 
-    // Check on login
     checkUpcomingRetouches();
-    // Check every 15 minutes
     const interval = setInterval(checkUpcomingRetouches, 15 * 60 * 1000);
     return () => clearInterval(interval);
   }, [user]);
@@ -81,7 +103,7 @@ function MainApp() {
           <span className="font-black text-xl">ST</span>
         </div>
         <p className="text-xs font-bold text-slate-500 mt-4 tracking-wide uppercase">
-          Iniciando SalonTrack Chile...
+          Iniciando SalonTrack Chile 2.0...
         </p>
       </div>
     );
@@ -131,6 +153,22 @@ function MainApp() {
     setCurrentView('client_detail');
   };
 
+  const handleSelectBusinessProfile = (slug: string) => {
+    setSelectedBusinessSlug(slug);
+    setCurrentView(`business_profile:${slug}`);
+  };
+
+  const handleSelectView = (view: string) => {
+    if (view.startsWith('business_profile:')) {
+      const slug = view.split(':')[1];
+      setSelectedBusinessSlug(slug || (business?.slug || 'valeria-henriquez-studio'));
+      setCurrentView(view);
+      return;
+    }
+    setSelectedClientId(null);
+    setCurrentView(view);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col antialiased">
       {/* Top Header */}
@@ -140,6 +178,8 @@ function MainApp() {
           setCheckoutDefaultPlan('pro_quarterly');
           setCheckoutModalOpen(true);
         }}
+        onOpenDemoAccounts={() => setDemoAccountsModalOpen(true)}
+        onNavigate={handleSelectView}
       />
 
       {/* Main Body */}
@@ -147,14 +187,50 @@ function MainApp() {
         {/* Desktop Sidebar */}
         <Sidebar
           currentView={currentView}
-          onSelectView={(view) => {
-            setSelectedClientId(null);
-            setCurrentView(view);
-          }}
+          onSelectView={handleSelectView}
         />
 
         {/* View Port Content */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 min-w-0">
+          {/* Marketplace View */}
+          {currentView === 'marketplace' && (
+            <MarketplaceView
+              onSelectBusiness={handleSelectBusinessProfile}
+            />
+          )}
+
+          {/* Business Public Profile View */}
+          {currentView.startsWith('business_profile') && (
+            <BusinessProfileView
+              businessSlug={selectedBusinessSlug}
+              onBack={() => setCurrentView('marketplace')}
+            />
+          )}
+
+          {/* Customer Portal "Mi Cuenta" */}
+          {currentView === 'customer_portal' && (
+            <CustomerPortalView
+              onNavigateToBusiness={handleSelectBusinessProfile}
+              onExploreMarketplace={() => setCurrentView('marketplace')}
+            />
+          )}
+
+          {/* Business Bookings Manager */}
+          {currentView === 'business_bookings' && (
+            <BusinessBookingsView />
+          )}
+
+          {/* Business Catalog, Staff & Hours */}
+          {currentView === 'business_catalog' && (
+            <BusinessCatalogView />
+          )}
+
+          {/* Platform Admin Panel */}
+          {currentView === 'admin_dashboard' && (
+            <AdminDashboardView />
+          )}
+
+          {/* Core SalonTrack CRM Views (Preserved) */}
           {currentView === 'dashboard' && (
             <DashboardView
               onOpenWhatsApp={handleOpenWhatsApp}
@@ -224,13 +300,15 @@ function MainApp() {
       {/* Mobile Bottom Navigation Bar */}
       <BottomNav
         currentView={currentView}
-        onSelectView={(view) => {
-          setSelectedClientId(null);
-          setCurrentView(view);
-        }}
+        onSelectView={handleSelectView}
       />
 
       {/* Modals */}
+      <DemoAccountsModal
+        isOpen={demoAccountsModalOpen}
+        onClose={() => setDemoAccountsModalOpen(false)}
+      />
+
       <WhatsAppModal
         isOpen={whatsAppModalOpen}
         client={whatsAppTargetClient}
@@ -242,7 +320,6 @@ function MainApp() {
         isOpen={newClientModalOpen}
         onClose={() => setNewClientModalOpen(false)}
         onClientCreated={() => {
-          // Trigger refresh by updating view or notifying child views
           setCurrentView('clients');
         }}
       />
@@ -252,9 +329,7 @@ function MainApp() {
         client={serviceTargetClient}
         onClose={() => setNewServiceModalOpen(false)}
         onServiceCreated={() => {
-          if (selectedClientId) {
-            // will auto reload in ClientDetailView
-          }
+          // auto reloaded in ClientDetailView
         }}
       />
 

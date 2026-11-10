@@ -13,11 +13,12 @@ async function startServer() {
   // Parse command line arguments if provided (e.g. --port 3000 --host 0.0.0.0)
   const portIndex = process.argv.indexOf('--port');
   const portArg = portIndex !== -1 ? process.argv[portIndex + 1] : undefined;
-  const PORT = parseInt(process.env.PORT || portArg || '3000', 10);
+  // Always prioritize command line --port argument and enforce port 3000 over system 8080
+  const PORT = parseInt(portArg || (process.env.PORT && process.env.PORT !== '8080' ? process.env.PORT : '3000'), 10);
 
   const hostIndex = process.argv.indexOf('--host');
   const hostArg = hostIndex !== -1 ? process.argv[hostIndex + 1] : undefined;
-  const HOST = process.env.HOST || hostArg || '0.0.0.0';
+  const HOST = hostArg || process.env.HOST || '0.0.0.0';
 
   const isProd = process.env.NODE_ENV === 'production';
 

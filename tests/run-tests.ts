@@ -2,8 +2,15 @@ import assert from 'node:assert';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
 import { hashPassword, verifyPassword, generateToken } from '../server/auth.js';
 import { getDb, saveDb, generateId, User, Profile, Client, Service } from '../server/db.js';
+import { getSqliteDb } from '../server/sqlite.js';
+import { isSlotAvailable } from '../server/availability.js';
+import { localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
+import { seedDemoDataIfEmpty } from '../server/seedData.js';
 
 console.log('🧪 Iniciando Suite de Pruebas Automatizadas de SalonTrack Chile...\n');
+
+// Seed test environment with Chilean demo data & categories
+seedDemoDataIfEmpty();
 
 let passed = 0;
 let failed = 0;
@@ -135,6 +142,73 @@ test('Licencia y Pagos: Extensión correcta de días y prevención de duplicados
   assert.strictEqual(diffDays, 90);
 });
 
+// 11. SQLite Persistencia y Modelo Relacional de Negocios
+test('SQLite Persistencia: Consultas sobre tablas relacionales de negocios y catálogo', () => {
+  const sqlite = getSqliteDb();
+  const categories = sqlite.prepare('SELECT COUNT(*) as count FROM categories').get() as { count: number };
+  assert.ok(categories.count >= 15, 'Debe contener al menos 15 categorías');
+
+  const businesses = sqlite.prepare("SELECT COUNT(*) as count FROM businesses WHERE status = 'PUBLISHED'").get() as { count: number };
+  assert.ok(businesses.count >= 1, 'Debe haber negocios publicados');
+});
+
+
+// 12. Motor de Disponibilidad: Prevención de Colisiones de Horarios
+test('Motor de Disponibilidad: Detección y bloqueo de solapamiento en reservas', () => {
+  const staffId = 'stf_valeria';
+  const bizId = 'biz_valeria_studio';
+  const testDate = '2026-12-15';
+  
+  const slotFree = isSlotAvailable({
+    businessId: bizId,
+    staffId,
+    serviceId: 'srv_val_corte',
+    dateStr: testDate,
+    startTime: '10:00',
+    durationMinutes: 45
+  });
+  assert.strictEqual(slotFree, true);
+
+  const sqlite = getSqliteDb();
+  const testBkId = 'bk_test_collision_' + Date.now();
+  sqlite.prepare(`
+    INSERT INTO bookings (id, code, business_id, staff_id, service_id, booking_date, start_time, end_time, duration_minutes, amount_clp, status, client_name, client_phone, created_at, updated_at)
+    VALUES (?, 'TEST-COL', ?, ?, 'srv_val_corte', ?, '10:00', '10:45', 45, 25000, 'CONFIRMED', 'Test Collision', '+56900000000', datetime('now'), datetime('now'))
+  `).run(testBkId, bizId, staffId, testDate);
+
+  const collision = isSlotAvailable({
+    businessId: bizId,
+    staffId,
+    serviceId: 'srv_val_corte',
+    dateStr: testDate,
+    startTime: '10:15',
+    durationMinutes: 45
+  });
+  assert.strictEqual(collision, false, 'Debe detectar la colisión de horario');
+
+  sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(testBkId);
+});
+
+// 13. Geolocalización Haversine en Chile
+test('Geolocalización: Cálculo de distancia en km entre comunas de Santiago', () => {
+  const providencia = { lat: -33.4243, lon: -70.6125 };
+  const renca = { lat: -33.4072, lon: -70.7188 };
+  const dist = localGeolocationProvider.calculateDistanceKm(providencia.lat, providencia.lon, renca.lat, renca.lon);
+  assert.ok(dist >= 8 && dist <= 14, `Distancia esperada entre 8 y 14 km, obtenida: ${dist} km`);
+});
+
+// 14. Adaptador Local de Pagos: Generación de Checkout Simulado
+test('Proveedor Local de Pagos: Generación de checkout sin claves externas', async () => {
+  const result = await localPaymentProvider.createPayment({
+    amountClp: 45000,
+    description: 'Reserva Test Tintura'
+  });
+  assert.ok(result.paymentId.startsWith('SIM_PAY_'));
+  assert.strictEqual(result.provider, 'local');
+  assert.strictEqual(result.status, 'pending');
+  assert.ok(result.checkoutUrl?.includes('SIM_PAY_'));
+});
+
 console.log(`\n---------------------------------------`);
 console.log(`Resultados de pruebas: ${passed} aprobadas, ${failed} fallidas.`);
 if (failed > 0) {
@@ -142,3 +216,4 @@ if (failed > 0) {
 } else {
   console.log('🎉 Todas las pruebas pasaron satisfactoriamente.\n');
 }
+
