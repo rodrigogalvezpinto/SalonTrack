@@ -9,7 +9,16 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = parseInt(process.env.PORT || '3000', 10);
+  
+  // Parse command line arguments if provided (e.g. --port 3000 --host 0.0.0.0)
+  const portIndex = process.argv.indexOf('--port');
+  const portArg = portIndex !== -1 ? process.argv[portIndex + 1] : undefined;
+  const PORT = parseInt(process.env.PORT || portArg || '3000', 10);
+
+  const hostIndex = process.argv.indexOf('--host');
+  const hostArg = hostIndex !== -1 ? process.argv[hostIndex + 1] : undefined;
+  const HOST = process.env.HOST || hostArg || '0.0.0.0';
+
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
@@ -27,7 +36,7 @@ async function startServer() {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        host: '0.0.0.0',
+        host: HOST,
         port: PORT,
       },
       appType: 'spa',
@@ -43,11 +52,31 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✨ SalonTrack Server running on http://0.0.0.0:${PORT} [${isProd ? 'PRODUCTION' : 'DEVELOPMENT'}]`);
+  // Error handling middleware
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('Server error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  });
+
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`✨ SalonTrack Server running on http://${HOST}:${PORT} [${isProd ? 'PRODUCTION' : 'DEVELOPMENT'}]`);
     console.log(`🇨🇱 Región: Chile | Zona Horaria: America/Santiago | Moneda: CLP ($)`);
   });
+
+  process.on('SIGTERM', () => {
+    server.close();
+  });
 }
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 startServer().catch(err => {
   console.error('Failed to start server:', err);
