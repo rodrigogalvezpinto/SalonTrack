@@ -53,6 +53,15 @@ function initMigrations(db: DatabaseSync) {
       new Date().toISOString()
     );
   }
+
+  if (!appliedVersions.has(3)) {
+    db.exec('ALTER TABLE businesses ADD COLUMN verified INTEGER NOT NULL DEFAULT 0');
+    db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
+      3,
+      'business_verification',
+      new Date().toISOString()
+    );
+  }
 }
 
 function applyMigrationV1(db: DatabaseSync) {

@@ -71,6 +71,24 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
   }
 }
 
+export function optionalAuth(req: AuthRequest, _res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) return next();
+
+  try {
+    const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET) as { userId: string; email: string; roles?: string[] };
+    const userRow = getSqliteDb().prepare('SELECT id, email, is_active FROM users WHERE id = ?').get(decoded.userId) as any;
+    if (userRow?.is_active) {
+      req.userId = userRow.id;
+      req.userEmail = userRow.email;
+      req.userRoles = decoded.roles || getUserRoles(userRow.id);
+    }
+  } catch {
+    // Invalid or expired optional credentials are treated as an anonymous request.
+  }
+  return next();
+}
+
 export function requireRole(...allowedRoles: string[]) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.userId) {

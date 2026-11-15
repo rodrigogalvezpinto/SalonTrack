@@ -533,6 +533,70 @@ async function runIntegrationTests() {
         name: 'Servicio actualizado',
       })).status, 200);
       assert.strictEqual((await requestJson(`/api/business/services/${createdService.service_id}`, 'DELETE', owner.token)).status, 200);
+
+      for (const token of outsiders) {
+        await assertNotFound(await getAs(`/api/bookings/business?business_id=${targetBusinessId}`, token));
+        await assertNotFound(await requestJson(`/api/bookings/${bookings.reject}/status`, 'PUT', token, { status: 'CONFIRMED' }));
+      }
+
+      const originalBookingMode = (sqlite.prepare('SELECT booking_mode FROM businesses WHERE id = ?').get(targetBusinessId) as any).booking_mode;
+      sqlite.prepare("UPDATE businesses SET booking_mode = 'MANUAL' WHERE id = ?").run(targetBusinessId);
+      const customerBookingResponse = await postAs('/api/bookings', bookingCustomer.token, {
+        business_id: targetBusinessId,
+        service_id: 'srv_val_corte',
+        staff_id: 'stf_valeria',
+        booking_date: '2099-01-02',
+        start_time: '11:00',
+        client_name: 'Cliente autenticada',
+        client_phone: '+56912345002',
+        payment_method: 'presential',
+      });
+      sqlite.prepare('UPDATE businesses SET booking_mode = ? WHERE id = ?').run(originalBookingMode, targetBusinessId);
+      assert.strictEqual(customerBookingResponse.status, 201);
+      const customerBooking = (await customerBookingResponse.json() as any).booking;
+      const storedCustomerBooking = sqlite.prepare('SELECT customer_user_id FROM bookings WHERE id = ?').get(customerBooking.id) as any;
+      assert.strictEqual(storedCustomerBooking.customer_user_id, bookingCustomer.user.id);
+
+      const myBookings = await getAs('/api/bookings/my', bookingCustomer.token);
+      assert.ok(((await myBookings.json() as any).bookings as any[]).some(b => b.id === customerBooking.id));
+      const businessBookings = await getAs('/api/bookings/business', owner.token);
+      assert.ok(((await businessBookings.json() as any).bookings as any[]).some(b => b.id === customerBooking.id));
+      const invalidStatus = await requestJson(`/api/bookings/${customerBooking.id}/status`, 'PUT', owner.token, { status: 'NO_SHOW' });
+      assert.strictEqual(invalidStatus.status, 400);
+      assert.strictEqual((await postAs(`/api/bookings/${customerBooking.id}/confirm`, owner.token)).status, 200);
+      assert.strictEqual((await requestJson(`/api/bookings/${customerBooking.id}/status`, 'PUT', owner.token, { status: 'COMPLETED' })).status, 200);
+
+      const catalogServiceResponse = await postAs('/api/business/services', owner.token, {
+        name: 'Servicio desde catálogo',
+        price_clp: 21000,
+        duration_min: 60,
+        buffer_min: 10,
+        is_active: true,
+      });
+      assert.strictEqual(catalogServiceResponse.status, 201);
+      const catalogService = await catalogServiceResponse.json() as { service_id: string };
+      const catalogStaffResponse = await postAs('/api/business/staff', owner.token, {
+        name: 'Profesional desde catálogo',
+        email: 'catalog-staff@example.test',
+        role_title: 'Colorista',
+      });
+      assert.strictEqual(catalogStaffResponse.status, 201);
+      const catalogStaff = await catalogStaffResponse.json() as { staff_id: string };
+      const businessMine = await getAs('/api/business/my', owner.token);
+      const businessMineBody = await businessMine.json() as any;
+      assert.ok(businessMineBody.services.some((s: any) => s.id === catalogService.service_id));
+      assert.ok(businessMineBody.staff.some((s: any) => s.id === catalogStaff.staff_id));
+      assert.ok(Array.isArray(businessMineBody.hours));
+      assert.strictEqual((await requestJson(`/api/business/staff/${catalogStaff.staff_id}`, 'DELETE', owner.token)).status, 200);
+      assert.strictEqual((sqlite.prepare('SELECT is_active FROM staff WHERE id = ?').get(catalogStaff.staff_id) as any).is_active, 0);
+
+      const metricsResponse = await getAs('/api/admin/metrics', platformAdmin.token);
+      assert.strictEqual(metricsResponse.status, 200);
+      const metrics = (await metricsResponse.json() as any).stats;
+      assert.strictEqual(metrics.totalUsers, (sqlite.prepare('SELECT COUNT(*) AS count FROM users').get() as any).count);
+      assert.strictEqual(metrics.totalBusinesses, (sqlite.prepare('SELECT COUNT(*) AS count FROM businesses').get() as any).count);
+      assert.strictEqual(metrics.totalBookings, (sqlite.prepare('SELECT COUNT(*) AS count FROM bookings').get() as any).count);
+      assert.strictEqual(metrics.totalVolumeCLP, (sqlite.prepare('SELECT COALESCE(SUM(amount_clp), 0) AS total FROM bookings').get() as any).total);
     });
 
     await integrationTest('Reset de contraseña: rechaza solicitudes sin token', async () => {
