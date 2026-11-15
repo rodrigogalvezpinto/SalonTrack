@@ -1,3 +1,4 @@
+import './setup-env.js';
 import assert from 'node:assert';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
