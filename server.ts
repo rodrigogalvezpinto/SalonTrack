@@ -6,8 +6,18 @@ import { seedDemoDataIfEmpty } from './server/auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const DEVELOPMENT_JWT_SECRET = 'salontrack_dev_secret_chile_2026';
 
 async function startServer() {
+  if (
+    process.env.NODE_ENV === 'production' &&
+    (!process.env.JWT_SECRET ||
+      process.env.JWT_SECRET.length < 32 ||
+      process.env.JWT_SECRET === DEVELOPMENT_JWT_SECRET)
+  ) {
+    throw new Error('Production requires a JWT_SECRET of at least 32 characters that is not the development default.');
+  }
+
   const app = express();
   
   // Parse command line arguments if provided (e.g. --port 3000 --host 0.0.0.0)
