@@ -45,6 +45,10 @@ function MainApp() {
   // Modals
   const [authModalOpen, setAuthModalOpen] = useState(() => Boolean(resetToken));
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'reset'>(() => resetToken ? 'reset' : 'login');
+  const handleCloseAuthModal = () => {
+    setAuthModalOpen(false);
+    setAuthModalMode('login');
+  };
   
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
   const [checkoutDefaultPlan, setCheckoutDefaultPlan] = useState<string>('pro_quarterly');
@@ -129,7 +133,7 @@ function MainApp() {
         <AuthModal
           isOpen={authModalOpen}
           initialMode={authModalMode}
-          onClose={() => setAuthModalOpen(false)}
+          onClose={handleCloseAuthModal}
         />
 
         <OfflineBanner />
@@ -343,7 +347,7 @@ function MainApp() {
       <AuthModal
         isOpen={authModalOpen}
         initialMode={authModalMode}
-        onClose={() => setAuthModalOpen(false)}
+        onClose={handleCloseAuthModal}
       />
 
       <OfflineBanner />
