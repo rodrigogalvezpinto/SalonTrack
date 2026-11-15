@@ -499,7 +499,7 @@ router.put('/profile', requireAuth, (req: AuthRequest, res: Response) => {
 // -------------------------------------------------------------
 // MARKETPLACE & DISCOVERY (Public & Client Search)
 // -------------------------------------------------------------
-router.get('/marketplace/categories', (req, res) => {
+function getCategoriesWithSubcategories() {
   const sqlite = getSqliteDb();
   const categories = sqlite.prepare(`
     SELECT id, name, slug, icon, description, display_order
@@ -520,7 +520,11 @@ router.get('/marketplace/categories', (req, res) => {
     subcategories: subcategories.filter(s => s.category_id === cat.id),
   }));
 
-  return res.json({ categories: enriched });
+  return enriched;
+}
+
+router.get('/marketplace/categories', (_req, res) => {
+  return res.json({ categories: getCategoriesWithSubcategories() });
 });
 
 router.get('/marketplace/search', (req, res) => {
@@ -1873,8 +1877,7 @@ router.get('/admin/metrics', requireAuth, requireRole('PLATFORM_ADMIN'), (_req, 
 });
 
 router.get('/admin/categories', requireAuth, requireRole('PLATFORM_ADMIN'), (_req, res) => {
-  const categories = getSqliteDb().prepare('SELECT * FROM categories WHERE is_active = 1 ORDER BY display_order, name').all();
-  return res.json({ categories });
+  return res.json({ categories: getCategoriesWithSubcategories() });
 });
 
 const updateAdminBusinessStatusHandler = (req: AuthRequest, res: Response) => {

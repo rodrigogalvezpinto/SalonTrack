@@ -618,6 +618,13 @@ async function runIntegrationTests() {
       assert.strictEqual(metrics.totalBookings, (sqlite.prepare('SELECT COUNT(*) AS count FROM bookings').get() as any).count);
       assert.strictEqual(metrics.totalVolumeCLP, (sqlite.prepare('SELECT COALESCE(SUM(amount_clp), 0) AS total FROM bookings').get() as any).total);
 
+      const adminCategoriesResponse = await getAs('/api/admin/categories', platformAdmin.token);
+      const adminCategories = (await adminCategoriesResponse.json() as any).categories;
+      assert.ok(adminCategories.every((category: any) => Array.isArray(category.subcategories)));
+      assert.ok(adminCategories.some((category: any) => category.subcategories.length > 0));
+      const marketplaceCategoriesResponse = await requestJson('/api/marketplace/categories', 'GET');
+      assert.deepStrictEqual((await marketplaceCategoriesResponse.json() as any).categories, adminCategories);
+
       for (const status of ['PENDING_REVIEW', 'DRAFT', 'PUBLISHED', 'SUSPENDED', 'INACTIVE']) {
         const statusResponse = await requestJson(`/api/admin/businesses/${targetBusinessId}/status`, 'PUT', platformAdmin.token, { status });
         assert.strictEqual(statusResponse.status, 200, `El estado ${status} debe ser válido`);
