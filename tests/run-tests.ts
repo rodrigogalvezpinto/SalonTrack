@@ -1,11 +1,12 @@
 import assert from 'node:assert';
+import express from 'express';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
-import { hashPassword, verifyPassword, generateToken } from '../server/auth.js';
+import { hashPassword, verifyPassword, generateToken, seedDemoDataIfEmpty } from '../server/auth.js';
 import { getDb, saveDb, generateId, User, Profile, Client, Service } from '../server/db.js';
 import { getSqliteDb } from '../server/sqlite.js';
 import { isSlotAvailable } from '../server/availability.js';
 import { localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
-import { seedDemoDataIfEmpty } from '../server/seedData.js';
+import apiRouter from '../server/routes.js';
 
 console.log('🧪 Iniciando Suite de Pruebas Automatizadas de SalonTrack Chile...\n');
 
@@ -105,6 +106,7 @@ test('Aislamiento de Datos (RLS): Un estilista no puede ver datos de otro estili
   const user1Clients = db.clients.filter(c => c.user_id === user1Id);
   assert.ok(user1Clients.some(c => c.id === client1.id));
   assert.ok(!user1Clients.some(c => c.id === client2.id));
+  db.clients = db.clients.filter(c => c.id !== client1.id && c.id !== client2.id);
 });
 
 // 8. Cálculo de Retoques según Intervalo
@@ -209,11 +211,85 @@ test('Proveedor Local de Pagos: Generación de checkout sin claves externas', as
   assert.ok(result.checkoutUrl?.includes('SIM_PAY_'));
 });
 
-console.log(`\n---------------------------------------`);
-console.log(`Resultados de pruebas: ${passed} aprobadas, ${failed} fallidas.`);
-if (failed > 0) {
-  process.exit(1);
-} else {
-  console.log('🎉 Todas las pruebas pasaron satisfactoriamente.\n');
+async function integrationTest(name: string, fn: () => Promise<void>) {
+  try {
+    await fn();
+    console.log(`  ✅ [PASS] ${name}`);
+    passed++;
+  } catch (err: any) {
+    console.error(`  ❌ [FAIL] ${name}: ${err.message}`);
+    failed++;
+  }
 }
 
+async function runIntegrationTests() {
+  const app = express();
+  app.use(express.json());
+  app.use('/api', apiRouter);
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', () => resolve()));
+
+  try {
+    await integrationTest('Integridad SQLite: POST /clients conserva roles, membresías y reservas del demo owner', async () => {
+      const address = server.address();
+      assert.ok(address && typeof address !== 'string');
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      const sqlite = getSqliteDb();
+
+      const loginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'contacto@valeriaestudio.cl', password: 'Salon1234' }),
+      });
+      const loginBody = await loginResponse.json() as { token: string; user: { id: string } };
+      assert.strictEqual(loginResponse.status, 200);
+
+      const rolesBefore = sqlite.prepare('SELECT * FROM user_roles ORDER BY id').all();
+      const membershipsBefore = sqlite.prepare('SELECT * FROM business_members ORDER BY id').all();
+      const bookingsBefore = sqlite.prepare(`
+        SELECT * FROM bookings
+        WHERE business_id IN (SELECT business_id FROM business_members WHERE user_id = ?)
+           OR customer_user_id = ?
+        ORDER BY id
+      `).all(loginBody.user.id, loginBody.user.id);
+      assert.ok(membershipsBefore.length > 0, 'El usuario demo debe pertenecer a un negocio');
+      assert.ok(bookingsBefore.length > 0, 'El negocio demo debe tener reservas');
+
+      const clientResponse = await fetch(`${baseUrl}/api/clients`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${loginBody.token}`,
+        },
+        body: JSON.stringify({ full_name: 'Cliente de prueba de integridad', phone: '+56912345678' }),
+      });
+      assert.strictEqual(clientResponse.status, 201);
+
+      const rolesAfter = sqlite.prepare('SELECT * FROM user_roles ORDER BY id').all();
+      const membershipsAfter = sqlite.prepare('SELECT * FROM business_members ORDER BY id').all();
+      const bookingsAfter = sqlite.prepare(`
+        SELECT * FROM bookings
+        WHERE business_id IN (SELECT business_id FROM business_members WHERE user_id = ?)
+           OR customer_user_id = ?
+        ORDER BY id
+      `).all(loginBody.user.id, loginBody.user.id);
+      assert.deepStrictEqual(rolesAfter, rolesBefore);
+      assert.deepStrictEqual(membershipsAfter, membershipsBefore);
+      assert.deepStrictEqual(bookingsAfter, bookingsBefore);
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+    });
+  }
+
+  console.log(`\n---------------------------------------`);
+  console.log(`Resultados de pruebas: ${passed} aprobadas, ${failed} fallidas.`);
+  if (failed > 0) {
+    process.exitCode = 1;
+  } else {
+    console.log('🎉 Todas las pruebas pasaron satisfactoriamente.\n');
+  }
+}
+
+void runIntegrationTests();

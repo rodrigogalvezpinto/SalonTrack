@@ -140,8 +140,13 @@ function syncInMemoryToSqlite(dbData: DatabaseSchema) {
 
     // Sync users
     const insertUser = db.prepare(`
-      INSERT OR REPLACE INTO users (id, email, password_hash, is_active, created_at)
+      INSERT INTO users (id, email, password_hash, is_active, created_at)
       VALUES (?, ?, ?, 1, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        email = excluded.email,
+        password_hash = excluded.password_hash,
+        is_active = excluded.is_active,
+        created_at = excluded.created_at
     `);
     for (const u of dbData.users) {
       insertUser.run(u.id, u.email, u.password_hash, u.created_at || new Date().toISOString());
@@ -149,10 +154,24 @@ function syncInMemoryToSqlite(dbData: DatabaseSchema) {
 
     // Sync profiles
     const insertProfile = db.prepare(`
-      INSERT OR REPLACE INTO user_profiles (
+      INSERT INTO user_profiles (
         id, user_id, full_name, phone, country, currency, timezone, default_interval_days,
         whatsapp_template, re_engagement_template, re_engagement_days_threshold, notification_preferences, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        user_id = excluded.user_id,
+        full_name = excluded.full_name,
+        phone = excluded.phone,
+        country = excluded.country,
+        currency = excluded.currency,
+        timezone = excluded.timezone,
+        default_interval_days = excluded.default_interval_days,
+        whatsapp_template = excluded.whatsapp_template,
+        re_engagement_template = excluded.re_engagement_template,
+        re_engagement_days_threshold = excluded.re_engagement_days_threshold,
+        notification_preferences = excluded.notification_preferences,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at
     `);
     for (const p of dbData.profiles) {
       insertProfile.run(
@@ -175,8 +194,17 @@ function syncInMemoryToSqlite(dbData: DatabaseSchema) {
 
     // Sync clients
     const insertClient = db.prepare(`
-      INSERT OR REPLACE INTO clients (id, user_id, full_name, phone, notes, preferred_contact, re_engagement_status, created_at, updated_at)
+      INSERT INTO clients (id, user_id, full_name, phone, notes, preferred_contact, re_engagement_status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, 'whatsapp', ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        user_id = excluded.user_id,
+        full_name = excluded.full_name,
+        phone = excluded.phone,
+        notes = excluded.notes,
+        preferred_contact = excluded.preferred_contact,
+        re_engagement_status = excluded.re_engagement_status,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at
     `);
     for (const c of dbData.clients) {
       insertClient.run(c.id, c.user_id, c.full_name, c.phone, c.notes || '', c.re_engagement_status || 'none', c.created_at || new Date().toISOString(), c.updated_at || new Date().toISOString());
@@ -184,9 +212,21 @@ function syncInMemoryToSqlite(dbData: DatabaseSchema) {
 
     // Sync services history
     const insertService = db.prepare(`
-      INSERT OR REPLACE INTO client_service_history (
+      INSERT INTO client_service_history (
         id, user_id, client_id, service_type, color_formula, tint_brand, service_date, amount_clp, recommended_interval_days, next_retouch_date, notes, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        user_id = excluded.user_id,
+        client_id = excluded.client_id,
+        service_type = excluded.service_type,
+        color_formula = excluded.color_formula,
+        tint_brand = excluded.tint_brand,
+        service_date = excluded.service_date,
+        amount_clp = excluded.amount_clp,
+        recommended_interval_days = excluded.recommended_interval_days,
+        next_retouch_date = excluded.next_retouch_date,
+        notes = excluded.notes,
+        created_at = excluded.created_at
     `);
     for (const s of dbData.services) {
       insertService.run(s.id, s.user_id, s.client_id, s.service_type, s.color_formula || '', s.tint_brand || '', s.service_date, s.amount_clp || 0, s.recommended_interval_days || 30, s.next_retouch_date, s.notes || '', s.created_at || new Date().toISOString());
@@ -194,8 +234,16 @@ function syncInMemoryToSqlite(dbData: DatabaseSchema) {
 
     // Sync contact logs
     const insertLog = db.prepare(`
-      INSERT OR REPLACE INTO contact_logs (id, user_id, client_id, contact_date, channel, status, notes, created_at)
+      INSERT INTO contact_logs (id, user_id, client_id, contact_date, channel, status, notes, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        user_id = excluded.user_id,
+        client_id = excluded.client_id,
+        contact_date = excluded.contact_date,
+        channel = excluded.channel,
+        status = excluded.status,
+        notes = excluded.notes,
+        created_at = excluded.created_at
     `);
     for (const l of dbData.contact_logs) {
       insertLog.run(l.id, l.user_id, l.client_id, l.contact_date, l.channel || 'whatsapp', l.status || 'contacted', l.notes || '', l.created_at || new Date().toISOString());
@@ -203,8 +251,16 @@ function syncInMemoryToSqlite(dbData: DatabaseSchema) {
 
     // Sync subscriptions
     const insertSub = db.prepare(`
-      INSERT OR REPLACE INTO subscriptions (id, user_id, plan, status, start_date, expiration_date, payment_provider, created_at)
+      INSERT INTO subscriptions (id, user_id, plan, status, start_date, expiration_date, payment_provider, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        user_id = excluded.user_id,
+        plan = excluded.plan,
+        status = excluded.status,
+        start_date = excluded.start_date,
+        expiration_date = excluded.expiration_date,
+        payment_provider = excluded.payment_provider,
+        created_at = excluded.created_at
     `);
     for (const sub of dbData.subscriptions) {
       insertSub.run(sub.id, sub.user_id, sub.plan, sub.status, sub.start_date, sub.expiration_date, sub.payment_provider || 'mercadopago', sub.created_at || new Date().toISOString());
