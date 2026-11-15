@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { MapPin, Plus, Save, Users } from 'lucide-react';
 import type { Business, BusinessMember, Membership } from '../types';
 import { apiRequest } from '../utils/api';
@@ -23,6 +23,8 @@ export const BusinessView: React.FC<BusinessViewProps> = ({ memberships }) => {
   const { user } = useAuth();
   const [selectedId, setSelectedId] = useState(memberships[0]?.business_id || '');
   const [business, setBusiness] = useState<Business>(emptyBusiness);
+  const [specialtiesText, setSpecialtiesText] = useState('');
+  const [homeServiceCommunesText, setHomeServiceCommunesText] = useState('');
   const [members, setMembers] = useState<BusinessMember[]>([]);
   const [issues, setIssues] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -48,6 +50,8 @@ export const BusinessView: React.FC<BusinessViewProps> = ({ memberships }) => {
         apiRequest<{ members: BusinessMember[] }>(`/api/businesses/${selectedId}/members`),
       ]);
       setBusiness(result.business);
+      setSpecialtiesText(result.business.specialties?.join(', ') || '');
+      setHomeServiceCommunesText(result.business.home_service_communes?.join(', ') || '');
       setIssues(result.publication_issues);
       setMembers(team.members);
     } catch (err) {
@@ -60,10 +64,6 @@ export const BusinessView: React.FC<BusinessViewProps> = ({ memberships }) => {
   useEffect(() => { load(); }, [selectedId]);
 
   const updateField = (field: keyof Business, value: unknown) => setBusiness(current => ({ ...current, [field]: value }));
-  const fields = useMemo(() => ({
-    specialties: business.specialties?.join(', ') || '',
-    home_service_communes: business.home_service_communes?.join(', ') || '',
-  }), [business.specialties, business.home_service_communes]);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -74,15 +74,36 @@ export const BusinessView: React.FC<BusinessViewProps> = ({ memberships }) => {
       const { business: saved, publication_issues } = await apiRequest<{ business: Business; publication_issues: string[] }>(`/api/businesses/${selectedId}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          ...business,
-          specialties: fields.specialties.split(',').map(item => item.trim()).filter(Boolean),
-          home_service_communes: fields.home_service_communes.split(',').map(item => item.trim()).filter(Boolean),
+          name: business.name,
+          slug: business.slug,
+          description: business.description,
+          logo_url: business.logo_url,
+          cover_url: business.cover_url,
+          primary_category: business.primary_category,
+          specialties: specialtiesText.split(',').map(item => item.trim()).filter(Boolean),
+          phone: business.phone,
+          whatsapp: business.whatsapp,
+          email: business.email,
+          website: business.website,
+          instagram: business.instagram,
+          facebook: business.facebook,
+          address: business.address,
+          commune: business.commune,
+          region: business.region,
+          country: business.country,
+          home_service_communes: homeServiceCommunesText.split(',').map(item => item.trim()).filter(Boolean),
           latitude: business.latitude === null ? null : Number(business.latitude),
           longitude: business.longitude === null ? null : Number(business.longitude),
+          offers_in_store: business.offers_in_store,
+          offers_home_visit: business.offers_home_visit,
+          offers_remote: business.offers_remote,
           home_service_radius_km: business.home_service_radius_km === null ? null : Number(business.home_service_radius_km),
+          hide_exact_address: business.hide_exact_address,
         }),
       });
       setBusiness(saved);
+      setSpecialtiesText(saved.specialties?.join(', ') || '');
+      setHomeServiceCommunesText(saved.home_service_communes?.join(', ') || '');
       setIssues(publication_issues);
       setSuccess('Los datos del negocio se guardaron correctamente.');
     } catch (err) {
@@ -204,7 +225,7 @@ export const BusinessView: React.FC<BusinessViewProps> = ({ memberships }) => {
                 <TextField label="Nombre" value={business.name} onChange={value => updateField('name', value)} />
                 <TextField label="Slug público" value={business.slug} onChange={value => updateField('slug', value)} />
                 <TextField label="Categoría principal" value={business.primary_category} onChange={value => updateField('primary_category', value)} />
-                <TextField label="Especialidades (separadas por coma)" value={fields.specialties} onChange={value => updateField('specialties', value.split(',').map(item => item.trim()).filter(Boolean))} />
+                <TextField label="Especialidades (separadas por coma)" value={specialtiesText} onChange={setSpecialtiesText} />
                 <TextField label="Logo (URL)" value={business.logo_url} onChange={value => updateField('logo_url', value || null)} />
                 <TextField label="Portada (URL)" value={business.cover_url} onChange={value => updateField('cover_url', value || null)} />
                 <label className="block sm:col-span-2"><span className={labelClass}>Descripción</span><textarea className={inputClass} rows={3} value={business.description || ''} onChange={event => updateField('description', event.target.value)} /></label>
@@ -231,7 +252,7 @@ export const BusinessView: React.FC<BusinessViewProps> = ({ memberships }) => {
                 {booleanInput('Atención remota', 'offers_remote')}
                 {booleanInput('Ocultar dirección exacta', 'hide_exact_address')}
               </div><div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <TextField label="Comunas a domicilio (separadas por coma)" value={fields.home_service_communes} onChange={value => updateField('home_service_communes', value.split(',').map(item => item.trim()).filter(Boolean))} />
+                <TextField label="Comunas a domicilio (separadas por coma)" value={homeServiceCommunesText} onChange={setHomeServiceCommunesText} />
                 <TextField label="Radio de atención (km)" type="number" value={business.home_service_radius_km} onChange={value => updateField('home_service_radius_km', value === '' ? null : Number(value))} />
               </div></div>
             </fieldset>

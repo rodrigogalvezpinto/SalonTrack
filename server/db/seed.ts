@@ -484,8 +484,8 @@ export function resetDemoData(): { removedUsers: number } {
   });
 }
 
-/** Siembra los datos demo solo si la base no tiene usuarios (comportamiento v1). */
+/** Completa los datos demo en bases vacías o con cuentas demo existentes. */
 export function seedDemoDataIfEmpty(): boolean {
-  if (usersRepository.count() > 0) return false;
+  if (usersRepository.count() > 0 && !usersRepository.hasDemoUsers()) return false;
   return seedDemoData();
 }

@@ -16,6 +16,9 @@ export const usersRepository = {
   count(): number {
     return (getDatabase().prepare('SELECT COUNT(*) AS n FROM users').get() as any).n;
   },
+  hasDemoUsers(): boolean {
+    return !!getDatabase().prepare('SELECT 1 FROM users WHERE is_demo = 1 LIMIT 1').get();
+  },
   insert(user: User) {
     getDatabase()
       .prepare(

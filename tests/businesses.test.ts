@@ -13,7 +13,8 @@ const mainDatabase = path.join(testDir, 'businesses.sqlite');
 initDatabase(mainDatabase);
 const { createApp } = await import('../server/app.js');
 const { rolesRepository } = await import('../server/repositories/roles.js');
-const { seedDemoData, resetDemoData } = await import('../server/db/seed.js');
+const { usersRepository } = await import('../server/repositories/users.js');
+const { seedDemoData, seedDemoDataIfEmpty, resetDemoData } = await import('../server/db/seed.js');
 const { server, baseUrl } = await startServer(createApp());
 const api = makeClient(baseUrl);
 let counter = 0;
@@ -207,6 +208,34 @@ test('edición no puede romper requisitos de publicación y PATCH no cambia el e
   assert.equal(statusEdit.data.business.status, 'PUBLISHED');
 });
 
+test('PATCH completo conserva descripción vacía y país Chile sin violar restricciones', async () => {
+  const owner = await register();
+  const business = await createBusiness(owner.token, 'Spa Ñuñoa Bienestar');
+  const loaded = await api('GET', `/api/businesses/${business.id}`, undefined, owner.token);
+  const current = loaded.data.business;
+  const payload = {
+    ...current,
+    description: '',
+    primary_category: 'Spa y masajes',
+    address: 'Av. Irarrázaval 2345',
+    latitude: -33.4567,
+    longitude: -70.5987,
+    specialties: (current.specialties || []).join(', ').split(',').map((item: string) => item.trim()).filter(Boolean),
+    home_service_communes: (current.home_service_communes || []).join(', ').split(',').map((item: string) => item.trim()).filter(Boolean),
+    home_service_radius_km: current.home_service_radius_km === null ? null : Number(current.home_service_radius_km),
+  };
+  const patched = await api('PATCH', `/api/businesses/${business.id}`, payload, owner.token);
+  assert.equal(patched.status, 200);
+  assert.equal(patched.data.business.description, '');
+  assert.equal(patched.data.business.address, 'Av. Irarrázaval 2345');
+  assert.equal(patched.data.business.latitude, -33.4567);
+  assert.equal(patched.data.business.longitude, -70.5987);
+
+  const blankCountry = await api('PATCH', `/api/businesses/${business.id}`, { country: '' }, owner.token);
+  assert.equal(blankCountry.status, 200);
+  assert.equal(blankCountry.data.business.country, 'Chile');
+});
+
 test('suspensión requiere motivo y los negocios suspendidos no son públicos', async () => {
   const owner = await register();
   const admin = await register('customer');
@@ -322,6 +351,47 @@ test('importación JSON agrega roles y negocio al profesional recién importado'
   assert.equal(business.name, 'Estudio importado');
   assert.equal(business.status, 'DRAFT');
   assert.equal(business.my_role, 'OWNER');
+});
+
+test('inicio completa demos para bases vacías o con usuarios demo existentes', () => {
+  try {
+    const emptyDatabase = path.join(testDir, 'empty-startup.sqlite');
+    initDatabase(emptyDatabase);
+    assert.equal(seedDemoDataIfEmpty(), true);
+    assert.equal(usersRepository.count(), 5);
+    assert.equal(seedDemoDataIfEmpty(), false);
+
+    const upgradedDatabase = path.join(testDir, 'fase1-demo.sqlite');
+    initDatabase(upgradedDatabase);
+    const now = new Date().toISOString();
+    usersRepository.insert({
+      id: 'usr_fase1_valeria',
+      email: 'contacto@valeriaestudio.cl',
+      password_hash: 'legacy-hash',
+      is_demo: true,
+      created_at: now,
+      updated_at: now,
+    });
+    assert.equal(seedDemoDataIfEmpty(), true);
+    assert.ok(usersRepository.findByEmail('dueno@demo.salontrack.cl'));
+    assert.equal(seedDemoDataIfEmpty(), false);
+
+    const realOnlyDatabase = path.join(testDir, 'real-only-startup.sqlite');
+    initDatabase(realOnlyDatabase);
+    usersRepository.insert({
+      id: 'usr_real_only',
+      email: 'real@example.cl',
+      password_hash: 'hash',
+      is_demo: false,
+      created_at: now,
+      updated_at: now,
+    });
+    assert.equal(seedDemoDataIfEmpty(), false);
+    assert.equal(usersRepository.findByEmail('admin@demo.salontrack.cl'), undefined);
+  } finally {
+    closeDatabase();
+    initDatabase(mainDatabase);
+  }
 });
 
 test('cuentas demo: credenciales, negocios públicos y reset conserva cuentas reales', async () => {

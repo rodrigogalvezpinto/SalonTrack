@@ -71,7 +71,13 @@ function businessChanges(body: Record<string, unknown>, current?: Business) {
         changes[field] = requireString(body[field], 'El nombre del negocio es obligatorio.', STRING_LIMITS[field]);
       } else {
         const value = optionalString(body[field], field, STRING_LIMITS[field]);
-        changes[field] = value || null;
+        if (field === 'description') {
+          changes[field] = value ?? current?.description ?? '';
+        } else if (field === 'country') {
+          changes[field] = value || current?.country || 'Chile';
+        } else {
+          changes[field] = value || null;
+        }
       }
     }
   }

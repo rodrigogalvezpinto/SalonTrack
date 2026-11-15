@@ -54,7 +54,7 @@ export const AdminView: React.FC = () => {
 
   const changeStatus = async (business: AdminBusiness, status: Business['status']) => {
     let reason: string | undefined;
-    if (status === 'DRAFT' || status === 'SUSPENDED') {
+    if (status === 'SUSPENDED' || (status === 'DRAFT' && business.status === 'PENDING_REVIEW')) {
       reason = window.prompt(status === 'SUSPENDED' ? 'Motivo de suspensión:' : 'Motivo del rechazo:') || undefined;
       if (!reason?.trim()) {
         setError('Debes indicar un motivo para esta acción.');
@@ -113,7 +113,10 @@ export const AdminView: React.FC = () => {
       {loading ? <p className="p-5 text-sm text-slate-500">Cargando negocios…</p> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="p-3">Negocio</th><th className="p-3">Propietario</th><th className="p-3">Comuna</th><th className="p-3">Estado</th><th className="p-3">Acciones</th></tr></thead><tbody>{businesses.map(business => <tr key={business.id} className="border-t border-slate-100"><td className="p-3"><p className="font-semibold text-slate-800">{business.name}</p><p className="text-xs text-slate-500">{business.slug}</p></td><td className="p-3 text-slate-600">{business.owner_email || '—'}</td><td className="p-3 text-slate-600">{business.commune || '—'}</td><td className="p-3"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold">{statusNames[business.status]}</span></td><td className="p-3"><div className="flex flex-wrap gap-1.5">
         {business.status === 'PENDING_REVIEW' && <><button disabled={busy === business.id} onClick={() => changeStatus(business, 'PUBLISHED')} className={buttonClass}><Check className="mr-1 inline h-3.5 w-3.5" />Aprobar</button><button disabled={busy === business.id} onClick={() => changeStatus(business, 'DRAFT')} className={buttonClass}><X className="mr-1 inline h-3.5 w-3.5" />Rechazar</button></>}
         {['DRAFT', 'PENDING_REVIEW', 'PUBLISHED', 'INACTIVE'].includes(business.status) && <button disabled={busy === business.id} onClick={() => changeStatus(business, 'SUSPENDED')} className={buttonClass}><ShieldAlert className="mr-1 inline h-3.5 w-3.5" />Suspender</button>}
-        {business.status === 'SUSPENDED' && <button disabled={busy === business.id} onClick={() => changeStatus(business, 'PUBLISHED')} className={buttonClass}><RefreshCw className="mr-1 inline h-3.5 w-3.5" />Reactivar</button>}
+        {business.status === 'SUSPENDED' && <>
+          <button disabled={busy === business.id} onClick={() => changeStatus(business, 'PUBLISHED')} className={buttonClass}><RefreshCw className="mr-1 inline h-3.5 w-3.5" />Reactivar (publicar)</button>
+          <button disabled={busy === business.id} onClick={() => changeStatus(business, 'DRAFT')} className={buttonClass}><X className="mr-1 inline h-3.5 w-3.5" />Devolver a borrador</button>
+        </>}
       </div></td></tr>)}</tbody></table></div>}
     </section>
     <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">

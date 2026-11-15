@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
@@ -34,6 +34,7 @@ function MainApp() {
   // Navigation
   const [currentView, setCurrentView] = useState<string>('dashboard');
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const lastLoginUserId = useRef<string | null>(null);
 
   // Modals
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -50,9 +51,33 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
+    if (isLoading) return;
+    if (!user) {
+      lastLoginUserId.current = null;
+      return;
+    }
+    if (lastLoginUserId.current === user.id) return;
+    lastLoginUserId.current = user.id;
+    setCurrentView(roles.includes('PROFESSIONAL') ? 'dashboard' : roles.includes('PLATFORM_ADMIN') ? 'admin' : 'account');
+  }, [isLoading, roles, user]);
+
+  useEffect(() => {
     if (isLoading || !user) return;
-    if (!roles.includes('PROFESSIONAL')) setCurrentView(roles.includes('PLATFORM_ADMIN') ? 'admin' : 'account');
-    else if (currentView === 'account' || currentView === 'admin') setCurrentView('dashboard');
+    const isProfessional = roles.includes('PROFESSIONAL');
+    const isPlatformAdmin = roles.includes('PLATFORM_ADMIN');
+    const professionalViews = new Set([
+      'dashboard', 'clients', 'client_detail', 'retouches', 're-engagement', 'revenue', 'calendar', 'settings', 'business',
+    ]);
+    const authorized = currentView === 'account'
+      ? !isProfessional
+      : currentView === 'admin'
+        ? isPlatformAdmin
+        : professionalViews.has(currentView)
+          ? isProfessional
+          : true;
+    if (!authorized) {
+      setCurrentView(isProfessional ? 'dashboard' : isPlatformAdmin ? 'admin' : 'account');
+    }
   }, [currentView, isLoading, roles, user]);
   
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);

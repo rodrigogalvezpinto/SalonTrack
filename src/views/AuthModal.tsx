@@ -141,7 +141,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <button type="button" onClick={() => setAccountType('professional')} className={`rounded-xl border p-2.5 text-xs font-bold ${accountType === 'professional' ? 'border-rose-500 bg-rose-50 text-rose-700' : 'border-slate-200 text-slate-600'}`}>Soy profesional</button>
                 <button type="button" onClick={() => setAccountType('customer')} className={`rounded-xl border p-2.5 text-xs font-bold ${accountType === 'customer' ? 'border-rose-500 bg-rose-50 text-rose-700' : 'border-slate-200 text-slate-600'}`}>Soy cliente</button>
               </div>
-              {accountType === 'professional' && <div>
+              <div>
                 <label className="text-xs font-bold text-slate-700 uppercase tracking-wide block mb-1">
                   Tu Nombre Completo *
                 </label>
@@ -156,9 +156,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     className="w-full text-xs rounded-xl border border-slate-300 pl-9 p-2.5 text-slate-800 focus:border-rose-500 outline-none"
                   />
                 </div>
-              </div>}
+              </div>
 
-              <div>
+              {accountType === 'professional' && <div>
                 <label className="text-xs font-bold text-slate-700 uppercase tracking-wide block mb-1">
                   Nombre de tu Salón o Estudio
                 </label>
@@ -172,7 +172,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     className="w-full text-xs rounded-xl border border-slate-300 pl-9 p-2.5 text-slate-800 focus:border-rose-500 outline-none"
                   />
                 </div>
-              </div>
+              </div>}
 
               <div>
                 <label className="text-xs font-bold text-slate-700 uppercase tracking-wide block mb-1">
