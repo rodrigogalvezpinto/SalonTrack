@@ -663,7 +663,7 @@ router.get('/marketplace/search', (req, res) => {
   });
 });
 
-router.get('/marketplace/business/:slug', (req, res) => {
+router.get('/marketplace/business/:slug', optionalAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const slug = req.params.slug;
 
@@ -718,6 +718,9 @@ router.get('/marketplace/business/:slug', (req, res) => {
   const avgRating = reviews.length > 0
     ? Math.round((reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length) * 10) / 10
     : 5.0;
+  const isFavorite = req.userId
+    ? Boolean(sqlite.prepare('SELECT 1 FROM favorites WHERE user_id = ? AND business_id = ?').get(req.userId, business.id))
+    : undefined;
 
   return res.json({
     business: {
@@ -729,6 +732,7 @@ router.get('/marketplace/business/:slug', (req, res) => {
     staff,
     hours,
     reviews,
+    ...(req.userId ? { is_favorite: isFavorite } : {}),
   });
 });
 

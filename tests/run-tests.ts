@@ -599,6 +599,17 @@ async function runIntegrationTests() {
       assert.strictEqual((await requestJson(`/api/business/staff/${catalogStaff.staff_id}`, 'DELETE', owner.token)).status, 200);
       assert.strictEqual((sqlite.prepare('SELECT is_active FROM staff WHERE id = ?').get(catalogStaff.staff_id) as any).is_active, 0);
 
+      const businessSlug = (sqlite.prepare('SELECT slug FROM businesses WHERE id = ?').get(targetBusinessId) as any).slug;
+      sqlite.prepare('DELETE FROM favorites WHERE user_id = ? AND business_id = ?').run(owner.user.id, targetBusinessId);
+      assert.strictEqual((await postAs('/api/favorites', owner.token, { business_id: targetBusinessId })).status, 200);
+      assert.strictEqual((await requestJson(`/api/marketplace/business/${businessSlug}`, 'GET')).status, 200);
+      const favoriteProfile = await getAs(`/api/marketplace/business/${businessSlug}`, owner.token);
+      assert.strictEqual((await favoriteProfile.json() as any).is_favorite, true);
+      const toggleFavorite = await postAs(`/api/favorites/${targetBusinessId}`, owner.token);
+      assert.deepStrictEqual(await toggleFavorite.json(), { favorited: false });
+      const unfavoritedProfile = await getAs(`/api/marketplace/business/${businessSlug}`, owner.token);
+      assert.strictEqual((await unfavoritedProfile.json() as any).is_favorite, false);
+
       const metricsResponse = await getAs('/api/admin/metrics', platformAdmin.token);
       assert.strictEqual(metricsResponse.status, 200);
       const metrics = (await metricsResponse.json() as any).stats;
