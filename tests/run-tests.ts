@@ -517,6 +517,19 @@ async function runIntegrationTests() {
       assert.strictEqual((await requestJson(`/api/business/${targetBusinessId}/hours`, 'PUT', owner.token, {
         hours: [{ day_of_week: 1, open_time: '09:00', close_time: '18:00', is_closed: 0 }],
       })).status, 200);
+      const savedHours = await requestJson('/api/business/hours', 'PUT', owner.token, {
+        hours: [{ day_of_week: 1, open_time: '10:30', close_time: '19:30', is_closed: 0 }],
+      });
+      assert.strictEqual(savedHours.status, 200);
+      const savedHoursBody = await getAs('/api/business/hours', owner.token);
+      const savedMondayHours = ((await savedHoursBody.json() as any).hours as any[]).find(h => h.day_of_week === 1);
+      assert.strictEqual(savedMondayHours.open_time, '10:30');
+      assert.strictEqual(savedMondayHours.close_time, '19:30');
+      refreshDb();
+      const refreshedHours = await getAs('/api/business/hours', owner.token);
+      const refreshedMondayHours = ((await refreshedHours.json() as any).hours as any[]).find(h => h.day_of_week === 1);
+      assert.strictEqual(refreshedMondayHours.open_time, '10:30');
+      assert.strictEqual(refreshedMondayHours.close_time, '19:30');
       assert.strictEqual((await postAs(`/api/business/${targetBusinessId}/staff`, owner.token, {
         name: 'Trabajador autorizado',
       })).status, 201);

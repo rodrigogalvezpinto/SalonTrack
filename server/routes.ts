@@ -1668,7 +1668,6 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
   const updated = sqlite.prepare('SELECT * FROM businesses WHERE id = ?').get(bizId);
   return res.json({ message: 'Datos del negocio actualizados con éxito.', business: updated });
 };
-router.put('/business/:id', requireAuth, updateBusinessHandler);
 
 // Business Catalog Services
 const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
@@ -1861,6 +1860,7 @@ router.put('/business/hours', requireAuth, (req: AuthRequest, res: Response) => 
   req.params.id = businessId;
   return updateBusinessHoursHandler(req, res);
 });
+router.put('/business/:id', requireAuth, updateBusinessHandler);
 
 // -------------------------------------------------------------
 // PLATFORM ADMINISTRATION (Section 19 - Role: PLATFORM_ADMIN)
