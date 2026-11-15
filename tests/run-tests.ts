@@ -597,6 +597,14 @@ async function runIntegrationTests() {
       assert.strictEqual(metrics.totalBusinesses, (sqlite.prepare('SELECT COUNT(*) AS count FROM businesses').get() as any).count);
       assert.strictEqual(metrics.totalBookings, (sqlite.prepare('SELECT COUNT(*) AS count FROM bookings').get() as any).count);
       assert.strictEqual(metrics.totalVolumeCLP, (sqlite.prepare('SELECT COALESCE(SUM(amount_clp), 0) AS total FROM bookings').get() as any).total);
+
+      for (const status of ['PENDING_REVIEW', 'DRAFT', 'PUBLISHED', 'SUSPENDED', 'INACTIVE']) {
+        const statusResponse = await requestJson(`/api/admin/businesses/${targetBusinessId}/status`, 'PUT', platformAdmin.token, { status });
+        assert.strictEqual(statusResponse.status, 200, `El estado ${status} debe ser válido`);
+        assert.strictEqual((sqlite.prepare('SELECT status FROM businesses WHERE id = ?').get(targetBusinessId) as any).status, status);
+      }
+      assert.strictEqual((await requestJson(`/api/admin/businesses/${targetBusinessId}/status`, 'PUT', platformAdmin.token, { status: 'INVALID' })).status, 400);
+      await requestJson(`/api/admin/businesses/${targetBusinessId}/status`, 'PUT', platformAdmin.token, { status: 'PUBLISHED' });
     });
 
     await integrationTest('Reset de contraseña: rechaza solicitudes sin token', async () => {

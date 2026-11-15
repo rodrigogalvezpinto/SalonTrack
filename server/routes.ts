@@ -1872,7 +1872,9 @@ router.get('/admin/categories', requireAuth, requireRole('PLATFORM_ADMIN'), (_re
 
 const updateAdminBusinessStatusHandler = (req: AuthRequest, res: Response) => {
   const { status } = req.body;
-  if (!['PUBLISHED', 'SUSPENDED', 'DRAFT'].includes(status)) return res.status(400).json({ error: 'Estado de negocio inválido.' });
+  if (!['DRAFT', 'PENDING_REVIEW', 'PUBLISHED', 'SUSPENDED', 'INACTIVE'].includes(status)) {
+    return res.status(400).json({ error: 'Estado de negocio inválido.' });
+  }
   const sqlite = getSqliteDb();
   const result = sqlite.prepare('UPDATE businesses SET status = ?, updated_at = ? WHERE id = ?').run(status, new Date().toISOString(), req.params.id);
   if (!result.changes) return res.status(404).json({ error: 'Negocio no encontrado.' });
