@@ -13,6 +13,7 @@ const mainDatabase = path.join(testDir, 'businesses.sqlite');
 initDatabase(mainDatabase);
 const { createApp } = await import('../server/app.js');
 const { rolesRepository } = await import('../server/repositories/roles.js');
+const { businessesRepository } = await import('../server/repositories/businesses.js');
 const { usersRepository } = await import('../server/repositories/users.js');
 const { seedDemoData, seedDemoDataIfEmpty, resetDemoData } = await import('../server/db/seed.js');
 const { server, baseUrl } = await startServer(createApp());
@@ -427,6 +428,31 @@ test('operaciones de datos demo se rechazan en producción', () => {
     else process.env.NODE_ENV = previousNodeEnv;
     if (previousJwtSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = previousJwtSecret;
+    closeDatabase();
+    initDatabase(mainDatabase);
+  }
+});
+
+test('siembra negocios demo con slugs únicos ante una colisión real', async () => {
+  try {
+    initDatabase(path.join(testDir, 'demo-slug-conflict.sqlite'));
+    const realOwner = await register();
+    const realBusiness = await createBusiness(realOwner.token, 'Barbería Central');
+    assert.equal(realBusiness.slug, 'barberia-central');
+
+    assert.equal(seedDemoData(), true);
+    const demoBarberia = businessesRepository.findBySlug('barberia-central-2');
+    assert.ok(demoBarberia);
+    assert.equal(demoBarberia?.name, 'Barbería Central');
+    assert.equal(demoBarberia?.is_demo, true);
+    assert.equal(businessesRepository.findBySlug('barberia-central')?.is_demo, false);
+
+    const staff = usersRepository.findByEmail('trabajador@demo.salontrack.cl');
+    assert.ok(staff);
+    const staffBusinesses = businessesRepository.listForUser(staff!.id);
+    assert.ok(staffBusinesses.some(business => business.id === demoBarberia?.id));
+    assert.ok(!staffBusinesses.some(business => business.id === realBusiness.id));
+  } finally {
     closeDatabase();
     initDatabase(mainDatabase);
   }

@@ -8,7 +8,7 @@ import { subscriptionsRepository } from '../repositories/subscriptions.js';
 import { rolesRepository } from '../repositories/roles.js';
 import { businessesRepository } from '../repositories/businesses.js';
 import { membersRepository } from '../repositories/members.js';
-import { ensureProfessionalSetup } from '../services/businesses.js';
+import { ensureProfessionalSetup, uniqueSlug } from '../services/businesses.js';
 import { getConfig } from '../config.js';
 
 export const DEMO_EMAIL = 'contacto@valeriaestudio.cl';
@@ -364,10 +364,11 @@ function insertDemoAccount(email: string, password: string, name: string, busine
 }
 
 function demoBusiness(ownerId: string, fields: Partial<import('../services/businesses.js').Business> & Pick<import('../services/businesses.js').Business, 'name' | 'slug' | 'primary_category' | 'commune' | 'region'>) {
+  const { slug, ...updates } = fields;
   const current = new Date().toISOString();
   const business = businessesRepository.insert({
     id: generateId('biz'),
-    slug: fields.slug,
+    slug: uniqueSlug(slug),
     name: fields.name,
     description: '',
     logo_url: null,
@@ -400,7 +401,7 @@ function demoBusiness(ownerId: string, fields: Partial<import('../services/busin
     created_at: current,
     updated_at: current,
   });
-  return businessesRepository.update(business.id, fields)!;
+  return businessesRepository.update(business.id, updates)!;
 }
 
 /** Siembra cada cuenta demo de manera independiente e idempotente por correo. */
@@ -425,7 +426,6 @@ export function seedDemoData(): boolean {
     const barberia = businessesRepository.listForUser(owner.id)[0];
     if (!barberia?.id) throw new Error('No se pudo crear Barbería Central.');
     businessesRepository.update(barberia.id, {
-      slug: 'barberia-central',
       description: 'Barbería clásica en Santiago centro.',
       phone: '+56955550001',
       whatsapp: '+56955550001',
@@ -462,8 +462,11 @@ export function seedDemoData(): boolean {
   const staff = insertDemoAccount(DEMO_ACCOUNTS[3].email, DEMO_ACCOUNTS[3].password, DEMO_ACCOUNTS[3].name);
   if (staff) {
     rolesRepository.addRole(staff.id, 'PROFESSIONAL');
-    const barberia = businessesRepository.findBySlug('barberia-central');
-    if (barberia) {
+    const demoOwner = owner ?? usersRepository.findByEmail(DEMO_ACCOUNTS[2].email);
+    const barberia = demoOwner
+      ? businessesRepository.listForUser(demoOwner.id).find(business => business.name === 'Barbería Central')
+      : undefined;
+    if (barberia?.id) {
       membersRepository.insert({
         id: generateId('mem'),
         business_id: barberia.id,
