@@ -313,12 +313,13 @@ router.post('/auth/login', (req, res) => {
 
     // Also get business owned or staffed
     const business = sqlite.prepare(`
-      SELECT b.id, b.name, b.slug, bm.role as member_role
+      SELECT b.id, b.name, b.slug, b.booking_mode, bm.role as member_role
       FROM businesses b
       INNER JOIN business_members bm ON bm.business_id = b.id
       WHERE bm.user_id = ? AND bm.is_active = 1
       LIMIT 1
     `).get(user.id) as any;
+    if (business) business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
 
     const token = generateToken({ id: user.id, email: user.email, password_hash: user.password_hash, created_at: '' }, roles);
     logAudit(user.id, business?.id || null, 'USER_LOGIN', 'user', user.id);
@@ -359,6 +360,7 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
     WHERE bm.user_id = ? AND bm.is_active = 1
     LIMIT 1
   `).get(user.id) as any;
+  if (business) business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
 
   return res.json({
     user: {
@@ -1540,6 +1542,7 @@ router.get('/business/my', requireAuth, (req: AuthRequest, res: Response) => {
   if (!business) {
     return res.json({ business: null, has_business: false });
   }
+  business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
   if (authorizeBusiness(req, res, business.id, ['OWNER', 'ADMIN']) === null) return;
 
   // Get staff

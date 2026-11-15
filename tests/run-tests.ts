@@ -385,7 +385,7 @@ async function runIntegrationTests() {
     await integrationTest('Autorización: reservas y acciones del negocio respetan membresías', async () => {
       const login = async (email: string, password: string) => {
         const response = await sendJson('/api/auth/login', { email, password });
-        const body = await response.json() as { token: string; user: { id: string } };
+        const body = await response.json() as { token: string; user: { id: string; business?: any } };
         assert.strictEqual(response.status, 200);
         return body;
       };
@@ -407,6 +407,8 @@ async function runIntegrationTests() {
       assert.strictEqual(outsiderResponse.status, 201);
 
       const targetBusinessId = 'biz_valeria_studio';
+      const originalBookingMode = (sqlite.prepare('SELECT booking_mode FROM businesses WHERE id = ?').get(targetBusinessId) as any).booking_mode;
+      assert.strictEqual(owner.user.business.auto_confirm_bookings, originalBookingMode === 'AUTOMATIC');
       sqlite.prepare(`
         INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
         VALUES (?, 'biz_route68_barber', ?, 'OWNER', 1, ?)
@@ -539,7 +541,6 @@ async function runIntegrationTests() {
         await assertNotFound(await requestJson(`/api/bookings/${bookings.reject}/status`, 'PUT', token, { status: 'CONFIRMED' }));
       }
 
-      const originalBookingMode = (sqlite.prepare('SELECT booking_mode FROM businesses WHERE id = ?').get(targetBusinessId) as any).booking_mode;
       sqlite.prepare("UPDATE businesses SET booking_mode = 'MANUAL' WHERE id = ?").run(targetBusinessId);
       const customerBookingResponse = await postAs('/api/bookings', bookingCustomer.token, {
         business_id: targetBusinessId,
@@ -584,6 +585,14 @@ async function runIntegrationTests() {
       const catalogStaff = await catalogStaffResponse.json() as { staff_id: string };
       const businessMine = await getAs('/api/business/my', owner.token);
       const businessMineBody = await businessMine.json() as any;
+      assert.strictEqual(typeof businessMineBody.business.auto_confirm_bookings, 'boolean');
+      assert.strictEqual(businessMineBody.business.auto_confirm_bookings, originalBookingMode === 'AUTOMATIC');
+      assert.strictEqual((await requestJson('/api/business/my', 'PUT', owner.token, {
+        auto_confirm_bookings: businessMineBody.business.auto_confirm_bookings,
+      })).status, 200);
+      assert.strictEqual((sqlite.prepare('SELECT booking_mode FROM businesses WHERE id = ?').get(targetBusinessId) as any).booking_mode, originalBookingMode);
+      const refreshedSession = await getAs('/api/auth/me', owner.token);
+      assert.strictEqual((await refreshedSession.json() as any).user.business.auto_confirm_bookings, originalBookingMode === 'AUTOMATIC');
       assert.ok(businessMineBody.services.some((s: any) => s.id === catalogService.service_id));
       assert.ok(businessMineBody.staff.some((s: any) => s.id === catalogStaff.staff_id));
       assert.ok(Array.isArray(businessMineBody.hours));
