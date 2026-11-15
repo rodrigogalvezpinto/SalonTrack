@@ -69,6 +69,29 @@ function createNotification(userId: string, type: string, title: string, message
   }
 }
 
+function authorizeBusiness(
+  req: AuthRequest,
+  res: Response,
+  businessId: string,
+  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION']
+): string | null {
+  const member = getSqliteDb().prepare(`
+    SELECT role
+    FROM business_members
+    WHERE business_id = ? AND user_id = ? AND is_active = 1
+  `).get(businessId, req.userId || '') as { role: string } | undefined;
+
+  if (!member) {
+    res.status(404).json({ error: 'Negocio no encontrado.' });
+    return null;
+  }
+  if (!allowedRoles.includes(member.role)) {
+    res.status(403).json({ error: 'No tienes permisos para esta acción en el negocio.' });
+    return null;
+  }
+  return member.role;
+}
+
 // -------------------------------------------------------------
 // System Health
 // -------------------------------------------------------------
@@ -1009,6 +1032,17 @@ router.get('/bookings/:id', requireAuth, (req: AuthRequest, res: Response) => {
     return res.status(404).json({ error: 'Reserva no encontrada.' });
   }
 
+  const isCustomer = booking.customer_user_id === req.userId;
+  const isPlatformAdmin = getUserRoles(req.userId!).includes('PLATFORM_ADMIN');
+  const isActiveMember = sqlite.prepare(`
+    SELECT 1
+    FROM business_members
+    WHERE business_id = ? AND user_id = ? AND is_active = 1
+  `).get(booking.business_id, req.userId || '');
+  if (!isCustomer && !isPlatformAdmin && !isActiveMember) {
+    return res.status(404).json({ error: 'Reserva no encontrada.' });
+  }
+
   return res.json({ booking });
 });
 
@@ -1016,6 +1050,7 @@ router.post('/bookings/:id/confirm', requireAuth, (req: AuthRequest, res: Respon
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (authorizeBusiness(req, res, booking.business_id) === null) return;
 
   if (booking.status !== 'PENDING') {
     return res.status(400).json({ error: `No se puede confirmar una reserva en estado ${booking.status}.` });
@@ -1045,6 +1080,7 @@ router.post('/bookings/:id/reject', requireAuth, (req: AuthRequest, res: Respons
   const { reason } = req.body;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (authorizeBusiness(req, res, booking.business_id) === null) return;
 
   const now = new Date().toISOString();
   sqlite.prepare(`
@@ -1070,6 +1106,10 @@ router.post('/bookings/:id/cancel', requireAuth, (req: AuthRequest, res: Respons
   const { reason } = req.body;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (
+    booking.customer_user_id !== req.userId &&
+    authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION']) === null
+  ) return;
 
   if (booking.status === 'COMPLETED' || booking.status === 'CANCELLED') {
     return res.status(400).json({ error: `No se puede cancelar una reserva en estado ${booking.status}.` });
@@ -1103,6 +1143,7 @@ router.post('/bookings/:id/complete', requireAuth, (req: AuthRequest, res: Respo
   const { color_formula, tint_brand, notes } = req.body;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (authorizeBusiness(req, res, booking.business_id) === null) return;
 
   if (booking.status === 'CANCELLED' || booking.status === 'REJECTED') {
     return res.status(400).json({ error: 'No se puede completar una reserva cancelada o rechazada.' });
@@ -1139,7 +1180,7 @@ router.post('/bookings/:id/complete', requireAuth, (req: AuthRequest, res: Respo
   }
 
   // Check service name
-  const srv = sqlite.prepare('SELECT name, recommended_interval_days FROM services WHERE id = ?').get(booking.service_id) as any;
+  const srv = sqlite.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
   const intervalDays = 30;
   const nextRetouchDate = calculateNextDate(booking.booking_date, intervalDays);
 
@@ -1198,6 +1239,9 @@ router.post('/payments/checkout/simulate', requireAuth, async (req: AuthRequest,
 
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(booking_id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (booking.customer_user_id !== req.userId) {
+    return res.status(404).json({ error: 'Reserva no encontrada.' });
+  }
 
   const now = new Date().toISOString();
   let paymentStatus: 'paid' | 'pending' | 'refunded' = 'pending';
@@ -1322,14 +1366,7 @@ router.post('/reviews/:id/respond', requireAuth, (req: AuthRequest, res: Respons
   const review = sqlite.prepare('SELECT * FROM reviews WHERE id = ?').get(req.params.id) as any;
   if (!review) return res.status(404).json({ error: 'Reseña no encontrada.' });
 
-  // Verify ownership of business
-  const isOwner = sqlite.prepare(`
-    SELECT 1 FROM businesses WHERE id = ? AND owner_id = ?
-  `).get(review.business_id, req.userId || '');
-
-  if (!isOwner) {
-    return res.status(403).json({ error: 'Solo el propietario del salón puede responder esta reseña.' });
-  }
+  if (authorizeBusiness(req, res, review.business_id, ['OWNER', 'ADMIN']) === null) return;
 
   const now = new Date().toISOString();
   sqlite.prepare(`
@@ -1448,11 +1485,7 @@ router.put('/business/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
 
-  // Verify permission
-  const member = sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1').get(bizId, req.userId || '') as any;
-  if (!member || (member.role !== 'OWNER' && member.role !== 'ADMIN')) {
-    return res.status(403).json({ error: 'No tienes permisos de administración en este negocio.' });
-  }
+  if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
 
   const {
     name, description, phone, whatsapp, email, website, instagram,
@@ -1510,8 +1543,7 @@ router.post('/business/:id/services', requireAuth, (req: AuthRequest, res: Respo
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
 
-  const member = sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1').get(bizId, req.userId || '') as any;
-  if (!member) return res.status(403).json({ error: 'Permisos insuficientes.' });
+  if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
 
   const { name, category_id, description, price_clp, price_type, duration_minutes, is_featured, modality } = req.body;
   if (!name || !price_clp) {
@@ -1558,8 +1590,7 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
   const srv = sqlite.prepare('SELECT business_id FROM services WHERE id = ?').get(srvId) as any;
   if (!srv) return res.status(404).json({ error: 'Servicio no encontrado.' });
 
-  const member = sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1').get(srv.business_id, req.userId || '') as any;
-  if (!member) return res.status(403).json({ error: 'Permisos insuficientes.' });
+  if (authorizeBusiness(req, res, srv.business_id, ['OWNER', 'ADMIN']) === null) return;
 
   const { name, price_clp, price_type, duration_minutes, description, is_featured, status } = req.body;
   const now = new Date().toISOString();
@@ -1595,6 +1626,7 @@ router.delete('/business/services/:id', requireAuth, (req: AuthRequest, res: Res
   const srvId = req.params.id;
   const srv = sqlite.prepare('SELECT business_id FROM services WHERE id = ?').get(srvId) as any;
   if (!srv) return res.status(404).json({ error: 'Servicio no encontrado.' });
+  if (authorizeBusiness(req, res, srv.business_id, ['OWNER', 'ADMIN']) === null) return;
 
   // Safe soft delete to preserve completed booking history!
   sqlite.prepare("UPDATE services SET status = 'INACTIVE', updated_at = ? WHERE id = ?").run(new Date().toISOString(), srvId);
@@ -1606,10 +1638,7 @@ router.post('/business/:id/staff', requireAuth, (req: AuthRequest, res: Response
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
 
-  const member = sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1').get(bizId, req.userId || '') as any;
-  if (!member || (member.role !== 'OWNER' && member.role !== 'ADMIN')) {
-    return res.status(403).json({ error: 'Solo el dueño o administrador puede agregar trabajadores.' });
-  }
+  if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
 
   const { name, specialty, phone, bio } = req.body;
   if (!name) return res.status(400).json({ error: 'El nombre del trabajador es obligatorio.' });
@@ -1631,7 +1660,7 @@ router.post('/business/:id/staff', requireAuth, (req: AuthRequest, res: Response
   }
 
   // Assign existing services to new staff
-  const services = sqlite.prepare('SELECT id FROM services WHERE business_id = ? AND status = "PUBLISHED"').all(bizId) as any[];
+  const services = sqlite.prepare("SELECT id FROM services WHERE business_id = ? AND status = 'PUBLISHED'").all(bizId) as any[];
   for (const s of services) {
     sqlite.prepare('INSERT OR IGNORE INTO staff_services (id, staff_id, service_id, created_at) VALUES (?, ?, ?, ?)').run(
       generateId('ss'), staffId, s.id, now
@@ -1645,6 +1674,8 @@ router.post('/business/:id/staff', requireAuth, (req: AuthRequest, res: Response
 router.put('/business/:id/hours', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
+  if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
+
   const { hours } = req.body; // Array of { day_of_week, open_time, close_time, is_closed }
 
   if (!Array.isArray(hours)) {

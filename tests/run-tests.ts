@@ -238,15 +238,17 @@ async function runIntegrationTests() {
   assert.ok(address && typeof address !== 'string');
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const sqlite = getSqliteDb();
-  const sendJson = (path: string, body: unknown, token?: string, method = 'POST') => {
+  const requestJson = (path: string, method: string, token?: string, body?: unknown) => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
     return fetch(`${baseUrl}${path}`, {
       method,
       headers,
-      body: JSON.stringify(body),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   };
+  const sendJson = (path: string, body: unknown, token?: string) =>
+    requestJson(path, 'POST', token, body);
   const requestReset = async (email: string) => {
     let emailContent = '';
     const originalSend = localEmailProvider.send;
@@ -342,11 +344,11 @@ async function runIntegrationTests() {
       }, login.token);
       assert.strictEqual(contactLogResponse.status, 201);
 
-      const serviceDeleteResponse = await sendJson(
+      const serviceDeleteResponse = await requestJson(
         `/api/services/${createdClient.service.id}`,
-        {},
+        'DELETE',
         login.token,
-        'DELETE'
+        {}
       );
       assert.strictEqual(serviceDeleteResponse.status, 200);
       assert.strictEqual(sqlite.prepare(
@@ -357,11 +359,11 @@ async function runIntegrationTests() {
       assert.ok(!getDb().services.some(service => service.id === createdClient.service.id));
       assert.ok(getDb().services.some(service => service.id === extraService.service.id));
 
-      const clientDeleteResponse = await sendJson(
+      const clientDeleteResponse = await requestJson(
         `/api/clients/${createdClient.client.id}`,
-        {},
+        'DELETE',
         login.token,
-        'DELETE'
+        {}
       );
       assert.strictEqual(clientDeleteResponse.status, 200);
       assert.strictEqual(sqlite.prepare(
@@ -378,6 +380,159 @@ async function runIntegrationTests() {
       assert.ok(!getDb().clients.some(client => client.id === createdClient.client.id));
       assert.ok(!getDb().services.some(service => service.id === extraService.service.id));
       assert.ok(!getDb().contact_logs.some(log => log.client_id === createdClient.client.id));
+    });
+
+    await integrationTest('Autorización: reservas y acciones del negocio respetan membresías', async () => {
+      const login = async (email: string, password: string) => {
+        const response = await sendJson('/api/auth/login', { email, password });
+        const body = await response.json() as { token: string; user: { id: string } };
+        assert.strictEqual(response.status, 200);
+        return body;
+      };
+
+      const owner = await login('contacto@valeriaestudio.cl', 'Salon1234');
+      const unrelatedOwner = await login('ignacio@barberiaroute.cl', 'Barber1234!');
+      const bookingCustomer = await login('cliente@gmail.com', 'Cliente1234!');
+      const staff = await login('camila@valeriaestudio.cl', 'Staff1234!');
+      const platformAdmin = await login('admin@salontrack.cl', 'Admin1234!');
+      const outsiderEmail = `authz-${generateId('customer')}@example.test`;
+      const outsiderResponse = await sendJson('/api/auth/register', {
+        email: outsiderEmail,
+        password: 'AuthzTest123!',
+        full_name: 'Cliente sin relación con el negocio',
+        phone: '+56912345001',
+        role: 'CUSTOMER',
+      });
+      const outsider = await outsiderResponse.json() as { token: string; user: { id: string } };
+      assert.strictEqual(outsiderResponse.status, 201);
+
+      const targetBusinessId = 'biz_valeria_studio';
+      sqlite.prepare(`
+        INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+        VALUES (?, 'biz_route68_barber', ?, 'OWNER', 1, ?)
+      `).run(generateId('bm'), unrelatedOwner.user.id, new Date().toISOString());
+      const secondOwnerBusiness = sqlite.prepare(`
+        SELECT business_id FROM business_members
+        WHERE user_id = ? AND is_active = 1
+      `).get(unrelatedOwner.user.id) as { business_id: string };
+      assert.notStrictEqual(secondOwnerBusiness.business_id, targetBusinessId);
+      assert.strictEqual(sqlite.prepare(`
+        SELECT COUNT(*) as count FROM business_members WHERE user_id = ? AND is_active = 1
+      `).get(outsider.user.id)?.count, 0);
+
+      const createBooking = (status: string) => {
+        const id = generateId('authz_booking');
+        const now = new Date().toISOString();
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, client_email,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, '2099-01-01', '11:00', '12:15', 75, 45000, 'salon', ?,
+            'presential', 'pending', 'María Paz Contreras', '+56991234567', 'cliente@gmail.com', ?, ?)
+        `).run(
+          id,
+          `AUTHZ-${id}`,
+          targetBusinessId,
+          'stf_valeria',
+          'srv_val_tintura_raiz',
+          bookingCustomer.user.id,
+          status,
+          now,
+          now
+        );
+        return id;
+      };
+
+      const bookings = {
+        confirm: createBooking('PENDING'),
+        reject: createBooking('PENDING'),
+        complete: createBooking('PENDING'),
+        ownerCancel: createBooking('PENDING'),
+        customerCancel: createBooking('PENDING'),
+        staffCancel: createBooking('PENDING'),
+      };
+      const outsiders = [unrelatedOwner.token, outsider.token];
+      const assertNotFound = async (response: Response) => assert.strictEqual(response.status, 404);
+      const postAs = (path: string, token: string, body: unknown = {}) => sendJson(path, body, token);
+      const getAs = (path: string, token: string) => requestJson(path, 'GET', token);
+
+      for (const token of outsiders) {
+        await assertNotFound(await getAs(`/api/bookings/${bookings.confirm}`, token));
+      }
+      assert.strictEqual((await getAs(`/api/bookings/${bookings.confirm}`, owner.token)).status, 200);
+      assert.strictEqual((await getAs(`/api/bookings/${bookings.confirm}`, bookingCustomer.token)).status, 200);
+      assert.strictEqual((await getAs(`/api/bookings/${bookings.confirm}`, staff.token)).status, 200);
+      assert.strictEqual((await getAs(`/api/bookings/${bookings.confirm}`, platformAdmin.token)).status, 200);
+
+      for (const token of outsiders) {
+        await assertNotFound(await postAs(`/api/bookings/${bookings.confirm}/confirm`, token));
+        await assertNotFound(await postAs(`/api/bookings/${bookings.reject}/reject`, token));
+        await assertNotFound(await postAs(`/api/bookings/${bookings.complete}/complete`, token));
+        await assertNotFound(await postAs(`/api/bookings/${bookings.ownerCancel}/cancel`, token));
+        await assertNotFound(await postAs(`/api/bookings/${bookings.customerCancel}/cancel`, token));
+        await assertNotFound(await postAs('/api/payments/checkout/simulate', token, {
+          booking_id: bookings.customerCancel,
+          action: 'approve',
+        }));
+      }
+
+      const staffConfirm = await postAs(`/api/bookings/${bookings.confirm}/confirm`, staff.token);
+      assert.strictEqual(staffConfirm.status, 403);
+      assert.deepStrictEqual(await staffConfirm.json(), {
+        error: 'No tienes permisos para esta acción en el negocio.',
+      });
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.confirm}/confirm`, owner.token)).status, 200);
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.reject}/reject`, owner.token, { reason: 'Prueba autorizada' })).status, 200);
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.complete}/complete`, owner.token)).status, 200);
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.ownerCancel}/cancel`, owner.token)).status, 200);
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.staffCancel}/cancel`, staff.token)).status, 200);
+      assert.strictEqual((await postAs('/api/payments/checkout/simulate', bookingCustomer.token, {
+        booking_id: bookings.customerCancel,
+        action: 'approve',
+      })).status, 200);
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.customerCancel}/cancel`, bookingCustomer.token)).status, 200);
+
+      for (const token of outsiders) {
+        await assertNotFound(await requestJson(`/api/business/${targetBusinessId}`, 'PUT', token, { description: 'No autorizado' }));
+        await assertNotFound(await postAs(`/api/business/${targetBusinessId}/services`, token, {
+          name: 'Servicio no autorizado',
+          price_clp: 15000,
+        }));
+        await assertNotFound(await postAs(`/api/business/${targetBusinessId}/staff`, token, { name: 'No autorizado' }));
+        await assertNotFound(await requestJson(`/api/business/${targetBusinessId}/hours`, 'PUT', token, {
+          hours: [{ day_of_week: 1, open_time: '09:00', close_time: '18:00', is_closed: 0 }],
+        }));
+      }
+      const staffHours = await requestJson(`/api/business/${targetBusinessId}/hours`, 'PUT', staff.token, {
+        hours: [{ day_of_week: 1, open_time: '09:00', close_time: '18:00', is_closed: 0 }],
+      });
+      assert.strictEqual(staffHours.status, 403);
+      assert.strictEqual((await requestJson(`/api/business/${targetBusinessId}`, 'PUT', owner.token, {
+        description: 'Actualización autorizada',
+      })).status, 200);
+      assert.strictEqual((await requestJson(`/api/business/${targetBusinessId}/hours`, 'PUT', owner.token, {
+        hours: [{ day_of_week: 1, open_time: '09:00', close_time: '18:00', is_closed: 0 }],
+      })).status, 200);
+      assert.strictEqual((await postAs(`/api/business/${targetBusinessId}/staff`, owner.token, {
+        name: 'Trabajador autorizado',
+      })).status, 201);
+
+      const createdServiceResponse = await postAs(`/api/business/${targetBusinessId}/services`, owner.token, {
+        name: 'Servicio autorizado',
+        price_clp: 15000,
+      });
+      assert.strictEqual(createdServiceResponse.status, 201);
+      const createdService = await createdServiceResponse.json() as { service_id: string };
+      for (const token of outsiders) {
+        await assertNotFound(await requestJson(`/api/business/services/${createdService.service_id}`, 'PUT', token, { name: 'No autorizado' }));
+        await assertNotFound(await requestJson(`/api/business/services/${createdService.service_id}`, 'DELETE', token));
+      }
+      assert.strictEqual((await requestJson(`/api/business/services/${createdService.service_id}`, 'PUT', owner.token, {
+        name: 'Servicio actualizado',
+      })).status, 200);
+      assert.strictEqual((await requestJson(`/api/business/services/${createdService.service_id}`, 'DELETE', owner.token)).status, 200);
     });
 
     await integrationTest('Reset de contraseña: rechaza solicitudes sin token', async () => {
