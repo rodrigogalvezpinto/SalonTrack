@@ -53,6 +53,19 @@ async function startServer() {
       appType: 'spa',
     });
 
+    const dataDir = path.resolve(__dirname, 'data');
+    app.use((req, res, next) => {
+      let requestPath = req.path;
+      try {
+        requestPath = decodeURIComponent(req.path);
+      } catch {}
+      const fsPath = requestPath.startsWith('/@fs/') ? requestPath.slice(4) : path.join(__dirname, requestPath);
+      const resolved = path.resolve(fsPath);
+      if (resolved === dataDir || resolved.startsWith(dataDir + path.sep)) {
+        return res.status(404).end();
+      }
+      return next();
+    });
     app.use(vite.middlewares);
   } else {
     // Production mode: Serve built static files
