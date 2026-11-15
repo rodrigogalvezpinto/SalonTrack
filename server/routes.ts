@@ -370,7 +370,7 @@ router.post('/auth/forgot-password', (req, res) => {
     const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
     const resetLink = `${appUrl}/?reset_token=${token}`;
     void localEmailProvider.send(email.trim(), 'Recuperación de contraseña', `Abre este enlace para crear una nueva contraseña: ${resetLink}`);
-    console.log(`[Password reset link] ${process.env.NODE_ENV === 'production' ? `${appUrl}/?reset_token=[REDACTED]` : resetLink}`);
+    console.log(`[Password reset link] ${appUrl}/?reset_token=[REDACTED]`);
   }
 
   return res.json({ message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.' });
@@ -1966,6 +1966,8 @@ router.delete('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => 
   const clientIndex = db.clients.findIndex(c => c.id === clientId && c.user_id === userId);
   if (clientIndex === -1) return res.status(404).json({ error: 'Clienta no encontrada.' });
 
+  const sqlite = getSqliteDb();
+  sqlite.prepare('DELETE FROM clients WHERE id = ? AND user_id = ?').run(clientId, userId);
   db.clients.splice(clientIndex, 1);
   db.services = db.services.filter(s => !(s.client_id === clientId && s.user_id === userId));
   db.contact_logs = db.contact_logs.filter(l => !(l.client_id === clientId && l.user_id === userId));
@@ -2022,6 +2024,8 @@ router.delete('/services/:id', requireAuth, (req: AuthRequest, res: Response) =>
   const srvIndex = db.services.findIndex(s => s.id === req.params.id && s.user_id === userId);
   if (srvIndex === -1) return res.status(404).json({ error: 'Servicio no encontrado.' });
 
+  const sqlite = getSqliteDb();
+  sqlite.prepare('DELETE FROM client_service_history WHERE id = ? AND user_id = ?').run(req.params.id, userId);
   db.services.splice(srvIndex, 1);
   saveDb(db);
   return res.json({ message: 'Servicio eliminado del historial.' });

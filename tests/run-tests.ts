@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import express from 'express';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
 import { hashPassword, verifyPassword, generateToken, seedDemoDataIfEmpty } from '../server/auth.js';
-import { getDb, saveDb, generateId, User, Profile, Client, Service } from '../server/db.js';
+import { getDb, saveDb, refreshDb, generateId, User, Profile, Client, Service } from '../server/db.js';
 import { getSqliteDb } from '../server/sqlite.js';
 import { isSlotAvailable } from '../server/availability.js';
 import { localEmailProvider, localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
@@ -234,11 +234,11 @@ async function runIntegrationTests() {
   assert.ok(address && typeof address !== 'string');
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const sqlite = getSqliteDb();
-  const sendJson = (path: string, body: unknown, token?: string) => {
+  const sendJson = (path: string, body: unknown, token?: string, method = 'POST') => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
     return fetch(`${baseUrl}${path}`, {
-      method: 'POST',
+      method,
       headers,
       body: JSON.stringify(body),
     });
@@ -298,6 +298,82 @@ async function runIntegrationTests() {
       assert.deepStrictEqual(rolesAfter, rolesBefore);
       assert.deepStrictEqual(membershipsAfter, membershipsBefore);
       assert.deepStrictEqual(bookingsAfter, bookingsBefore);
+    });
+
+    await integrationTest('CRM: eliminaciones de cliente e historial persisten en SQLite', async () => {
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const login = await loginResponse.json() as { token: string };
+      assert.strictEqual(loginResponse.status, 200);
+
+      const clientResponse = await sendJson('/api/clients', {
+        full_name: 'Cliente de prueba de eliminaciones',
+        phone: '+56912345000',
+        initial_service: {
+          service_type: 'Historial para eliminar',
+          service_date: '2025-01-01',
+          recommended_interval_days: 30,
+        },
+      }, login.token);
+      const createdClient = await clientResponse.json() as {
+        client: { id: string };
+        service: { id: string };
+      };
+      assert.strictEqual(clientResponse.status, 201);
+      assert.ok(createdClient.service);
+
+      const extraServiceResponse = await sendJson('/api/services', {
+        client_id: createdClient.client.id,
+        service_type: 'Historial que debe eliminarse en cascada',
+        service_date: '2025-01-02',
+      }, login.token);
+      const extraService = await extraServiceResponse.json() as { service: { id: string } };
+      assert.strictEqual(extraServiceResponse.status, 201);
+
+      const contactLogResponse = await sendJson('/api/contact-logs', {
+        client_id: createdClient.client.id,
+        status: 'contacted',
+      }, login.token);
+      assert.strictEqual(contactLogResponse.status, 201);
+
+      const serviceDeleteResponse = await sendJson(
+        `/api/services/${createdClient.service.id}`,
+        {},
+        login.token,
+        'DELETE'
+      );
+      assert.strictEqual(serviceDeleteResponse.status, 200);
+      assert.strictEqual(sqlite.prepare(
+        'SELECT COUNT(*) as count FROM client_service_history WHERE id = ? AND user_id = ?'
+      ).get(createdClient.service.id, 'usr_demo_valeria_estilista')?.count, 0);
+
+      refreshDb();
+      assert.ok(!getDb().services.some(service => service.id === createdClient.service.id));
+      assert.ok(getDb().services.some(service => service.id === extraService.service.id));
+
+      const clientDeleteResponse = await sendJson(
+        `/api/clients/${createdClient.client.id}`,
+        {},
+        login.token,
+        'DELETE'
+      );
+      assert.strictEqual(clientDeleteResponse.status, 200);
+      assert.strictEqual(sqlite.prepare(
+        'SELECT COUNT(*) as count FROM clients WHERE id = ? AND user_id = ?'
+      ).get(createdClient.client.id, 'usr_demo_valeria_estilista')?.count, 0);
+      assert.strictEqual(sqlite.prepare(
+        'SELECT COUNT(*) as count FROM client_service_history WHERE client_id = ?'
+      ).get(createdClient.client.id)?.count, 0);
+      assert.strictEqual(sqlite.prepare(
+        'SELECT COUNT(*) as count FROM contact_logs WHERE client_id = ?'
+      ).get(createdClient.client.id)?.count, 0);
+
+      refreshDb();
+      assert.ok(!getDb().clients.some(client => client.id === createdClient.client.id));
+      assert.ok(!getDb().services.some(service => service.id === extraService.service.id));
+      assert.ok(!getDb().contact_logs.some(log => log.client_id === createdClient.client.id));
     });
 
     await integrationTest('Reset de contraseña: rechaza solicitudes sin token', async () => {
