@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { createHash, randomBytes } from 'node:crypto';
 import { getDb, saveDb, refreshDb, generateId, User, Profile, Subscription, Client, Service, ContactLog, Payment } from './db.js';
 import { hashPassword, verifyPassword, generateToken, requireAuth, requireRole, getUserRoles, AuthRequest } from './auth.js';
 import { getSqliteDb } from './sqlite.js';
@@ -350,32 +351,83 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
 
 router.post('/auth/forgot-password', (req, res) => {
   const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'Ingresa tu correo registrado.' });
-
   const sqlite = getSqliteDb();
-  const user = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?').get(email.trim().toLowerCase());
+  const user = typeof email === 'string'
+    ? sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?').get(email.trim().toLowerCase()) as { id: string } | undefined
+    : undefined;
 
-  return res.json({
-    message: 'Si el correo está registrado, recibirás un enlace de recuperación con instrucciones de acceso.',
-    sent: !!user,
-  });
+  if (user) {
+    const token = randomBytes(32).toString('hex');
+    const now = new Date();
+    const createdAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    sqlite.prepare(`
+      INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(generateId('prt'), user.id, tokenHash, expiresAt, createdAt);
+
+    const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
+    const resetLink = `${appUrl}/?reset_token=${token}`;
+    void localEmailProvider.send(email.trim(), 'Recuperación de contraseña', `Abre este enlace para crear una nueva contraseña: ${resetLink}`);
+    console.log(`[Password reset link] ${resetLink}`);
+  }
+
+  return res.json({ message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.' });
 });
 
 router.post('/auth/reset-password', (req, res) => {
-  const { email, new_password } = req.body;
-  if (!email || !new_password || new_password.length < 6) {
+  const { token, new_password } = req.body;
+  const genericError = { error: 'El enlace de recuperación no es válido o expiró.' };
+  if (typeof token !== 'string' || !token) {
+    return res.status(400).json(genericError);
+  }
+  if (typeof new_password !== 'string' || new_password.length < 6) {
     return res.status(400).json({ error: 'Contraseña debe contener al menos 6 caracteres.' });
   }
 
   const sqlite = getSqliteDb();
-  const user = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?').get(email.trim().toLowerCase()) as any;
-  if (!user) {
-    return res.status(404).json({ error: 'No se encontró una cuenta con ese correo.' });
+  const tokenHash = createHash('sha256').update(token).digest('hex');
+  const now = new Date().toISOString();
+
+  try {
+    sqlite.exec('BEGIN IMMEDIATE');
+    const resetToken = sqlite.prepare(`
+      SELECT id, user_id, expires_at, used_at
+      FROM password_reset_tokens
+      WHERE token_hash = ?
+    `).get(tokenHash) as { id: string; user_id: string; expires_at: string; used_at: string | null } | undefined;
+
+    const expirationTime = resetToken ? Date.parse(resetToken.expires_at) : NaN;
+    if (!resetToken || resetToken.used_at || !Number.isFinite(expirationTime) || expirationTime <= Date.now()) {
+      sqlite.exec('ROLLBACK');
+      return res.status(400).json(genericError);
+    }
+
+    const updated = sqlite.prepare(`
+      UPDATE password_reset_tokens
+      SET used_at = ?
+      WHERE id = ? AND used_at IS NULL AND expires_at > ?
+    `).run(now, resetToken.id, now);
+    if (updated.changes !== 1) {
+      sqlite.exec('ROLLBACK');
+      return res.status(400).json(genericError);
+    }
+
+    sqlite.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+      .run(hashPassword(new_password), resetToken.user_id);
+    sqlite.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL')
+      .run(now, resetToken.user_id);
+    sqlite.exec('COMMIT');
+  } catch (error) {
+    try {
+      sqlite.exec('ROLLBACK');
+    } catch {}
+    console.error('Password reset error:', error);
+    return res.status(500).json({ error: 'No se pudo actualizar la contraseña.' });
   }
 
-  sqlite.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(new_password), user.id);
   refreshDb();
-
   return res.json({ message: 'Contraseña actualizada con éxito. Ya puedes iniciar sesión.' });
 });
 

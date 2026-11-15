@@ -35,6 +35,7 @@ import { showPushNotification, playNotificationChime } from './utils/notificatio
 
 function MainApp() {
   const { user, profile, isCustomer, isPlatformAdmin, isBusinessOwner, isStaff, business, isLoading } = useAuth();
+  const resetToken = new URLSearchParams(window.location.search).get('reset_token');
 
   // Navigation state
   const [currentView, setCurrentView] = useState<string>('dashboard');
@@ -42,8 +43,8 @@ function MainApp() {
   const [selectedBusinessSlug, setSelectedBusinessSlug] = useState<string>('valeria-henriquez-studio');
 
   // Modals
-  const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
+  const [authModalOpen, setAuthModalOpen] = useState(() => Boolean(resetToken));
+  const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'reset'>(() => resetToken ? 'reset' : 'login');
   
   const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
   const [checkoutDefaultPlan, setCheckoutDefaultPlan] = useState<string>('pro_quarterly');
@@ -337,6 +338,12 @@ function MainApp() {
         isOpen={checkoutModalOpen}
         defaultPlan={checkoutDefaultPlan}
         onClose={() => setCheckoutModalOpen(false)}
+      />
+
+      <AuthModal
+        isOpen={authModalOpen}
+        initialMode={authModalMode}
+        onClose={() => setAuthModalOpen(false)}
       />
 
       <OfflineBanner />
