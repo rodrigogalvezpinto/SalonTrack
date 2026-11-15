@@ -1,11 +1,12 @@
 import assert from 'node:assert';
+import { createHash } from 'node:crypto';
 import express from 'express';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
 import { hashPassword, verifyPassword, generateToken, seedDemoDataIfEmpty } from '../server/auth.js';
 import { getDb, saveDb, generateId, User, Profile, Client, Service } from '../server/db.js';
 import { getSqliteDb } from '../server/sqlite.js';
 import { isSlotAvailable } from '../server/availability.js';
-import { localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
+import { localEmailProvider, localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
 import apiRouter from '../server/routes.js';
 
 console.log('🧪 Iniciando Suite de Pruebas Automatizadas de SalonTrack Chile...\n');
@@ -229,17 +230,41 @@ async function runIntegrationTests() {
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>(resolve => server.once('listening', () => resolve()));
 
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const sqlite = getSqliteDb();
+  const sendJson = (path: string, body: unknown, token?: string) => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+  };
+  const requestReset = async (email: string) => {
+    let emailContent = '';
+    const originalSend = localEmailProvider.send;
+    localEmailProvider.send = async (to, subject, html) => {
+      emailContent = html;
+      return { success: true, to, subject, simulated: true, sentAt: new Date().toISOString() };
+    };
+    try {
+      const response = await sendJson('/api/auth/forgot-password', { email });
+      const body = await response.json() as Record<string, unknown>;
+      return { response, body, emailContent };
+    } finally {
+      localEmailProvider.send = originalSend;
+    }
+  };
+  let olderResetToken = '';
+
   try {
     await integrationTest('Integridad SQLite: POST /clients conserva roles, membresías y reservas del demo owner', async () => {
-      const address = server.address();
-      assert.ok(address && typeof address !== 'string');
-      const baseUrl = `http://127.0.0.1:${address.port}`;
-      const sqlite = getSqliteDb();
-
-      const loginResponse = await fetch(`${baseUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'contacto@valeriaestudio.cl', password: 'Salon1234' }),
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
       });
       const loginBody = await loginResponse.json() as { token: string; user: { id: string } };
       assert.strictEqual(loginResponse.status, 200);
@@ -255,14 +280,11 @@ async function runIntegrationTests() {
       assert.ok(membershipsBefore.length > 0, 'El usuario demo debe pertenecer a un negocio');
       assert.ok(bookingsBefore.length > 0, 'El negocio demo debe tener reservas');
 
-      const clientResponse = await fetch(`${baseUrl}/api/clients`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${loginBody.token}`,
-        },
-        body: JSON.stringify({ full_name: 'Cliente de prueba de integridad', phone: '+56912345678' }),
-      });
+      const clientResponse = await sendJson(
+        '/api/clients',
+        { full_name: 'Cliente de prueba de integridad', phone: '+56912345678' },
+        loginBody.token
+      );
       assert.strictEqual(clientResponse.status, 201);
 
       const rolesAfter = sqlite.prepare('SELECT * FROM user_roles ORDER BY id').all();
@@ -276,6 +298,90 @@ async function runIntegrationTests() {
       assert.deepStrictEqual(rolesAfter, rolesBefore);
       assert.deepStrictEqual(membershipsAfter, membershipsBefore);
       assert.deepStrictEqual(bookingsAfter, bookingsBefore);
+    });
+
+    await integrationTest('Reset de contraseña: rechaza solicitudes sin token', async () => {
+      const response = await sendJson('/api/auth/reset-password', {
+        email: 'contacto@valeriaestudio.cl',
+        new_password: 'NoDebeAplicarse123!',
+      });
+      assert.strictEqual(response.status, 400);
+      assert.deepStrictEqual(await response.json(), {
+        error: 'El enlace de recuperación no es válido o expiró.',
+      });
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      assert.strictEqual(loginResponse.status, 200);
+    });
+
+    await integrationTest('Recuperación: mismo cuerpo para correo registrado y no registrado', async () => {
+      const existing = await requestReset('contacto@valeriaestudio.cl');
+      const unknown = await requestReset('no-existe@salontrack.cl');
+      assert.strictEqual(existing.response.status, 200);
+      assert.strictEqual(unknown.response.status, 200);
+      assert.deepStrictEqual(existing.body, unknown.body);
+      assert.ok(!Object.hasOwn(existing.body, 'sent'));
+
+      const match = existing.emailContent.match(/reset_token=([a-f0-9]{64})/);
+      assert.ok(match, 'El adaptador local debe recibir el enlace con un token de 32 bytes');
+      olderResetToken = match[1];
+      const storedToken = sqlite.prepare(`
+        SELECT token_hash, expires_at
+        FROM password_reset_tokens
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get('usr_demo_valeria_estilista') as { token_hash: string; expires_at: string };
+      assert.strictEqual(storedToken.token_hash, createHash('sha256').update(olderResetToken).digest('hex'));
+      assert.ok(Date.parse(storedToken.expires_at) > Date.now());
+      assert.ok(Date.parse(storedToken.expires_at) <= Date.now() + 30 * 60 * 1000);
+    });
+
+    await integrationTest('Reset de contraseña: token válido funciona una vez e invalida los anteriores', async () => {
+      const request = await requestReset('contacto@valeriaestudio.cl');
+      const match = request.emailContent.match(/reset_token=([a-f0-9]{64})/);
+      assert.ok(match);
+      const token = match[1];
+      const newPassword = 'NuevaClaveSegura123!';
+      const resetResponse = await sendJson('/api/auth/reset-password', { token, new_password: newPassword });
+      assert.strictEqual(resetResponse.status, 200);
+
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: newPassword,
+      });
+      assert.strictEqual(loginResponse.status, 200);
+
+      const reusedResponse = await sendJson('/api/auth/reset-password', { token, new_password: 'OtraClaveSegura123!' });
+      assert.strictEqual(reusedResponse.status, 400);
+      const olderResponse = await sendJson('/api/auth/reset-password', {
+        token: olderResetToken,
+        new_password: 'TerceraClaveSegura123!',
+      });
+      assert.strictEqual(olderResponse.status, 400);
+    });
+
+    await integrationTest('Reset de contraseña: token expirado devuelve 400', async () => {
+      const token = 'expired-reset-token';
+      const user = sqlite.prepare('SELECT id FROM users WHERE email = ?').get('contacto@valeriaestudio.cl') as { id: string };
+      sqlite.prepare(`
+        INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, used_at, created_at)
+        VALUES (?, ?, ?, ?, NULL, ?)
+      `).run(
+        generateId('prt'),
+        user.id,
+        createHash('sha256').update(token).digest('hex'),
+        new Date(Date.now() - 60_000).toISOString(),
+        new Date().toISOString()
+      );
+
+      const response = await sendJson('/api/auth/reset-password', { token, new_password: 'NoDebeAplicarse123!' });
+      assert.strictEqual(response.status, 400);
+      assert.deepStrictEqual(await response.json(), {
+        error: 'El enlace de recuperación no es válido o expiró.',
+      });
     });
   } finally {
     await new Promise<void>((resolve, reject) => {

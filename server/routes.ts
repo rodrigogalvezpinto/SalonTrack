@@ -370,7 +370,7 @@ router.post('/auth/forgot-password', (req, res) => {
     const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
     const resetLink = `${appUrl}/?reset_token=${token}`;
     void localEmailProvider.send(email.trim(), 'Recuperación de contraseña', `Abre este enlace para crear una nueva contraseña: ${resetLink}`);
-    console.log(`[Password reset link] ${resetLink}`);
+    console.log(`[Password reset link] ${appUrl}/?reset_token=[REDACTED]`);
   }
 
   return res.json({ message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.' });

@@ -34,7 +34,7 @@ Los PR #1 y #2 contenían una implementación alternativa. Se decidió cerrarlos
 - `server/db.ts` conserva el modelo CRM global en memoria y sincroniza tablas en varias sentencias; el UPSERT evita los borrados en cascada de `REPLACE`, pero no vuelve atómica la sincronización.
 - `schema_migrations` registra versiones sin checksums, estrategia de rollback ni verificación automática de una migración ya aplicada.
 - La autorización por negocio no está centralizada. `requireAuth` protege varias rutas, pero la validación de membresía/propiedad depende de cada endpoint.
-- Los enlaces de recuperación se imprimen en consola para la simulación local de email; debe sustituirse por entrega segura antes de habilitar recuperación en producción.
+- La recuperación usa un adaptador local que no entrega correo real; el token no se imprime en consola para evitar exponer una credencial bearer. Debe integrarse una entrega segura antes de habilitar recuperación en producción.
 - El checkout y el webhook son simulados; no se verifican firmas de proveedor ni se debe tratar la respuesta actual como confirmación real de pago.
 - La disponibilidad consulta reservas antes de insertar, sin una garantía atómica contra dos reservas concurrentes.
 
@@ -44,5 +44,5 @@ Los PR #1 y #2 contenían una implementación alternativa. Se decidió cerrarlos
 2. **P0 — Autorización:** implementar middleware de pertenencia y permisos por negocio, aplicarlo a todas las rutas de negocio/reservas y añadir pruebas negativas entre cuentas.
 3. **P1 — Migraciones y respaldo:** añadir checksums, validación de versiones, estrategia de recuperación y una prueba automatizada de respaldo/restauración.
 4. **P1 — Reservas:** hacer atómica la comprobación e inserción de turnos; completar reprogramación, expiración e integración transaccional con CRM.
-5. **P2 — Servicios externos:** reemplazar la simulación de email y pagos, proteger y validar webhooks, y dejar de registrar tokens de recuperación en producción.
+5. **P2 — Servicios externos:** reemplazar la simulación de email y pagos e implementar validación de firmas de webhook.
 6. **P2 — Estabilización:** ampliar pruebas E2E, de concurrencia y accesibilidad; cubrir límites de suscripción y validación de permisos en CI.
