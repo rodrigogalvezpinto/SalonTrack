@@ -1,5 +1,8 @@
 import assert from 'node:assert';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import express from 'express';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
 import { hashPassword, verifyPassword, generateToken, seedDemoDataIfEmpty } from '../server/auth.js';
@@ -390,6 +393,27 @@ async function runIntegrationTests() {
         password: 'Salon1234',
       });
       assert.strictEqual(loginResponse.status, 200);
+    });
+
+    await integrationTest('Correo local: guarda el enlace en el buzón de desarrollo, no en consola', async () => {
+      const outboxDir = mkdtempSync(join(tmpdir(), 'salontrack-dev-mail-'));
+      const previousDir = process.env.DEV_MAIL_DIR;
+      const previousLog = console.log;
+      const logged: string[] = [];
+      process.env.DEV_MAIL_DIR = outboxDir;
+      console.log = (...args: unknown[]) => { logged.push(args.join(' ')); };
+      try {
+        await localEmailProvider.send('qa@salontrack.cl', 'Recuperación', 'Enlace: http://localhost:3000/?reset_token=abc123');
+      } finally {
+        console.log = previousLog;
+        if (previousDir === undefined) delete process.env.DEV_MAIL_DIR; else process.env.DEV_MAIL_DIR = previousDir;
+      }
+      const lines = readFileSync(join(outboxDir, 'outbox.jsonl'), 'utf8').trim().split('\n');
+      const mail = JSON.parse(lines[lines.length - 1]);
+      assert.strictEqual(mail.to, 'qa@salontrack.cl');
+      assert.ok(mail.body.includes('reset_token=abc123'));
+      assert.ok(logged.every(line => !line.includes('reset_token')));
+      rmSync(outboxDir, { recursive: true, force: true });
     });
 
     await integrationTest('Recuperación: mismo cuerpo para correo registrado y no registrado', async () => {

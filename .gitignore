@@ -9,3 +9,4 @@ coverage/
 data/*.sqlite*
 data/*.backup.json
 data/backups/
+data/dev-mail/

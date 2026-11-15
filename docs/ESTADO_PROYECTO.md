@@ -34,7 +34,7 @@ Los PR #1 y #2 contenían una implementación alternativa. Se decidió cerrarlos
 - `server/db.ts` conserva el modelo CRM global en memoria y sincroniza tablas en varias sentencias; el UPSERT evita los borrados en cascada de `REPLACE`, pero no vuelve atómica la sincronización.
 - `schema_migrations` registra versiones sin checksums, estrategia de rollback ni verificación automática de una migración ya aplicada.
 - La autorización por negocio no está centralizada. `requireAuth` protege varias rutas, pero la validación de membresía/propiedad depende de cada endpoint.
-- La recuperación usa un adaptador local que no entrega correo real; el token no se imprime en consola para evitar exponer una credencial bearer. Debe integrarse una entrega segura antes de habilitar recuperación en producción.
+- La recuperación usa un adaptador local que no entrega correo real. Fuera de producción, cada correo (incluido el enlace de recuperación) se guarda en `data/dev-mail/outbox.jsonl`, ignorado por git; la consola solo indica el destinatario. En producción no se guarda el cuerpo: debe integrarse una entrega real antes de habilitar la recuperación.
 - El checkout y el webhook son simulados; no se verifican firmas de proveedor ni se debe tratar la respuesta actual como confirmación real de pago.
 - La disponibilidad consulta reservas antes de insertar, sin una garantía atómica contra dos reservas concurrentes.
 
