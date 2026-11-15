@@ -394,6 +394,44 @@ test('inicio completa demos para bases vacías o con usuarios demo existentes', 
   }
 });
 
+test('operaciones de datos demo se rechazan en producción', () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousJwtSecret = process.env.JWT_SECRET;
+  const previousWarn = console.warn;
+  const warnings: unknown[][] = [];
+  try {
+    initDatabase(path.join(testDir, 'production-seed.sqlite'));
+    const now = new Date().toISOString();
+    usersRepository.insert({
+      id: 'usr_existing_demo_production',
+      email: 'contacto@valeriaestudio.cl',
+      password_hash: 'legacy-hash',
+      is_demo: true,
+      created_at: now,
+      updated_at: now,
+    });
+    process.env.NODE_ENV = 'production';
+    process.env.JWT_SECRET = 'secure-production-test-jwt-secret-32-characters';
+    console.warn = (...args) => warnings.push(args);
+
+    assert.equal(seedDemoData(), false);
+    assert.equal(seedDemoDataIfEmpty(), false);
+    assert.deepEqual(resetDemoData(), { removedUsers: 0 });
+    assert.equal(usersRepository.count(), 1);
+    assert.ok(usersRepository.findByEmail('contacto@valeriaestudio.cl'));
+    assert.equal(usersRepository.findByEmail('admin@demo.salontrack.cl'), undefined);
+    assert.equal(warnings.length, 3);
+  } finally {
+    console.warn = previousWarn;
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = previousJwtSecret;
+    closeDatabase();
+    initDatabase(mainDatabase);
+  }
+});
+
 test('cuentas demo: credenciales, negocios públicos y reset conserva cuentas reales', async () => {
   const demoDatabase = path.join(testDir, 'demo.sqlite');
   initDatabase(demoDatabase);

@@ -20,12 +20,14 @@ async function main() {
       break;
     }
     case 'seed': {
+      if (config.isProduction) throw new Error('npm run db:seed está deshabilitado en producción.');
       initDatabase(config.databaseFile);
       console.log(seedDemoData() ? 'Datos demo cargados.' : 'Los datos demo ya existían; no se modificó nada.');
       console.log(`Cuenta demo: ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
       break;
     }
     case 'reset': {
+      if (config.isProduction) throw new Error('npm run db:reset está deshabilitado en producción.');
       initDatabase(config.databaseFile);
       const { removedUsers } = resetDemoData();
       console.log(`Datos demo reiniciados (${removedUsers} cuenta(s) demo eliminadas y recreadas). Los datos reales no se tocaron.`);

@@ -9,6 +9,7 @@ import { rolesRepository } from '../repositories/roles.js';
 import { businessesRepository } from '../repositories/businesses.js';
 import { membersRepository } from '../repositories/members.js';
 import { ensureProfessionalSetup } from '../services/businesses.js';
+import { getConfig } from '../config.js';
 
 export const DEMO_EMAIL = 'contacto@valeriaestudio.cl';
 export const DEMO_PASSWORD = 'Salon1234';
@@ -19,6 +20,12 @@ const DEMO_ACCOUNTS = [
   { email: 'dueno@demo.salontrack.cl', password: 'Dueno1234', name: 'Dueño Demo' },
   { email: 'trabajador@demo.salontrack.cl', password: 'Staff1234', name: 'Trabajador Demo' },
 ];
+
+function refuseProductionDemoData(): boolean {
+  if (!getConfig().isProduction) return false;
+  console.warn('Las operaciones de datos demo están deshabilitadas en producción.');
+  return true;
+}
 
 /** Inserta los datos CRM de Valeria si su cuenta aún no existe. */
 function seedValeriaDemoData(): boolean {
@@ -398,6 +405,7 @@ function demoBusiness(ownerId: string, fields: Partial<import('../services/busin
 
 /** Siembra cada cuenta demo de manera independiente e idempotente por correo. */
 export function seedDemoData(): boolean {
+  if (refuseProductionDemoData()) return false;
   let changed = seedValeriaDemoData();
 
   const admin = insertDemoAccount(DEMO_ACCOUNTS[0].email, DEMO_ACCOUNTS[0].password, DEMO_ACCOUNTS[0].name);
@@ -476,6 +484,7 @@ export function seedDemoData(): boolean {
 
 /** Elimina únicamente las cuentas demo (y sus datos en cascada) y las vuelve a crear. */
 export function resetDemoData(): { removedUsers: number } {
+  if (refuseProductionDemoData()) return { removedUsers: 0 };
   return transaction(() => {
     businessesRepository.deleteDemo();
     const removedUsers = usersRepository.deleteDemoUsers();
@@ -486,6 +495,7 @@ export function resetDemoData(): { removedUsers: number } {
 
 /** Completa los datos demo en bases vacías o con cuentas demo existentes. */
 export function seedDemoDataIfEmpty(): boolean {
+  if (refuseProductionDemoData()) return false;
   if (usersRepository.count() > 0 && !usersRepository.hasDemoUsers()) return false;
   return seedDemoData();
 }
