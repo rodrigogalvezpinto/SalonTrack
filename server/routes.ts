@@ -843,7 +843,7 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
       let bookingCode: string | null = null;
       const currentYear = new Date().getFullYear();
       for (let attempt = 0; attempt < 5; attempt++) {
-        const candidate = `ST-${currentYear}-${randomBytes(2).toString('hex').toUpperCase()}`;
+        const candidate = `ST-${currentYear}-${randomBytes(4).toString('hex').toUpperCase()}`;
         if (!db.prepare('SELECT 1 FROM bookings WHERE code = ?').get(candidate)) {
           bookingCode = candidate;
           break;
