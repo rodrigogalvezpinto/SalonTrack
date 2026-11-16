@@ -84,15 +84,10 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
   useEffect(() => {
     if (!rescheduleModalBooking || !rescheduleDate) return;
     let active = true;
-    const params = new URLSearchParams({
-      business_id: rescheduleModalBooking.business_id,
-      service_id: rescheduleModalBooking.service_id,
-      date: rescheduleDate,
-      staff_id: rescheduleModalBooking.staff_id,
-    });
+    const params = new URLSearchParams({ date: rescheduleDate });
     setIsLoadingRescheduleSlots(true);
     setRescheduleSlots([]);
-    apiRequest<{ slots: TimeSlotItem[] }>(`/api/availability/slots?${params}`)
+    apiRequest<{ slots: TimeSlotItem[] }>(`/api/bookings/${rescheduleModalBooking.id}/reschedule-slots?${params}`)
       .then(result => {
         if (active) setRescheduleSlots(result.slots || []);
       })

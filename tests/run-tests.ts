@@ -872,6 +872,15 @@ async function runIntegrationTests() {
       const available = await findAvailableSlots(businessId, serviceId, 'stf_valeria', 20);
       const { date } = available;
       const slots = selectSeparatedSlots(available.slots, 4);
+      const currentStart = slots[0].time.split(':').map(Number).reduce((minutes, value) => minutes * 60 + value, 0);
+      const overlappingSlot = available.slots.find(slot => {
+        const [hour, minute] = slot.time.split(':').map(Number);
+        const candidateStart = hour * 60 + minute;
+        return candidateStart > currentStart &&
+          candidateStart < currentStart + slots[0].durationMinutes &&
+          candidateStart + slot.durationMinutes > currentStart;
+      });
+      assert.ok(overlappingSlot);
       const bookingIds = [
         generateId('reschedule'),
         generateId('reschedule_occupied'),
@@ -936,6 +945,55 @@ async function runIntegrationTests() {
           start_time: slots[0].time,
         }, customer.token);
         assert.strictEqual(missingBooking.status, 404);
+        const missingSlotList = await requestJson(
+          `/api/bookings/no-existe/reschedule-slots?date=${date}`,
+          'GET',
+          customer.token
+        );
+        assert.strictEqual(missingSlotList.status, 404);
+        const invalidDateSlotList = await requestJson(
+          `/api/bookings/${bookingIds[0]}/reschedule-slots?date=mal`,
+          'GET',
+          customer.token
+        );
+        assert.strictEqual(invalidDateSlotList.status, 400);
+
+        const publicParams = new URLSearchParams({
+          business_id: businessId,
+          service_id: serviceId,
+          date,
+          staff_id: 'stf_valeria',
+        });
+        const publicSlotResponse = await requestJson(`/api/availability/slots?${publicParams}`, 'GET');
+        const publicSlotBody = await publicSlotResponse.json() as {
+          slots: Array<{ time: string }>;
+        };
+        assert.strictEqual(publicSlotResponse.status, 200);
+        assert.ok(!publicSlotBody.slots.some(slot => slot.time === overlappingSlot.time));
+        const rescheduleSlotResponse = await requestJson(
+          `/api/bookings/${bookingIds[0]}/reschedule-slots?date=${date}`,
+          'GET',
+          customer.token
+        );
+        const rescheduleSlotBody = await rescheduleSlotResponse.json() as {
+          date: string;
+          slots: Array<{ time: string }>;
+        };
+        assert.strictEqual(rescheduleSlotResponse.status, 200);
+        assert.strictEqual(rescheduleSlotBody.date, date);
+        assert.ok(rescheduleSlotBody.slots.some(slot => slot.time === overlappingSlot.time));
+        const strangerSlotResponse = await requestJson(
+          `/api/bookings/${bookingIds[0]}/reschedule-slots?date=${date}`,
+          'GET',
+          stranger.token
+        );
+        assert.strictEqual(strangerSlotResponse.status, 404);
+        const completedSlotResponse = await requestJson(
+          `/api/bookings/${bookingIds[2]}/reschedule-slots?date=${date}`,
+          'GET',
+          customer.token
+        );
+        assert.strictEqual(completedSlotResponse.status, 400);
         const currentSlot = { booking_date: date, start_time: slots[0].time };
         await assertUnchanged(bookingIds[0], customer.token, { booking_date: 'bad-date', start_time: slots[0].time }, 400);
 

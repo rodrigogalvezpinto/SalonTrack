@@ -1042,6 +1042,32 @@ router.get('/bookings', requireAuth, (req: AuthRequest, res: Response) => listBo
 router.get('/bookings/my', requireAuth, (req: AuthRequest, res: Response) => listBookings(req, res, 'customer'));
 router.get('/bookings/business', requireAuth, (req: AuthRequest, res: Response) => listBookings(req, res, 'business'));
 
+router.get('/bookings/:id/reschedule-slots', requireAuth, (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
+  if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (booking.customer_user_id !== req.userId && authorizeBusiness(req, res, booking.business_id) === null) return;
+
+  const date = typeof req.query.date === 'string' ? req.query.date : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'El formato de fecha no es válido.' });
+  }
+  if (booking.status !== 'PENDING' && booking.status !== 'CONFIRMED') {
+    return res.status(400).json({ error: `No se puede reprogramar una reserva en estado ${booking.status}.` });
+  }
+
+  return res.json({
+    date,
+    slots: getAvailableSlots({
+      businessId: booking.business_id,
+      serviceId: booking.service_id,
+      dateStr: date,
+      staffId: booking.staff_id,
+      excludeBookingId: booking.id,
+    }),
+  });
+});
+
 router.get('/bookings/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare(`
