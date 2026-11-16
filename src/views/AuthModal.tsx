@@ -5,7 +5,7 @@ import { X, Scissors, Lock, Mail, User, Building, Phone, ArrowRight, Check } fro
 
 interface AuthModalProps {
   isOpen: boolean;
-  initialMode?: 'login' | 'register';
+  initialMode?: 'login' | 'register' | 'reset';
   onClose: () => void;
 }
 
@@ -15,11 +15,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onClose,
 }) => {
   const { login, register } = useAuth();
-  const [mode, setMode] = useState<'login' | 'register' | 'forgot'>(initialMode);
+  const [mode, setMode] = useState<'login' | 'register' | 'forgot' | 'reset'>(initialMode);
 
   // Form states
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get('reset_token') || '');
   const [fullName, setFullName] = useState('');
   const [businessName, setBusinessName] = useState('');
   const [phone, setPhone] = useState('+56 9 ');
@@ -55,6 +56,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           body: JSON.stringify({ email }),
         });
         setSuccessMsg(res.message);
+      } else if (mode === 'reset') {
+        const res = await apiRequest('/api/auth/reset-password', {
+          method: 'POST',
+          body: JSON.stringify({ token: resetToken, new_password: password }),
+        });
+        setSuccessMsg(res.message);
+        setPassword('');
+        setResetToken('');
+        setMode('login');
+        const url = new URL(window.location.href);
+        url.searchParams.delete('reset_token');
+        window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
       }
     } catch (err: any) {
       setError(err.message || 'Error al procesar la solicitud');
@@ -77,6 +90,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 {mode === 'login' && 'Iniciar Sesión'}
                 {mode === 'register' && 'Crear Cuenta Profesional'}
                 {mode === 'forgot' && 'Recuperar Contraseña'}
+                {mode === 'reset' && 'Crear Nueva Contraseña'}
               </h3>
               <p className="text-[11px] text-slate-400">SalonTrack Chile 🇨🇱</p>
             </div>
@@ -175,7 +189,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </>
           )}
 
-          <div>
+          {mode !== 'reset' && <div>
             <label className="text-xs font-bold text-slate-700 uppercase tracking-wide block mb-1">
               Correo Electrónico *
             </label>
@@ -190,13 +204,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 className="w-full text-xs rounded-xl border border-slate-300 pl-9 p-2.5 text-slate-800 focus:border-rose-500 outline-none"
               />
             </div>
-          </div>
+          </div>}
 
           {mode !== 'forgot' && (
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs font-bold text-slate-700 uppercase tracking-wide">
-                  Contraseña *
+                  {mode === 'reset' ? 'Nueva contraseña *' : 'Contraseña *'}
                 </label>
                 {mode === 'login' && (
                   <button
@@ -213,6 +227,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <input
                   type="password"
                   required
+                  minLength={mode === 'reset' ? 6 : undefined}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
@@ -227,7 +242,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             disabled={loading}
             className="w-full py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs sm:text-sm shadow-md transition active:scale-95 disabled:opacity-50"
           >
-            {loading ? 'Procesando...' : mode === 'login' ? 'Iniciar Sesión' : mode === 'register' ? 'Registrarme y Comenzar' : 'Enviar Instrucciones'}
+            {loading ? 'Procesando...' : mode === 'login' ? 'Iniciar Sesión' : mode === 'register' ? 'Registrarme y Comenzar' : mode === 'reset' ? 'Actualizar contraseña' : 'Enviar Instrucciones'}
           </button>
 
           {/* Toggle between Login, Register, Forgot */}
@@ -258,7 +273,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </p>
             )}
 
-            {mode === 'forgot' && (
+            {(mode === 'forgot' || mode === 'reset') && (
               <button
                 type="button"
                 onClick={() => { setMode('login'); setError(null); }}

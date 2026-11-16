@@ -44,6 +44,15 @@ function initMigrations(db: DatabaseSync) {
     );
     console.log('✅ SQLite Migration v1 (SalonTrack 2.0 Schema) applied successfully.');
   }
+
+  if (!appliedVersions.has(2)) {
+    applyMigrationV2(db);
+    db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
+      2,
+      'password_reset_tokens',
+      new Date().toISOString()
+    );
+  }
 }
 
 function applyMigrationV1(db: DatabaseSync) {
@@ -446,5 +455,20 @@ function applyMigrationV1(db: DatabaseSync) {
       value TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+  `);
+}
+
+function applyMigrationV2(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
+      ON password_reset_tokens(user_id);
   `);
 }

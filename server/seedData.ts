@@ -848,7 +848,7 @@ export function seedDemoDataIfEmpty() {
 
 function importLegacyJsonIfPresent(defaultUserId: string, defaultBusinessId: string) {
   try {
-    const jsonPath = path.resolve('data/salontrack.json');
+    const jsonPath = process.env.DATABASE_FILE_JSON || path.resolve('data/salontrack.json');
     if (!fs.existsSync(jsonPath)) return;
 
     const db = getSqliteDb();

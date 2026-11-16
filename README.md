@@ -108,3 +108,7 @@ Verifica:
 - Aislamiento multi-tenant entre profesionales.
 - Cálculo de días de inactividad para Re-engagement.
 - Idempotencia en la activación de licencias de Mercado Pago.
+
+## Estado del proyecto
+
+Consulta el [estado de avance de SalonTrack 2.0](docs/ESTADO_PROYECTO.md), con evidencias por fase, riesgos y próximos pasos.
