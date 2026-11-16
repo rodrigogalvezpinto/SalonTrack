@@ -11,7 +11,7 @@ import { hashPassword, verifyPassword, seedDemoDataIfEmpty } from '../server/aut
 import { createBackup, restoreBackup, verifyBackup } from '../server/backup.js';
 import { generateId } from '../server/db.js';
 import { listClients, listContactLogs, listServices } from '../server/crmRepository.js';
-import { checkMigrations, getSqliteDb, MIGRATIONS, migrationChecksum, runMigrations, withTransaction } from '../server/sqlite.js';
+import { checkMigrations, closeSqliteDb, getDatabasePath, getSqliteDb, MIGRATIONS, migrationChecksum, runMigrations, withTransaction } from '../server/sqlite.js';
 import { isSlotAvailable } from '../server/availability.js';
 import { localEmailProvider, localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
 import apiRouter from '../server/routes.js';
@@ -1138,6 +1138,24 @@ async function runIntegrationTests() {
         const tamperedVerification = verifyBackup(tamperedFile);
         assert.strictEqual(tamperedVerification.ok, false);
         assert.ok(!tamperedVerification.ok && tamperedVerification.error.includes('checksum registrado'));
+
+        const databasePath = getDatabasePath();
+        const corruptBytes = Buffer.from('base SQLite actual dañada');
+        closeSqliteDb();
+        writeFileSync(databasePath, corruptBytes);
+        rmSync(`${databasePath}-wal`, { force: true });
+        rmSync(`${databasePath}-shm`, { force: true });
+
+        const restoredFromCorruptDb = restoreBackup(backupFile);
+        assert.ok(restoredFromCorruptDb.safetyBackup && existsSync(restoredFromCorruptDb.safetyBackup));
+        assert.deepStrictEqual(readFileSync(restoredFromCorruptDb.safetyBackup!), corruptBytes);
+        assert.strictEqual(
+          (getSqliteDb().prepare('SELECT COUNT(*) AS count FROM clients WHERE id = ?').get(markerId) as { count: number }).count,
+          1
+        );
+        const apiAfterCorruptRestore = await requestJson('/api/clients', 'GET', login.token);
+        assert.strictEqual(apiAfterCorruptRestore.status, 200);
+        assert.ok(((await apiAfterCorruptRestore.json() as any).clients as any[]).some(client => client.id === markerId));
       } finally {
         getSqliteDb().prepare('DELETE FROM clients WHERE id = ?').run(markerId);
         rmSync(backupDirectory, { recursive: true, force: true });
