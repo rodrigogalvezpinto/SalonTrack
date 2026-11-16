@@ -823,75 +823,77 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
     }
     const effectiveStaffId = match.staffId;
 
-    // ATOMIC AVAILABILITY CHECK WITH TRANSACTION
-    sqlite.exec('BEGIN TRANSACTION;');
-
-    const available = isSlotAvailable({
-      businessId: business_id,
-      staffId: effectiveStaffId,
-      serviceId: service_id,
-      dateStr: booking_date,
-      startTime: start_time,
-      durationMinutes: match.durationMinutes,
-    });
-
-    if (!available) {
-      sqlite.exec('ROLLBACK;');
-      return res.status(409).json({ error: 'El horario seleccionado ya no está disponible. Por favor elige otro horario.' });
-    }
-
     const endTimeStr = match.endTime;
-
-    const bookingId = generateId('bk');
-    const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
-    const bookingCode = `ST-2026-${randomCode}`;
     const now = new Date().toISOString();
-
     const initialStatus = business.booking_mode === 'MANUAL' ? 'PENDING' : 'CONFIRMED';
     const payMethod = payment_method === 'online' ? 'online' : 'presential';
     const payStatus = 'pending';
-
-    // Link customer user if authenticated
     const customerUserId = req.userId || null;
+    const createdBooking = withTransaction(db => {
+      const available = isSlotAvailable({
+        businessId: business_id,
+        staffId: effectiveStaffId,
+        serviceId: service_id,
+        dateStr: booking_date,
+        startTime: start_time,
+        durationMinutes: match.durationMinutes,
+      });
+      if (!available) return null;
 
-    sqlite.prepare(`
-      INSERT INTO bookings (
-        id, code, business_id, staff_id, service_id, customer_user_id,
-        booking_date, start_time, end_time, duration_minutes, amount_clp, modality,
-        status, payment_method, payment_status, client_name, client_phone, client_email,
-        client_notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      bookingId,
-      bookingCode,
-      business_id,
-      effectiveStaffId,
-      service_id,
-      customerUserId,
-      booking_date,
-      start_time,
-      endTimeStr,
-      match.durationMinutes,
-      service.price_clp,
-      modality || 'salon',
-      initialStatus,
-      payMethod,
-      payStatus,
-      client_name.trim(),
-      client_phone.trim(),
-      client_email ? client_email.trim() : null,
-      client_notes ? client_notes.trim() : null,
-      now,
-      now
-    );
+      let bookingCode: string | null = null;
+      const currentYear = new Date().getFullYear();
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const candidate = `ST-${currentYear}-${randomBytes(2).toString('hex').toUpperCase()}`;
+        if (!db.prepare('SELECT 1 FROM bookings WHERE code = ?').get(candidate)) {
+          bookingCode = candidate;
+          break;
+        }
+      }
+      if (!bookingCode) throw new Error('No se pudo generar un código único para la reserva.');
 
-    // Record initial status in history
-    sqlite.prepare(`
-      INSERT INTO booking_status_history (id, booking_id, from_status, to_status, changed_by_user_id, reason, created_at)
-      VALUES (?, ?, 'NONE', ?, ?, 'Reserva creada por el cliente', ?)
-    `).run(generateId('bsh'), bookingId, initialStatus, customerUserId, now);
+      const bookingId = generateId('bk');
+      db.prepare(`
+        INSERT INTO bookings (
+          id, code, business_id, staff_id, service_id, customer_user_id,
+          booking_date, start_time, end_time, duration_minutes, amount_clp, modality,
+          status, payment_method, payment_status, client_name, client_phone, client_email,
+          client_notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        bookingId,
+        bookingCode,
+        business_id,
+        effectiveStaffId,
+        service_id,
+        customerUserId,
+        booking_date,
+        start_time,
+        endTimeStr,
+        match.durationMinutes,
+        service.price_clp,
+        modality || 'salon',
+        initialStatus,
+        payMethod,
+        payStatus,
+        client_name.trim(),
+        client_phone.trim(),
+        client_email ? client_email.trim() : null,
+        client_notes ? client_notes.trim() : null,
+        now,
+        now
+      );
 
-    sqlite.exec('COMMIT;');
+      db.prepare(`
+        INSERT INTO booking_status_history (id, booking_id, from_status, to_status, changed_by_user_id, reason, created_at)
+        VALUES (?, ?, 'NONE', ?, ?, 'Reserva creada por el cliente', ?)
+      `).run(generateId('bsh'), bookingId, initialStatus, customerUserId, now);
+
+      return { bookingId, bookingCode };
+    });
+    if (!createdBooking) {
+      return res.status(409).json({ error: 'El horario seleccionado ya no está disponible. Por favor elige otro horario.' });
+    }
+    const { bookingId, bookingCode } = createdBooking;
 
     // Notifications
     const staff = sqlite.prepare('SELECT name FROM staff WHERE id = ?').get(effectiveStaffId) as any;
@@ -953,7 +955,6 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
       payment: paymentData,
     });
   } catch (err: any) {
-    try { sqlite.exec('ROLLBACK;'); } catch (e) {}
     console.error('Error creating booking:', err);
     return res.status(500).json({ error: 'Error al registrar la reserva.' });
   }
@@ -1312,18 +1313,21 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
   if (authorizeBusiness(req, res, booking.business_id) === null) return;
 
-  if (booking.status === 'CANCELLED' || booking.status === 'REJECTED') {
-    return res.status(400).json({ error: 'No se puede completar una reserva cancelada o rechazada.' });
+  if (booking.status !== 'CONFIRMED' && booking.status !== 'IN_PROGRESS') {
+    return res.status(400).json({ error: `No se puede completar una reserva en estado ${booking.status}.` });
   }
 
   const now = new Date().toISOString();
-  withTransaction(db => {
-    db.prepare(`
+  const completed = withTransaction(db => {
+    const update = db.prepare(`
       UPDATE bookings
       SET status = 'COMPLETED', payment_status = 'paid', completed_at = ?, updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status IN ('CONFIRMED', 'IN_PROGRESS')
     `).run(now, now, booking.id);
+    if (update.changes === 0) return false;
 
+    const business = db.prepare('SELECT owner_id, name FROM businesses WHERE id = ?')
+      .get(booking.business_id) as { owner_id: string; name: string };
     db.prepare(`
       INSERT INTO booking_status_history (id, booking_id, from_status, to_status, changed_by_user_id, reason, created_at)
       VALUES (?, ?, ?, 'COMPLETED', ?, 'Atención completada', ?)
@@ -1332,7 +1336,7 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
     if (!hasBookingServiceRecord(db, booking.id)) {
       const crmClient = findOrCreateBookingClient(
         db,
-        req.userId || '',
+        business.owner_id,
         booking.business_id,
         booking.client_name,
         booking.client_phone,
@@ -1341,7 +1345,7 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
       const srv = db.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
       createBookingServiceRecord(db, {
         id: generateId('srv'),
-        user_id: req.userId || '',
+        user_id: business.owner_id,
         client_id: crmClient.id,
         service_type: srv?.name || 'Servicio Profesional',
         color_formula: colorFormula,
@@ -1369,9 +1373,13 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
     });
 
     if (booking.customer_user_id) {
-      createNotification(booking.customer_user_id, 'review_request', '¿Cómo estuvo tu atención?', `Tu servicio en ${booking.business_id} ha finalizado. ¡Comparte tu opinión dejando una reseña!`, 'booking', booking.id, 'low');
+      createNotification(booking.customer_user_id, 'review_request', '¿Cómo estuvo tu atención?', `Tu servicio en ${business.name} ha finalizado. ¡Comparte tu opinión dejando una reseña!`, 'booking', booking.id, 'low');
     }
+    return true;
   });
+  if (!completed) {
+    return res.status(409).json({ error: 'La reserva cambió de estado. Recarga e intenta nuevamente.' });
+  }
   return res.json({ message: 'Atención completada y registrada en el historial del CRM.', status: 'COMPLETED' });
 };
 router.post('/bookings/:id/complete', requireAuth, completeBookingHandler);

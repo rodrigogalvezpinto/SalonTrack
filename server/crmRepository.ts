@@ -336,6 +336,11 @@ export function listContactLogs(userId: string, clientId?: string): ContactLog[]
   `).all(userId) as unknown as ContactLog[];
 }
 
+export function phoneMatchKey(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  return digits.length >= 11 && digits.startsWith('56') ? digits.slice(2) : digits;
+}
+
 export function findOrCreateBookingClient(
   db: DatabaseSync,
   userId: string,
@@ -344,13 +349,16 @@ export function findOrCreateBookingClient(
   phone: string,
   now: string,
 ): { id: string } {
-  const client = db.prepare(`
-    SELECT id
+  const phoneKey = phoneMatchKey(phone);
+  const clients = db.prepare(`
+    SELECT id, phone
     FROM clients
-    WHERE user_id = ? AND business_id = ? AND (phone = ? OR full_name = ?)
-    ORDER BY rowid
-    LIMIT 1
-  `).get(userId, businessId, phone, fullName) as { id: string } | undefined;
+    WHERE user_id = ? AND (business_id = ? OR business_id IS NULL)
+    ORDER BY rowid ASC
+  `).all(userId, businessId) as Array<{ id: string; phone: string }>;
+  const client = phoneKey
+    ? clients.find(candidate => phoneMatchKey(candidate.phone) === phoneKey)
+    : undefined;
   if (client) return client;
 
   const id = generateId('cli');
@@ -359,7 +367,7 @@ export function findOrCreateBookingClient(
     user_id: userId,
     business_id: businessId,
     full_name: fullName,
-    phone,
+    phone: phoneKey.length === 9 ? `+56${phoneKey}` : phone.trim(),
     notes: 'Clienta registrada automáticamente desde reserva marketplace',
     created_at: now,
     updated_at: now,
