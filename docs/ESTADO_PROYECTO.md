@@ -12,7 +12,7 @@ Auditoría de la base `origin/main` (`9a75d5a`) y de los endurecimientos puntual
 | 3 — Categorías y servicios | Parcial | Hay catálogo inicial, `/api/marketplace/categories` y CRUD de servicios en `/api/business/:id/services`; la administración completa de categorías sigue pendiente. |
 | 4 — Agenda y disponibilidad | Parcial | `server/availability.ts` y `/api/availability/slots` consideran jornada, personal, pausas, reservas y bloqueos; `POST /api/bookings` exige un horario publicado y libre. Sigue pendiente reforzar la concurrencia de solicitudes simultáneas. |
 | 5 — Marketplace | Hecho | `MarketplaceView.tsx`, `/api/marketplace/search`, `/api/marketplace/business/:slug` y favoritos cubren búsqueda, filtros, ordenamiento, mapa local y perfiles públicos. |
-| 6 — Reservas | Parcial | `/api/bookings` valida disponibilidad; `/api/bookings/:id/reschedule` permite reprogramar con autorización y `server/bookingExpiration.ts` expira solicitudes pendientes cada 15 minutos. Faltan pruebas de concurrencia y completar la integración transaccional con CRM. |
+| 6 — Reservas | Parcial | `/api/bookings` valida disponibilidad y su creación es transaccional; la reprogramación es autorizada y las finalizaciones escriben en el CRM del dueño con coincidencia telefónica normalizada. Las pruebas cubren creación y reprogramación simultáneas; falta concurrencia multi-proceso, que la suite de un solo proceso no cubre. |
 | 7 — Pagos locales | Parcial | El checkout y la activación simulados se bloquean en producción salvo `ALLOW_SIMULATED_PAYMENTS=true` para demos; `/api/payments/webhook` no valida operaciones externas. |
 | 8 — Paneles y estadísticas | Parcial | `/api/dashboard/stats`, `/api/admin/dashboard` y `CustomerPortalView.tsx` entregan paneles básicos con datos consultados directamente de SQLite. |
 | 9 — Notificaciones y reputación | Parcial | Existen tablas y rutas de notificaciones/reseñas y adaptadores locales de WhatsApp/email; no hay entrega real ni procesamiento programado completo. |
@@ -38,6 +38,6 @@ Los PR #1 y #2 contenían una implementación alternativa. Se decidió cerrarlos
 ## Próximos pasos prioritarios
 
 1. **P0 — Autorización:** mantener en GitHub Actions (`npm run lint`, `npm test` y `npm run build` por PR) la cobertura de cruces de cuentas/negocios, roles, membresías desactivadas y CRM agregada para reservas, negocio y clientes.
-2. **P1 — Reservas:** mantener cobertura de creación, reprogramación y expiración; ampliar pruebas de concurrencia y completar la integración transaccional con CRM.
+2. **P1 — Reservas:** mantener cobertura de creación/reprogramación concurrentes y finalización transaccional en el CRM del dueño; queda pendiente probar concurrencia multi-proceso porque la suite se ejecuta en un solo proceso.
 3. **P2 — Servicios externos:** reemplazar la simulación de email y pagos e implementar validación de firmas de webhook.
 4. **P2 — Estabilización:** ampliar pruebas E2E, de concurrencia y accesibilidad; cubrir límites de suscripción y validación de permisos en CI.
