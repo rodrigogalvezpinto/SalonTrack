@@ -1,10 +1,14 @@
 import fs from 'node:fs';
-import path from 'node:path';
-import { getSqliteDb } from '../server/sqlite.js';
+import { getDatabasePath, getSqliteDb } from '../server/sqlite.js';
 import { seedDemoDataIfEmpty } from '../server/seedData.js';
 
+if (process.env.NODE_ENV === 'production') {
+  console.error('No se puede reiniciar la base de datos en producción.');
+  process.exit(1);
+}
+
 console.log('⚠️ Reiniciando base de datos SQLite local...');
-const dbPath = path.resolve('data/salontrack.sqlite');
+const dbPath = getDatabasePath();
 
 try {
   if (fs.existsSync(dbPath)) {

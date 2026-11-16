@@ -1,18 +1,11 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import { createBackup, verifyBackup } from '../server/backup.js';
 
-const dbPath = path.resolve('data/salontrack.sqlite');
-const backupDir = path.resolve('data/backups');
-if (!fs.existsSync(backupDir)) {
-  fs.mkdirSync(backupDir, { recursive: true });
-}
-
-const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-const target = path.join(backupDir, `salontrack_backup_${timestamp}.sqlite`);
-
-if (fs.existsSync(dbPath)) {
-  fs.copyFileSync(dbPath, target);
-  console.log(`✅ Respaldo de SQLite creado exitosamente en: ${target}`);
+const backup = createBackup();
+console.log(`✅ Respaldo de SQLite creado en: ${backup}`);
+const verification = verifyBackup(backup);
+if (verification.ok) {
+  console.log('✅ Respaldo verificado correctamente.');
 } else {
-  console.log('⚠️ Base de datos salontrack.sqlite aún no creada.');
+  console.error(`❌ No se pudo verificar el respaldo: ${verification.error}`);
+  process.exitCode = 1;
 }
