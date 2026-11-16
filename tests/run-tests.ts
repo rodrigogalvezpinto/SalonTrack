@@ -922,6 +922,7 @@ async function runIntegrationTests() {
         endTime: '10:50',
         durationMinutes: 50,
       });
+      sqlite.prepare('UPDATE bookings SET duration_minutes = 1 WHERE id = ?').run(bookingIds[0]);
 
       const stateFor = (id: string) => ({
         booking: sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(id),
@@ -1003,7 +1004,11 @@ async function runIntegrationTests() {
           customer.token
         );
         assert.strictEqual(sameSlotResponse.status, 200);
-        assert.strictEqual((await sameSlotResponse.json() as any).booking.start_time, slots[0].time);
+        const sameSlotBody = await sameSlotResponse.json() as any;
+        assert.strictEqual(sameSlotBody.booking.start_time, slots[0].time);
+        assert.strictEqual(sameSlotBody.booking.duration_minutes, slots[0].durationMinutes);
+        assert.strictEqual((sqlite.prepare('SELECT duration_minutes FROM bookings WHERE id = ?')
+          .get(bookingIds[0]) as { duration_minutes: number }).duration_minutes, slots[0].durationMinutes);
 
         const freeSlotResponse = await sendJson(`/api/bookings/${bookingIds[0]}/reschedule`, {
           booking_date: date,
@@ -1016,6 +1021,7 @@ async function runIntegrationTests() {
           start_time: slots[2].time,
           end_time: slots[2].endTime,
           staff_id: slots[2].staffId,
+          duration_minutes: slots[2].durationMinutes,
           status: 'PENDING',
         });
         const history = sqlite.prepare(`

@@ -1243,9 +1243,9 @@ router.post('/bookings/:id/reschedule', requireAuth, (req: AuthRequest, res: Res
 
     db.prepare(`
       UPDATE bookings
-      SET booking_date = ?, start_time = ?, end_time = ?, staff_id = ?, updated_at = ?
+      SET booking_date = ?, start_time = ?, end_time = ?, staff_id = ?, duration_minutes = ?, updated_at = ?
       WHERE id = ?
-    `).run(booking_date, start_time, match.endTime, match.staffId, now, booking.id);
+    `).run(booking_date, start_time, match.endTime, match.staffId, match.durationMinutes, now, booking.id);
     db.prepare(`
       INSERT INTO booking_status_history (
         id, booking_id, from_status, to_status, changed_by_user_id, reason, created_at
@@ -1289,6 +1289,7 @@ router.post('/bookings/:id/reschedule', requireAuth, (req: AuthRequest, res: Res
       start_time,
       end_time: match.endTime,
       staff_id: match.staffId,
+      duration_minutes: match.durationMinutes,
       status: booking.status,
     },
   });
