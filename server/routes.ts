@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { createHash, randomBytes } from 'node:crypto';
 import { getDb, saveDb, refreshDb, generateId, User, Profile, Subscription, Client, Service, ContactLog, Payment } from './db.js';
-import { hashPassword, verifyPassword, generateToken, requireAuth, requireRole, getUserRoles, AuthRequest } from './auth.js';
+import { hashPassword, verifyPassword, generateToken, optionalAuth, requireAuth, requireRole, getUserRoles, AuthRequest } from './auth.js';
 import { getSqliteDb } from './sqlite.js';
 import { getAvailableSlots, isSlotAvailable } from './availability.js';
 import { localGeolocationProvider, localWhatsAppProvider, localEmailProvider, localPaymentProvider } from './adapters/index.js';
@@ -67,6 +67,29 @@ function createNotification(userId: string, type: string, title: string, message
   } catch (err) {
     console.error('Notification error:', err);
   }
+}
+
+function authorizeBusiness(
+  req: AuthRequest,
+  res: Response,
+  businessId: string,
+  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION']
+): string | null {
+  const member = getSqliteDb().prepare(`
+    SELECT role
+    FROM business_members
+    WHERE business_id = ? AND user_id = ? AND is_active = 1
+  `).get(businessId, req.userId || '') as { role: string } | undefined;
+
+  if (!member) {
+    res.status(404).json({ error: 'Negocio no encontrado.' });
+    return null;
+  }
+  if (!allowedRoles.includes(member.role)) {
+    res.status(403).json({ error: 'No tienes permisos para esta acción en el negocio.' });
+    return null;
+  }
+  return member.role;
 }
 
 // -------------------------------------------------------------
@@ -290,12 +313,13 @@ router.post('/auth/login', (req, res) => {
 
     // Also get business owned or staffed
     const business = sqlite.prepare(`
-      SELECT b.id, b.name, b.slug, bm.role as member_role
+      SELECT b.id, b.name, b.slug, b.booking_mode, bm.role as member_role
       FROM businesses b
       INNER JOIN business_members bm ON bm.business_id = b.id
       WHERE bm.user_id = ? AND bm.is_active = 1
       LIMIT 1
     `).get(user.id) as any;
+    if (business) business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
 
     const token = generateToken({ id: user.id, email: user.email, password_hash: user.password_hash, created_at: '' }, roles);
     logAudit(user.id, business?.id || null, 'USER_LOGIN', 'user', user.id);
@@ -336,6 +360,7 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
     WHERE bm.user_id = ? AND bm.is_active = 1
     LIMIT 1
   `).get(user.id) as any;
+  if (business) business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
 
   return res.json({
     user: {
@@ -474,7 +499,7 @@ router.put('/profile', requireAuth, (req: AuthRequest, res: Response) => {
 // -------------------------------------------------------------
 // MARKETPLACE & DISCOVERY (Public & Client Search)
 // -------------------------------------------------------------
-router.get('/marketplace/categories', (req, res) => {
+function getCategoriesWithSubcategories() {
   const sqlite = getSqliteDb();
   const categories = sqlite.prepare(`
     SELECT id, name, slug, icon, description, display_order
@@ -495,7 +520,11 @@ router.get('/marketplace/categories', (req, res) => {
     subcategories: subcategories.filter(s => s.category_id === cat.id),
   }));
 
-  return res.json({ categories: enriched });
+  return enriched;
+}
+
+router.get('/marketplace/categories', (_req, res) => {
+  return res.json({ categories: getCategoriesWithSubcategories() });
 });
 
 router.get('/marketplace/search', (req, res) => {
@@ -638,7 +667,7 @@ router.get('/marketplace/search', (req, res) => {
   });
 });
 
-router.get('/marketplace/business/:slug', (req, res) => {
+router.get('/marketplace/business/:slug', optionalAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const slug = req.params.slug;
 
@@ -693,6 +722,9 @@ router.get('/marketplace/business/:slug', (req, res) => {
   const avgRating = reviews.length > 0
     ? Math.round((reviews.reduce((acc, r) => acc + r.rating, 0) / reviews.length) * 10) / 10
     : 5.0;
+  const isFavorite = req.userId
+    ? Boolean(sqlite.prepare('SELECT 1 FROM favorites WHERE user_id = ? AND business_id = ?').get(req.userId, business.id))
+    : undefined;
 
   return res.json({
     business: {
@@ -704,6 +736,7 @@ router.get('/marketplace/business/:slug', (req, res) => {
     staff,
     hours,
     reviews,
+    ...(req.userId ? { is_favorite: isFavorite } : {}),
   });
 });
 
@@ -734,7 +767,7 @@ router.get('/availability/slots', (req, res) => {
 // -------------------------------------------------------------
 // BOOKINGS SYSTEM (Reservations)
 // -------------------------------------------------------------
-router.post('/bookings', async (req: AuthRequest, res: Response) => {
+router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   try {
     const {
@@ -925,14 +958,14 @@ router.post('/bookings', async (req: AuthRequest, res: Response) => {
   }
 });
 
-router.get('/bookings', requireAuth, (req: AuthRequest, res: Response) => {
+function listBookings(req: AuthRequest, res: Response, forcedView?: 'customer' | 'business') {
   const sqlite = getSqliteDb();
   const userId = req.userId!;
   const roles = req.userRoles || getUserRoles(userId);
   const { role_view, status, business_id } = req.query;
 
   // If viewing as customer
-  if (role_view === 'customer' || (!roles.includes('BUSINESS_OWNER') && !roles.includes('BUSINESS_STAFF') && !roles.includes('PLATFORM_ADMIN'))) {
+  if (forcedView === 'customer' || (!forcedView && (role_view === 'customer' || (!roles.includes('BUSINESS_OWNER') && !roles.includes('BUSINESS_STAFF') && !roles.includes('PLATFORM_ADMIN'))))) {
     let sql = `
       SELECT b.*,
              biz.name as business_name, biz.slug as business_slug, biz.phone as business_phone, biz.address as business_address, biz.comuna as business_comuna,
@@ -956,6 +989,21 @@ router.get('/bookings', requireAuth, (req: AuthRequest, res: Response) => {
 
     const bookings = sqlite.prepare(sql).all(...params);
     return res.json({ bookings, total: bookings.length });
+  }
+
+  const memberBusinessIds = sqlite.prepare(`
+    SELECT business_id FROM business_members WHERE user_id = ? AND is_active = 1
+  `).all(userId) as Array<{ business_id: string }>;
+  if (forcedView === 'business') {
+    if (business_id) {
+      if (authorizeBusiness(req, res, String(business_id), ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']) === null) return;
+    } else {
+      if (!memberBusinessIds.length) {
+        res.status(404).json({ error: 'Negocio no encontrado.' });
+        return;
+      }
+      if (authorizeBusiness(req, res, memberBusinessIds[0].business_id, ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']) === null) return;
+    }
   }
 
   // Viewing as Business Owner or Staff
@@ -987,7 +1035,11 @@ router.get('/bookings', requireAuth, (req: AuthRequest, res: Response) => {
   const bookings = sqlite.prepare(sql).all(...params);
 
   return res.json({ bookings, total: bookings.length });
-});
+}
+
+router.get('/bookings', requireAuth, (req: AuthRequest, res: Response) => listBookings(req, res));
+router.get('/bookings/my', requireAuth, (req: AuthRequest, res: Response) => listBookings(req, res, 'customer'));
+router.get('/bookings/business', requireAuth, (req: AuthRequest, res: Response) => listBookings(req, res, 'business'));
 
 router.get('/bookings/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
@@ -1009,13 +1061,25 @@ router.get('/bookings/:id', requireAuth, (req: AuthRequest, res: Response) => {
     return res.status(404).json({ error: 'Reserva no encontrada.' });
   }
 
+  const isCustomer = booking.customer_user_id === req.userId;
+  const isPlatformAdmin = getUserRoles(req.userId!).includes('PLATFORM_ADMIN');
+  const isActiveMember = sqlite.prepare(`
+    SELECT 1
+    FROM business_members
+    WHERE business_id = ? AND user_id = ? AND is_active = 1
+  `).get(booking.business_id, req.userId || '');
+  if (!isCustomer && !isPlatformAdmin && !isActiveMember) {
+    return res.status(404).json({ error: 'Reserva no encontrada.' });
+  }
+
   return res.json({ booking });
 });
 
-router.post('/bookings/:id/confirm', requireAuth, (req: AuthRequest, res: Response) => {
+const confirmBookingHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (authorizeBusiness(req, res, booking.business_id) === null) return;
 
   if (booking.status !== 'PENDING') {
     return res.status(400).json({ error: `No se puede confirmar una reserva en estado ${booking.status}.` });
@@ -1038,13 +1102,15 @@ router.post('/bookings/:id/confirm', requireAuth, (req: AuthRequest, res: Respon
   }
 
   return res.json({ message: 'Reserva confirmada con éxito.', status: 'CONFIRMED' });
-});
+};
+router.post('/bookings/:id/confirm', requireAuth, confirmBookingHandler);
 
-router.post('/bookings/:id/reject', requireAuth, (req: AuthRequest, res: Response) => {
+const rejectBookingHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const { reason } = req.body;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (authorizeBusiness(req, res, booking.business_id) === null) return;
 
   const now = new Date().toISOString();
   sqlite.prepare(`
@@ -1063,13 +1129,18 @@ router.post('/bookings/:id/reject', requireAuth, (req: AuthRequest, res: Respons
   }
 
   return res.json({ message: 'Reserva rechazada.', status: 'REJECTED' });
-});
+};
+router.post('/bookings/:id/reject', requireAuth, rejectBookingHandler);
 
-router.post('/bookings/:id/cancel', requireAuth, (req: AuthRequest, res: Response) => {
+const cancelBookingHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const { reason } = req.body;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (
+    booking.customer_user_id !== req.userId &&
+    authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION']) === null
+  ) return;
 
   if (booking.status === 'COMPLETED' || booking.status === 'CANCELLED') {
     return res.status(400).json({ error: `No se puede cancelar una reserva en estado ${booking.status}.` });
@@ -1096,13 +1167,15 @@ router.post('/bookings/:id/cancel', requireAuth, (req: AuthRequest, res: Respons
   }
 
   return res.json({ message: 'Reserva cancelada correctamente.', status: 'CANCELLED' });
-});
+};
+router.post('/bookings/:id/cancel', requireAuth, cancelBookingHandler);
 
-router.post('/bookings/:id/complete', requireAuth, (req: AuthRequest, res: Response) => {
+const completeBookingHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const { color_formula, tint_brand, notes } = req.body;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (authorizeBusiness(req, res, booking.business_id) === null) return;
 
   if (booking.status === 'CANCELLED' || booking.status === 'REJECTED') {
     return res.status(400).json({ error: 'No se puede completar una reserva cancelada o rechazada.' });
@@ -1139,7 +1212,7 @@ router.post('/bookings/:id/complete', requireAuth, (req: AuthRequest, res: Respo
   }
 
   // Check service name
-  const srv = sqlite.prepare('SELECT name, recommended_interval_days FROM services WHERE id = ?').get(booking.service_id) as any;
+  const srv = sqlite.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
   const intervalDays = 30;
   const nextRetouchDate = calculateNextDate(booking.booking_date, intervalDays);
 
@@ -1183,6 +1256,43 @@ router.post('/bookings/:id/complete', requireAuth, (req: AuthRequest, res: Respo
 
   refreshDb();
   return res.json({ message: 'Atención completada y registrada en el historial del CRM.', status: 'COMPLETED' });
+};
+router.post('/bookings/:id/complete', requireAuth, completeBookingHandler);
+
+router.put('/bookings/:id/status', requireAuth, (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
+  if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION']) === null) return;
+
+  const { status } = req.body;
+  const transitions: Record<string, string[]> = {
+    PENDING: ['CONFIRMED', 'REJECTED', 'CANCELLED'],
+    CONFIRMED: ['IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'NO_SHOW'],
+    IN_PROGRESS: ['COMPLETED', 'CANCELLED', 'NO_SHOW'],
+  };
+  if (!transitions[booking.status]?.includes(status)) {
+    return res.status(400).json({ error: `No se puede cambiar una reserva de ${booking.status} a ${status}.` });
+  }
+
+  const handlers: Record<string, (req: AuthRequest, res: Response) => unknown> = {
+    CONFIRMED: confirmBookingHandler,
+    REJECTED: rejectBookingHandler,
+    CANCELLED: cancelBookingHandler,
+    COMPLETED: completeBookingHandler,
+  };
+  if (handlers[status]) {
+    handlers[status](req, res);
+    return;
+  }
+
+  const now = new Date().toISOString();
+  sqlite.prepare('UPDATE bookings SET status = ?, updated_at = ? WHERE id = ?').run(status, now, booking.id);
+  sqlite.prepare(`
+    INSERT INTO booking_status_history (id, booking_id, from_status, to_status, changed_by_user_id, reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(generateId('bsh'), booking.id, booking.status, status, req.userId || '', `Estado actualizado a ${status}`, now);
+  return res.json({ message: `Estado actualizado a ${status}.`, status });
 });
 
 // -------------------------------------------------------------
@@ -1198,6 +1308,9 @@ router.post('/payments/checkout/simulate', requireAuth, async (req: AuthRequest,
 
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(booking_id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (booking.customer_user_id !== req.userId) {
+    return res.status(404).json({ error: 'Reserva no encontrada.' });
+  }
 
   const now = new Date().toISOString();
   let paymentStatus: 'paid' | 'pending' | 'refunded' = 'pending';
@@ -1322,14 +1435,7 @@ router.post('/reviews/:id/respond', requireAuth, (req: AuthRequest, res: Respons
   const review = sqlite.prepare('SELECT * FROM reviews WHERE id = ?').get(req.params.id) as any;
   if (!review) return res.status(404).json({ error: 'Reseña no encontrada.' });
 
-  // Verify ownership of business
-  const isOwner = sqlite.prepare(`
-    SELECT 1 FROM businesses WHERE id = ? AND owner_id = ?
-  `).get(review.business_id, req.userId || '');
-
-  if (!isOwner) {
-    return res.status(403).json({ error: 'Solo el propietario del salón puede responder esta reseña.' });
-  }
+  if (authorizeBusiness(req, res, review.business_id, ['OWNER', 'ADMIN']) === null) return;
 
   const now = new Date().toISOString();
   sqlite.prepare(`
@@ -1383,6 +1489,21 @@ router.delete('/favorites/:business_id', requireAuth, (req: AuthRequest, res: Re
   return res.json({ message: 'Eliminado de favoritos.' });
 });
 
+router.post('/favorites/:business_id', requireAuth, (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const userId = req.userId || '';
+  const businessId = req.params.business_id;
+  const existing = sqlite.prepare('SELECT id FROM favorites WHERE user_id = ? AND business_id = ?').get(userId, businessId);
+  if (existing) {
+    sqlite.prepare('DELETE FROM favorites WHERE user_id = ? AND business_id = ?').run(userId, businessId);
+    return res.json({ favorited: false });
+  }
+  sqlite.prepare('INSERT INTO favorites (id, user_id, business_id, created_at) VALUES (?, ?, ?, ?)').run(
+    generateId('fav'), userId, businessId, new Date().toISOString()
+  );
+  return res.json({ favorited: true });
+});
+
 // -------------------------------------------------------------
 // NOTIFICATIONS IN-APP CENTER (Section 17)
 // -------------------------------------------------------------
@@ -1399,11 +1520,13 @@ router.get('/notifications', requireAuth, (req: AuthRequest, res: Response) => {
   return res.json({ notifications, unread_count: unreadCount });
 });
 
-router.patch('/notifications/:id/read', requireAuth, (req: AuthRequest, res: Response) => {
+const markNotificationRead = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   sqlite.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?').run(req.params.id, req.userId || '');
   return res.json({ message: 'Notificación leída.' });
-});
+};
+router.patch('/notifications/:id/read', requireAuth, markNotificationRead);
+router.put('/notifications/:id/read', requireAuth, markNotificationRead);
 
 router.post('/notifications/read-all', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
@@ -1420,13 +1543,15 @@ router.get('/business/my', requireAuth, (req: AuthRequest, res: Response) => {
     SELECT b.*, bm.role as member_role
     FROM businesses b
     INNER JOIN business_members bm ON bm.business_id = b.id
-    WHERE bm.user_id = ? AND bm.is_active = 1
+    WHERE bm.user_id = ? AND bm.is_active = 1 AND bm.role IN ('OWNER', 'ADMIN')
     LIMIT 1
   `).get(req.userId || '') as any;
 
   if (!business) {
     return res.json({ business: null, has_business: false });
   }
+  business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
+  if (authorizeBusiness(req, res, business.id, ['OWNER', 'ADMIN']) === null) return;
 
   // Get staff
   const staff = sqlite.prepare('SELECT * FROM staff WHERE business_id = ? AND is_active = 1 ORDER BY display_order ASC').all(business.id);
@@ -1444,19 +1569,58 @@ router.get('/business/my', requireAuth, (req: AuthRequest, res: Response) => {
   });
 });
 
-router.put('/business/:id', requireAuth, (req: AuthRequest, res: Response) => {
+function getManagedBusinessId(req: AuthRequest, res: Response): string | null {
+  const member = getSqliteDb().prepare(`
+    SELECT business_id FROM business_members
+    WHERE user_id = ? AND is_active = 1 AND role IN ('OWNER', 'ADMIN')
+    ORDER BY CASE role WHEN 'OWNER' THEN 0 ELSE 1 END
+    LIMIT 1
+  `).get(req.userId || '') as { business_id: string } | undefined;
+  if (!member) {
+    res.status(404).json({ error: 'Negocio no encontrado.' });
+    return null;
+  }
+  return authorizeBusiness(req, res, member.business_id, ['OWNER', 'ADMIN']) ? member.business_id : null;
+}
+
+router.get('/business/services', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  const services = getSqliteDb().prepare("SELECT * FROM services WHERE business_id = ? AND status != 'INACTIVE' ORDER BY display_order ASC").all(businessId);
+  return res.json({ services });
+});
+
+router.get('/business/staff', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  const staff = getSqliteDb().prepare('SELECT * FROM staff WHERE business_id = ? AND is_active = 1 ORDER BY display_order ASC').all(businessId);
+  return res.json({ staff });
+});
+
+router.get('/business/hours', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  const hours = getSqliteDb().prepare('SELECT * FROM business_hours WHERE business_id = ? ORDER BY day_of_week ASC').all(businessId);
+  return res.json({ hours });
+});
+
+router.put('/business/my', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  req.params.id = businessId;
+  return updateBusinessHandler(req, res);
+});
+
+const updateBusinessHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
 
-  // Verify permission
-  const member = sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1').get(bizId, req.userId || '') as any;
-  if (!member || (member.role !== 'OWNER' && member.role !== 'ADMIN')) {
-    return res.status(403).json({ error: 'No tienes permisos de administración en este negocio.' });
-  }
+  if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
 
   const {
     name, description, phone, whatsapp, email, website, instagram,
-    address, comuna, region, modality, booking_mode, min_advance_hours, max_advance_days, buffer_minutes, cancellation_policy
+    address, comuna, region, modality, booking_mode, auto_confirm_bookings,
+    min_advance_hours, max_advance_days, buffer_minutes, cancellation_policy
   } = req.body;
 
   const now = new Date().toISOString();
@@ -1492,7 +1656,7 @@ router.put('/business/:id', requireAuth, (req: AuthRequest, res: Response) => {
     comuna?.trim() || null,
     region?.trim() || null,
     modality || null,
-    booking_mode || null,
+    booking_mode || (auto_confirm_bookings === undefined ? null : (auto_confirm_bookings ? 'AUTOMATIC' : 'MANUAL')),
     min_advance_hours ? Number(min_advance_hours) : null,
     max_advance_days ? Number(max_advance_days) : null,
     buffer_minutes ? Number(buffer_minutes) : null,
@@ -1503,17 +1667,16 @@ router.put('/business/:id', requireAuth, (req: AuthRequest, res: Response) => {
 
   const updated = sqlite.prepare('SELECT * FROM businesses WHERE id = ?').get(bizId);
   return res.json({ message: 'Datos del negocio actualizados con éxito.', business: updated });
-});
+};
 
 // Business Catalog Services
-router.post('/business/:id/services', requireAuth, (req: AuthRequest, res: Response) => {
+const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
 
-  const member = sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1').get(bizId, req.userId || '') as any;
-  if (!member) return res.status(403).json({ error: 'Permisos insuficientes.' });
+  if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
 
-  const { name, category_id, description, price_clp, price_type, duration_minutes, is_featured, modality } = req.body;
+  const { name, category_id, description, price_clp, price_type, duration_minutes, duration_min, buffer_min, is_featured, is_active, modality } = req.body;
   if (!name || !price_clp) {
     return res.status(400).json({ error: 'Nombre y precio son requeridos.' });
   }
@@ -1525,7 +1688,7 @@ router.post('/business/:id/services', requireAuth, (req: AuthRequest, res: Respo
     INSERT INTO services (
       id, business_id, category_id, name, description, price_clp, price_type,
       duration_minutes, prep_minutes, clean_minutes, modality, is_featured, status, display_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 5, ?, ?, 'PUBLISHED', 1, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 1, ?, ?)
   `).run(
     srvId,
     bizId,
@@ -1534,9 +1697,11 @@ router.post('/business/:id/services', requireAuth, (req: AuthRequest, res: Respo
     description?.trim() || '',
     Number(price_clp),
     price_type || 'fixed',
-    Number(duration_minutes) || 45,
+    Number(duration_minutes ?? duration_min) || 45,
+    Number(buffer_min) || 5,
     modality || 'salon',
     is_featured ? 1 : 0,
+    is_active === false || is_active === 0 ? 'INACTIVE' : 'PUBLISHED',
     now,
     now
   );
@@ -1550,6 +1715,13 @@ router.post('/business/:id/services', requireAuth, (req: AuthRequest, res: Respo
   }
 
   return res.status(201).json({ message: 'Servicio agregado al catálogo con éxito.', service_id: srvId });
+};
+router.post('/business/:id/services', requireAuth, createBusinessServiceHandler);
+router.post('/business/services', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  req.params.id = businessId;
+  return createBusinessServiceHandler(req, res);
 });
 
 router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Response) => {
@@ -1558,10 +1730,9 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
   const srv = sqlite.prepare('SELECT business_id FROM services WHERE id = ?').get(srvId) as any;
   if (!srv) return res.status(404).json({ error: 'Servicio no encontrado.' });
 
-  const member = sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1').get(srv.business_id, req.userId || '') as any;
-  if (!member) return res.status(403).json({ error: 'Permisos insuficientes.' });
+  if (authorizeBusiness(req, res, srv.business_id, ['OWNER', 'ADMIN']) === null) return;
 
-  const { name, price_clp, price_type, duration_minutes, description, is_featured, status } = req.body;
+  const { name, price_clp, price_type, duration_minutes, duration_min, buffer_min, description, is_featured, status, is_active } = req.body;
   const now = new Date().toISOString();
 
   sqlite.prepare(`
@@ -1570,6 +1741,7 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
         price_clp = COALESCE(?, price_clp),
         price_type = COALESCE(?, price_type),
         duration_minutes = COALESCE(?, duration_minutes),
+        clean_minutes = COALESCE(?, clean_minutes),
         description = COALESCE(?, description),
         is_featured = COALESCE(?, is_featured),
         status = COALESCE(?, status),
@@ -1579,10 +1751,11 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
     name?.trim() || null,
     price_clp ? Number(price_clp) : null,
     price_type || null,
-    duration_minutes ? Number(duration_minutes) : null,
+    duration_minutes !== undefined || duration_min !== undefined ? Number(duration_minutes ?? duration_min) : null,
+    buffer_min !== undefined ? Number(buffer_min) : null,
     description !== undefined ? description.trim() : null,
     is_featured !== undefined ? (is_featured ? 1 : 0) : null,
-    status || null,
+    status || (is_active !== undefined ? (is_active ? 'PUBLISHED' : 'INACTIVE') : null),
     now,
     srvId
   );
@@ -1595,6 +1768,7 @@ router.delete('/business/services/:id', requireAuth, (req: AuthRequest, res: Res
   const srvId = req.params.id;
   const srv = sqlite.prepare('SELECT business_id FROM services WHERE id = ?').get(srvId) as any;
   if (!srv) return res.status(404).json({ error: 'Servicio no encontrado.' });
+  if (authorizeBusiness(req, res, srv.business_id, ['OWNER', 'ADMIN']) === null) return;
 
   // Safe soft delete to preserve completed booking history!
   sqlite.prepare("UPDATE services SET status = 'INACTIVE', updated_at = ? WHERE id = ?").run(new Date().toISOString(), srvId);
@@ -1602,25 +1776,22 @@ router.delete('/business/services/:id', requireAuth, (req: AuthRequest, res: Res
 });
 
 // Business Team Staff
-router.post('/business/:id/staff', requireAuth, (req: AuthRequest, res: Response) => {
+const createBusinessStaffHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
 
-  const member = sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1').get(bizId, req.userId || '') as any;
-  if (!member || (member.role !== 'OWNER' && member.role !== 'ADMIN')) {
-    return res.status(403).json({ error: 'Solo el dueño o administrador puede agregar trabajadores.' });
-  }
+  if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
 
-  const { name, specialty, phone, bio } = req.body;
+  const { name, specialty, role_title, phone, email, bio } = req.body;
   if (!name) return res.status(400).json({ error: 'El nombre del trabajador es obligatorio.' });
 
   const staffId = generateId('stf');
   const now = new Date().toISOString();
 
   sqlite.prepare(`
-    INSERT INTO staff (id, business_id, name, specialty, bio, phone, is_active, display_order, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 1, 2, ?)
-  `).run(staffId, bizId, name.trim(), specialty?.trim() || 'Estilista', bio?.trim() || '', phone?.trim() || '', now);
+    INSERT INTO staff (id, business_id, name, specialty, bio, phone, email, is_active, display_order, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 1, 2, ?)
+  `).run(staffId, bizId, name.trim(), (specialty || role_title)?.trim() || 'Estilista', bio?.trim() || '', phone?.trim() || '', email?.trim() || '', now);
 
   // Default hours (Mon-Sat 09:30-19:30)
   for (let d = 1; d <= 6; d++) {
@@ -1631,7 +1802,7 @@ router.post('/business/:id/staff', requireAuth, (req: AuthRequest, res: Response
   }
 
   // Assign existing services to new staff
-  const services = sqlite.prepare('SELECT id FROM services WHERE business_id = ? AND status = "PUBLISHED"').all(bizId) as any[];
+  const services = sqlite.prepare("SELECT id FROM services WHERE business_id = ? AND status = 'PUBLISHED'").all(bizId) as any[];
   for (const s of services) {
     sqlite.prepare('INSERT OR IGNORE INTO staff_services (id, staff_id, service_id, created_at) VALUES (?, ?, ?, ?)').run(
       generateId('ss'), staffId, s.id, now
@@ -1639,12 +1810,33 @@ router.post('/business/:id/staff', requireAuth, (req: AuthRequest, res: Response
   }
 
   return res.status(201).json({ message: 'Trabajador agregado exitosamente al equipo.', staff_id: staffId });
+};
+router.post('/business/:id/staff', requireAuth, createBusinessStaffHandler);
+router.post('/business/staff', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  req.params.id = businessId;
+  if (req.body.role_title && !req.body.specialty) req.body.specialty = req.body.role_title;
+  return createBusinessStaffHandler(req, res);
+});
+
+router.delete('/business/staff/:id', requireAuth, (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const staff = sqlite.prepare('SELECT business_id FROM staff WHERE id = ?').get(req.params.id) as any;
+  if (!staff || authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN']) === null) {
+    if (!staff) return res.status(404).json({ error: 'Trabajador no encontrado.' });
+    return;
+  }
+  sqlite.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(req.params.id);
+  return res.json({ message: 'Trabajador desactivado correctamente.' });
 });
 
 // Business Hours
-router.put('/business/:id/hours', requireAuth, (req: AuthRequest, res: Response) => {
+const updateBusinessHoursHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
+  if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
+
   const { hours } = req.body; // Array of { day_of_week, open_time, close_time, is_closed }
 
   if (!Array.isArray(hours)) {
@@ -1660,11 +1852,71 @@ router.put('/business/:id/hours', requireAuth, (req: AuthRequest, res: Response)
   }
 
   return res.json({ message: 'Horarios de atención guardados correctamente.' });
+};
+router.put('/business/:id/hours', requireAuth, updateBusinessHoursHandler);
+router.put('/business/hours', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  req.params.id = businessId;
+  return updateBusinessHoursHandler(req, res);
 });
+router.put('/business/:id', requireAuth, updateBusinessHandler);
 
 // -------------------------------------------------------------
 // PLATFORM ADMINISTRATION (Section 19 - Role: PLATFORM_ADMIN)
 // -------------------------------------------------------------
+router.get('/admin/metrics', requireAuth, requireRole('PLATFORM_ADMIN'), (_req, res) => {
+  const sqlite = getSqliteDb();
+  const stats = {
+    totalUsers: (sqlite.prepare('SELECT COUNT(*) AS count FROM users').get() as any).count,
+    totalBusinesses: (sqlite.prepare('SELECT COUNT(*) AS count FROM businesses').get() as any).count,
+    totalBookings: (sqlite.prepare('SELECT COUNT(*) AS count FROM bookings').get() as any).count,
+    totalVolumeCLP: (sqlite.prepare('SELECT COALESCE(SUM(amount_clp), 0) AS total FROM bookings').get() as any).total,
+  };
+  return res.json({ stats });
+});
+
+router.get('/admin/categories', requireAuth, requireRole('PLATFORM_ADMIN'), (_req, res) => {
+  return res.json({ categories: getCategoriesWithSubcategories() });
+});
+
+const updateAdminBusinessStatusHandler = (req: AuthRequest, res: Response) => {
+  const { status } = req.body;
+  if (!['DRAFT', 'PENDING_REVIEW', 'PUBLISHED', 'SUSPENDED', 'INACTIVE'].includes(status)) {
+    return res.status(400).json({ error: 'Estado de negocio inválido.' });
+  }
+  const sqlite = getSqliteDb();
+  const result = sqlite.prepare('UPDATE businesses SET status = ?, updated_at = ? WHERE id = ?').run(status, new Date().toISOString(), req.params.id);
+  if (!result.changes) return res.status(404).json({ error: 'Negocio no encontrado.' });
+  logAudit(req.userId || null, req.params.id, 'ADMIN_BUSINESS_STATUS_CHANGE', 'business', req.params.id, { status });
+  return res.json({ message: `Estado del negocio cambiado a ${status}.` });
+};
+router.put('/admin/businesses/:id/status', requireAuth, requireRole('PLATFORM_ADMIN'), updateAdminBusinessStatusHandler);
+
+router.put('/admin/businesses/:id/verify', requireAuth, requireRole('PLATFORM_ADMIN'), (req: AuthRequest, res: Response) => {
+  const verified = req.body.verified ? 1 : 0;
+  const result = getSqliteDb().prepare('UPDATE businesses SET verified = ?, updated_at = ? WHERE id = ?').run(verified, new Date().toISOString(), req.params.id);
+  if (!result.changes) return res.status(404).json({ error: 'Negocio no encontrado.' });
+  logAudit(req.userId || null, req.params.id, verified ? 'ADMIN_BUSINESS_VERIFIED' : 'ADMIN_BUSINESS_UNVERIFIED', 'business', req.params.id, { verified: Boolean(verified) });
+  return res.json({ verified: Boolean(verified) });
+});
+
+function setAdminUserStatus(req: AuthRequest, res: Response, isActive: number, includeMessage = false) {
+  const user = getSqliteDb().prepare('SELECT id FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
+  getSqliteDb().prepare('UPDATE users SET is_active = ? WHERE id = ?').run(isActive, req.params.id);
+  logAudit(req.userId || null, null, isActive ? 'ADMIN_USER_ACTIVATED' : 'ADMIN_USER_SUSPENDED', 'user', req.params.id);
+  return res.json(includeMessage
+    ? { message: isActive ? 'Usuario reactivado.' : 'Usuario suspendido.', is_active: isActive }
+    : { is_active: isActive });
+}
+
+router.put('/admin/users/:id/status', requireAuth, requireRole('PLATFORM_ADMIN'), (req: AuthRequest, res: Response) => {
+  if (![true, false, 1, 0].includes(req.body.is_active)) return res.status(400).json({ error: 'is_active debe ser booleano.' });
+  const isActive = req.body.is_active ? 1 : 0;
+  return setAdminUserStatus(req, res, isActive);
+});
+
 router.get('/admin/dashboard', requireAuth, requireRole('PLATFORM_ADMIN'), (req, res) => {
   const sqlite = getSqliteDb();
 
@@ -1731,10 +1983,7 @@ router.post('/admin/users/:id/toggle-status', requireAuth, requireRole('PLATFORM
   if (!user) return res.status(404).json({ error: 'Usuario no encontrado.' });
 
   const nextStatus = user.is_active ? 0 : 1;
-  sqlite.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(nextStatus, user.id);
-  logAudit(req.userId || null, null, nextStatus ? 'ADMIN_USER_ACTIVATED' : 'ADMIN_USER_SUSPENDED', 'user', user.id);
-
-  return res.json({ message: nextStatus ? 'Usuario reactivado.' : 'Usuario suspendido.', is_active: nextStatus });
+  return setAdminUserStatus(req, res, nextStatus, true);
 });
 
 router.get('/admin/businesses', requireAuth, requireRole('PLATFORM_ADMIN'), (req, res) => {
@@ -1753,16 +2002,7 @@ router.get('/admin/businesses', requireAuth, requireRole('PLATFORM_ADMIN'), (req
   return res.json({ businesses });
 });
 
-router.post('/admin/businesses/:id/status', requireAuth, requireRole('PLATFORM_ADMIN'), (req: AuthRequest, res: Response) => {
-  const sqlite = getSqliteDb();
-  const { status } = req.body; // 'PUBLISHED' | 'SUSPENDED' | 'DRAFT'
-  if (!status) return res.status(400).json({ error: 'status requerido.' });
-
-  sqlite.prepare('UPDATE businesses SET status = ?, updated_at = ? WHERE id = ?').run(status, new Date().toISOString(), req.params.id);
-  logAudit(req.userId || null, req.params.id, 'ADMIN_BUSINESS_STATUS_CHANGE', 'business', req.params.id, { status });
-
-  return res.json({ message: `Estado del negocio cambiado a ${status}.` });
-});
+router.post('/admin/businesses/:id/status', requireAuth, requireRole('PLATFORM_ADMIN'), updateAdminBusinessStatusHandler);
 
 router.get('/admin/audit-logs', requireAuth, requireRole('PLATFORM_ADMIN'), (req, res) => {
   const sqlite = getSqliteDb();

@@ -171,7 +171,9 @@ export const BusinessProfileView: React.FC<BusinessProfileViewProps> = ({
                 ? 'border-rose-300 bg-rose-50 text-rose-600'
                 : 'border-slate-200 text-slate-600 hover:text-rose-600 hover:bg-white'
             }`}
-            title="Guardar en favoritos"
+            title={isFavorited ? 'Quitar de favoritos' : 'Guardar en favoritos'}
+            aria-label={isFavorited ? 'Quitar de favoritos' : 'Guardar en favoritos'}
+            aria-pressed={isFavorited}
           >
             <Heart className={`w-4 h-4 ${isFavorited ? 'fill-rose-600' : ''}`} />
           </button>

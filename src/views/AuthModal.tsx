@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { apiRequest } from '../utils/api';
 import { X, Scissors, Lock, Mail, User, Building, Phone, ArrowRight, Check } from 'lucide-react';
@@ -28,6 +28,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const hasResetToken = Boolean(new URLSearchParams(window.location.search).get('reset_token'));
+    setMode(initialMode === 'reset' && !hasResetToken ? 'login' : initialMode);
+    setError(null);
+    setSuccessMsg(null);
+  }, [isOpen, initialMode]);
 
   if (!isOpen) return null;
 
