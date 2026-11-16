@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { apiRequest } from '../utils/api';
 import { formatCLP, formatDuration } from '../utils/formatters';
-import { Booking, Business, Review } from '../types';
+import { Booking, Business, Review, TimeSlotItem } from '../types';
 import { LocalCheckoutModal } from '../components/LocalCheckoutModal';
 import {
   Calendar,
@@ -38,6 +38,17 @@ interface InAppNotification {
   created_at: string;
 }
 
+const getTodayInSantiago = () => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Santiago',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+};
+
 export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
   onNavigateToBusiness,
   onExploreMarketplace
@@ -60,10 +71,44 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
   const [isSubmittingReview, setIsSubmittingReview] = useState<boolean>(false);
   const [cancelModalBooking, setCancelModalBooking] = useState<Booking | null>(null);
   const [cancelReason, setCancelReason] = useState<string>('');
+  const [rescheduleModalBooking, setRescheduleModalBooking] = useState<Booking | null>(null);
+  const [rescheduleDate, setRescheduleDate] = useState<string>('');
+  const [rescheduleSlots, setRescheduleSlots] = useState<TimeSlotItem[]>([]);
+  const [isLoadingRescheduleSlots, setIsLoadingRescheduleSlots] = useState<boolean>(false);
+  const [isSubmittingReschedule, setIsSubmittingReschedule] = useState<boolean>(false);
 
   useEffect(() => {
     loadPortalData();
   }, [user]);
+
+  useEffect(() => {
+    if (!rescheduleModalBooking || !rescheduleDate) return;
+    let active = true;
+    const params = new URLSearchParams({
+      business_id: rescheduleModalBooking.business_id,
+      service_id: rescheduleModalBooking.service_id,
+      date: rescheduleDate,
+      staff_id: rescheduleModalBooking.staff_id,
+    });
+    setIsLoadingRescheduleSlots(true);
+    setRescheduleSlots([]);
+    apiRequest<{ slots: TimeSlotItem[] }>(`/api/availability/slots?${params}`)
+      .then(result => {
+        if (active) setRescheduleSlots(result.slots || []);
+      })
+      .catch((err: any) => {
+        if (active) {
+          setRescheduleSlots([]);
+          alert(`No se pudieron cargar los horarios: ${err.message || 'Error desconocido'}`);
+        }
+      })
+      .finally(() => {
+        if (active) setIsLoadingRescheduleSlots(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [rescheduleModalBooking, rescheduleDate]);
 
   const loadPortalData = async () => {
     setIsLoading(true);
@@ -98,6 +143,34 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
       loadPortalData();
     } catch (err: any) {
       alert(`No se pudo cancelar la cita: ${err.message || 'Error desconocido'}`);
+    }
+  };
+
+  const openRescheduleModal = (booking: Booking) => {
+    const today = getTodayInSantiago();
+    setRescheduleModalBooking(booking);
+    setRescheduleDate(booking.booking_date < today ? today : booking.booking_date);
+    setRescheduleSlots([]);
+  };
+
+  const handleRescheduleBooking = async (slot: TimeSlotItem) => {
+    if (!rescheduleModalBooking) return;
+    setIsSubmittingReschedule(true);
+    try {
+      await apiRequest(`/api/bookings/${rescheduleModalBooking.id}/reschedule`, {
+        method: 'POST',
+        body: JSON.stringify({
+          booking_date: rescheduleDate,
+          start_time: slot.time,
+          staff_id: rescheduleModalBooking.staff_id,
+        }),
+      });
+      setRescheduleModalBooking(null);
+      await loadPortalData();
+    } catch (err: any) {
+      alert(`No se pudo reprogramar la cita: ${err.message || 'Error desconocido'}`);
+    } finally {
+      setIsSubmittingReschedule(false);
     }
   };
 
@@ -153,7 +226,7 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
       return b.status === 'COMPLETED';
     }
     if (bookingFilter === 'cancelled') {
-      return b.status === 'CANCELLED' || b.status === 'NO_SHOW';
+      return b.status === 'CANCELLED' || b.status === 'NO_SHOW' || b.status === 'REJECTED' || b.status === 'EXPIRED';
     }
     return true;
   });
@@ -353,6 +426,16 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
                             Cancelada
                           </span>
                         )}
+                        {b.status === 'REJECTED' && (
+                          <span className="text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-2.5 py-0.5 rounded-md">
+                            Rechazada
+                          </span>
+                        )}
+                        {b.status === 'EXPIRED' && (
+                          <span className="text-xs font-semibold text-slate-600 bg-slate-100 border border-slate-200 px-2.5 py-0.5 rounded-md">
+                            Expirada
+                          </span>
+                        )}
 
                         {/* Payment state */}
                         {isPaid ? (
@@ -440,12 +523,20 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
 
                         {/* If upcoming, option to cancel */}
                         {isUpcoming && (
+                          <>
+                            <button
+                              onClick={() => openRescheduleModal(b)}
+                              className="text-xs text-indigo-600 hover:text-indigo-800 font-medium px-2 py-1"
+                            >
+                              Reprogramar
+                            </button>
                           <button
                             onClick={() => setCancelModalBooking(b)}
                             className="text-xs text-rose-600 hover:text-rose-800 font-medium px-2 py-1"
                           >
                             Cancelar cita
                           </button>
+                          </>
                         )}
                       </div>
                     </div>
@@ -697,6 +788,55 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
                 className="px-4 py-1.5 bg-rose-600 text-white text-xs font-semibold rounded-lg hover:bg-rose-700 transition"
               >
                 Confirmar Cancelación
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {rescheduleModalBooking && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
+            <h3 className="text-base font-bold text-slate-900">Reprogramar cita</h3>
+            <p className="text-xs text-slate-600">
+              Elige una nueva fecha y horario para {rescheduleModalBooking.service_name}.
+            </p>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Nueva fecha</label>
+              <input
+                type="date"
+                min={getTodayInSantiago()}
+                value={rescheduleDate}
+                onChange={event => setRescheduleDate(event.target.value)}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-rose-600"
+              />
+            </div>
+            <div className="max-h-64 overflow-y-auto">
+              {isLoadingRescheduleSlots ? (
+                <p className="py-6 text-center text-xs text-slate-500">Buscando horarios disponibles...</p>
+              ) : rescheduleSlots.length === 0 ? (
+                <p className="py-6 text-center text-xs text-slate-500">No hay horarios disponibles para esta fecha.</p>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  {rescheduleSlots.map(slot => (
+                    <button
+                      key={`${slot.time}-${slot.staffId}`}
+                      onClick={() => handleRescheduleBooking(slot)}
+                      disabled={isSubmittingReschedule}
+                      className="px-3 py-2 border border-slate-200 rounded-lg text-xs font-medium text-slate-700 hover:border-indigo-400 hover:bg-indigo-50 disabled:opacity-50"
+                    >
+                      {slot.time} - {slot.endTime}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setRescheduleModalBooking(null)}
+                disabled={isSubmittingReschedule}
+                className="px-3 py-1.5 border border-slate-200 text-xs font-medium text-slate-600 rounded-lg hover:bg-slate-50"
+              >
+                Volver
               </button>
             </div>
           </div>

@@ -27,9 +27,10 @@ export function getAvailableSlots(params: {
   serviceId: string;
   dateStr: string; // YYYY-MM-DD
   staffId?: string;
+  excludeBookingId?: string;
 }): TimeSlot[] {
   const db = getSqliteDb();
-  const { businessId, serviceId, dateStr, staffId } = params;
+  const { businessId, serviceId, dateStr, staffId, excludeBookingId } = params;
 
   // 1. Get business configuration
   const business = db.prepare(`
@@ -125,11 +126,16 @@ export function getAvailableSlots(params: {
 
     // Existing active bookings for this staff on this date
     const existingBookings = db.prepare(`
-      SELECT start_time, end_time
+      SELECT id, start_time, end_time
       FROM bookings
       WHERE staff_id = ? AND booking_date = ?
-      AND status NOT IN ('CANCELLED', 'REJECTED')
-    `).all(st.id, dateStr) as Array<{ start_time: string; end_time: string }>;
+      AND status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+      ${excludeBookingId ? 'AND id != ?' : ''}
+    `).all(
+      st.id,
+      dateStr,
+      ...(excludeBookingId ? [excludeBookingId] : [])
+    ) as Array<{ id: string; start_time: string; end_time: string }>;
 
     const bookedIntervals = existingBookings.map(b => ({
       start: parseTimeToMinutes(b.start_time),
@@ -227,9 +233,10 @@ export function isSlotAvailable(params: {
   dateStr: string;
   startTime: string; // HH:MM
   durationMinutes: number;
+  excludeBookingId?: string;
 }): boolean {
   const db = getSqliteDb();
-  const { staffId, dateStr, startTime, durationMinutes } = params;
+  const { staffId, dateStr, startTime, durationMinutes, excludeBookingId } = params;
 
   const startMin = parseTimeToMinutes(startTime);
   const endMin = startMin + durationMinutes;
@@ -238,8 +245,13 @@ export function isSlotAvailable(params: {
     SELECT id, start_time, end_time
     FROM bookings
     WHERE staff_id = ? AND booking_date = ?
-    AND status NOT IN ('CANCELLED', 'REJECTED')
-  `).all(staffId, dateStr) as Array<{ id: string; start_time: string; end_time: string }>;
+    AND status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+    ${excludeBookingId ? 'AND id != ?' : ''}
+  `).all(
+    staffId,
+    dateStr,
+    ...(excludeBookingId ? [excludeBookingId] : [])
+  ) as Array<{ id: string; start_time: string; end_time: string }>;
 
   for (const c of collisions) {
     const cStart = parseTimeToMinutes(c.start_time);

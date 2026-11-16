@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { expireStalePendingBookings } from './server/bookingExpiration.js';
 import apiRouter from './server/routes.js';
 import { seedDemoDataIfEmpty } from './server/auth.js';
 
@@ -37,6 +38,16 @@ async function startServer() {
 
   // Seed Chilean demo studio data if first time
   seedDemoDataIfEmpty();
+
+  const expirePendingBookings = () => {
+    try {
+      expireStalePendingBookings();
+    } catch (err) {
+      console.error('Error al expirar reservas pendientes:', err);
+    }
+  };
+  expirePendingBookings();
+  setInterval(expirePendingBookings, 15 * 60 * 1000).unref();
 
   // Mount API endpoints
   app.use('/api', apiRouter);
