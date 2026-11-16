@@ -96,6 +96,14 @@ function createNotification(userId: string, type: string, title: string, message
   `).run(generateId('notif'), userId, type, title, message, entityType || null, entityId || null, urgency, new Date().toISOString());
 }
 
+function simulatedPaymentsDisabled(res: Response): boolean {
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SIMULATED_PAYMENTS !== 'true') {
+    res.status(403).json({ error: 'Los pagos simulados no están disponibles en producción.' });
+    return true;
+  }
+  return false;
+}
+
 function authorizeBusiness(
   req: AuthRequest,
   res: Response,
@@ -1294,6 +1302,7 @@ router.put('/bookings/:id/status', requireAuth, (req: AuthRequest, res: Response
 // LOCAL CHECKOUT & PAYMENT SIMULATION (Section 13)
 // -------------------------------------------------------------
 router.post('/payments/checkout/simulate', requireAuth, (req: AuthRequest, res: Response) => {
+  if (simulatedPaymentsDisabled(res)) return;
   const sqlite = getSqliteDb();
   const { booking_id, action } = req.body; // action: 'approve' | 'reject' | 'pending' | 'refund'
 
@@ -2459,6 +2468,7 @@ router.post('/payments/webhook', (req, res) => {
 });
 
 router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, res: Response) => {
+  if (simulatedPaymentsDisabled(res)) return;
   try {
     const userId = req.userId!;
     const { plan_id, payment_ref } = req.body;

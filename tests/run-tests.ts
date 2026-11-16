@@ -599,6 +599,101 @@ async function runIntegrationTests() {
       assert.ok(currentBody.payments.some((payment: any) => payment.provider_payment_id === paymentRef));
     });
 
+    await integrationTest('Pagos simulados: bloqueo en producción y activación explícita para demos', async () => {
+      const registeredResponse = await sendJson('/api/auth/register', {
+        email: `payment-gate-${generateId('customer')}@example.test`,
+        password: 'PaymentGate123!',
+        full_name: 'Cuenta temporal para probar pagos',
+        phone: '+56912345011',
+        role: 'CUSTOMER',
+      });
+      const registered = await registeredResponse.json() as { token: string; user: { id: string } };
+      assert.strictEqual(registeredResponse.status, 201);
+
+      const userId = registered.user.id;
+      const bookingId = generateId('payment_gate_booking');
+      const paymentRef = `PRODUCTION_GATE_${generateId('pay')}`;
+      const now = new Date().toISOString();
+      const originalNodeEnv = process.env.NODE_ENV;
+      const originalAllowSimulatedPayments = process.env.ALLOW_SIMULATED_PAYMENTS;
+      const restoreEnvironmentValue = (name: string, value: string | undefined) => {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      };
+
+      try {
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, client_email,
+            created_at, updated_at
+          ) VALUES (?, ?, 'biz_valeria_studio', 'stf_valeria', 'srv_val_tintura_raiz', ?, '2099-03-01',
+            '11:00', '12:15', 75, 45000, 'salon', 'PENDING', 'online', 'pending',
+            'Cuenta de prueba', '+56912345011', 'payment-gate@example.test', ?, ?)
+        `).run(bookingId, `PAYMENT-GATE-${bookingId}`, userId, now, now);
+
+        process.env.NODE_ENV = 'production';
+        delete process.env.ALLOW_SIMULATED_PAYMENTS;
+
+        const subscriptionBefore = sqlite.prepare(
+          'SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id'
+        ).all(userId);
+        const bookingBefore = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookingId);
+        const bookingPaymentsBefore = sqlite.prepare(
+          'SELECT * FROM payments WHERE booking_id = ? ORDER BY id'
+        ).all(bookingId);
+
+        const blockedActivation = await sendJson('/api/subscriptions/activate-license', {
+          plan_id: 'pro_quarterly',
+          payment_ref: paymentRef,
+        }, registered.token);
+        assert.strictEqual(blockedActivation.status, 403);
+        assert.deepStrictEqual(await blockedActivation.json(), {
+          error: 'Los pagos simulados no están disponibles en producción.',
+        });
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id').all(userId),
+          subscriptionBefore
+        );
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count,
+          0
+        );
+
+        const blockedCheckout = await sendJson('/api/payments/checkout/simulate', {
+          booking_id: bookingId,
+          action: 'approve',
+        }, registered.token);
+        assert.strictEqual(blockedCheckout.status, 403);
+        assert.deepStrictEqual(await blockedCheckout.json(), {
+          error: 'Los pagos simulados no están disponibles en producción.',
+        });
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookingId), bookingBefore);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM payments WHERE booking_id = ? ORDER BY id').all(bookingId),
+          bookingPaymentsBefore
+        );
+
+        process.env.ALLOW_SIMULATED_PAYMENTS = 'true';
+        const allowedActivation = await sendJson('/api/subscriptions/activate-license', {
+          plan_id: 'pro_quarterly',
+          payment_ref: paymentRef,
+        }, registered.token);
+        assert.strictEqual(allowedActivation.status, 200);
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count,
+          1
+        );
+      } finally {
+        restoreEnvironmentValue('NODE_ENV', originalNodeEnv);
+        restoreEnvironmentValue('ALLOW_SIMULATED_PAYMENTS', originalAllowSimulatedPayments);
+        sqlite.prepare('DELETE FROM payments WHERE user_id = ?').run(userId);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+      }
+    });
+
     await integrationTest('Re-engagement: actualiza el estado y registra el contacto en SQLite', async () => {
       const loginResponse = await sendJson('/api/auth/login', {
         email: 'contacto@valeriaestudio.cl',

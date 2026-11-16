@@ -16,6 +16,7 @@
 - SalonTrack **nunca** recibe, transmite ni almacena datos de tarjetas de crédito o débito.
 - Todo el procesamiento bancario y la captura de credenciales financieras ocurre dentro del entorno certificado PCI-DSS de Mercado Pago Chile (Redcompra / Webpay Plus).
 - La activación de licencias comerciales requiere validación desde el backend; nunca se confía en respuestas del lado del cliente.
+- Las rutas de pago simulado se bloquean en producción; `ALLOW_SIMULATED_PAYMENTS=true` se reserva exclusivamente para demostraciones.
 
 ## 4. Protección de Datos Personales (Ley 19.628 de Chile)
 

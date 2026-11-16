@@ -27,6 +27,9 @@ MERCADO_PAGO_ACCESS_TOKEN="APP_USR-..."
 MERCADO_PAGO_PUBLIC_KEY="APP_USR-..."
 MERCADO_PAGO_WEBHOOK_SECRET="whsec_..."
 
+# Mantenga desactivados los pagos simulados; solo habilítelos en entornos de demostración.
+ALLOW_SIMULATED_PAYMENTS=false
+
 # Servicio de Correo Transaccional (Resend)
 RESEND_API_KEY="re_..."
 RESEND_FROM_EMAIL="SalonTrack Chile <notificaciones@salontrack.cl>"
@@ -34,6 +37,8 @@ RESEND_FROM_EMAIL="SalonTrack Chile <notificaciones@salontrack.cl>"
 # Ruta persistente de la base SQLite (por defecto: ./data/salontrack.sqlite)
 DATABASE_FILE="./data/salontrack.sqlite"
 ```
+
+Los pagos simulados están bloqueados en producción por defecto; no establezca `ALLOW_SIMULATED_PAYMENTS=true` en producción.
 
 ---
 
