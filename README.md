@@ -117,6 +117,8 @@ Para ejecutar la suite de pruebas unitarias y de integración:
 npm test
 ```
 
+CI: GitHub Actions ejecuta lint, pruebas automatizadas y build en cada PR y push a `main`.
+
 Verifica:
 - Formato de moneda chilena CLP ($45.000).
 - Fechas chilenas DD/MM/AAAA y zonas horarias.
