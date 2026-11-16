@@ -791,6 +791,14 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
     if (!business_id || !service_id || !booking_date || !start_time || !client_name || !client_phone) {
       return res.status(400).json({ error: 'Faltan campos obligatorios para registrar la reserva.' });
     }
+    if (
+      typeof booking_date !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(booking_date) ||
+      typeof start_time !== 'string' ||
+      !/^\d{2}:\d{2}$/.test(start_time)
+    ) {
+      return res.status(400).json({ error: 'El formato de fecha u hora no es válido.' });
+    }
 
     // Verify business
     const business = sqlite.prepare('SELECT id, name, owner_id, booking_mode, status FROM businesses WHERE id = ?').get(business_id) as any;
@@ -804,31 +812,16 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
       return res.status(400).json({ error: 'El servicio solicitado no existe en el catálogo.' });
     }
 
-    // Determine staff member if not provided: pick first available
-    let effectiveStaffId = staff_id;
-    if (!effectiveStaffId) {
-      const candidates = sqlite.prepare(`
-        SELECT s.id, s.name FROM staff s
-        INNER JOIN staff_services ss ON ss.staff_id = s.id
-        WHERE s.business_id = ? AND ss.service_id = ? AND s.is_active = 1
-        ORDER BY s.display_order ASC
-      `).all(business_id, service_id) as any[];
-
-      for (const cand of candidates) {
-        if (isSlotAvailable({ businessId: business_id, staffId: cand.id, serviceId: service_id, dateStr: booking_date, startTime: start_time, durationMinutes: service.duration_minutes })) {
-          effectiveStaffId = cand.id;
-          break;
-        }
-      }
-
-      if (!effectiveStaffId && candidates.length > 0) {
-        effectiveStaffId = candidates[0].id;
-      }
+    const match = getAvailableSlots({
+      businessId: business_id,
+      serviceId: service_id,
+      dateStr: booking_date,
+      staffId: staff_id || undefined,
+    }).find(slot => slot.time === start_time);
+    if (!match) {
+      return res.status(409).json({ error: 'El horario seleccionado ya no está disponible. Por favor elige otro horario.' });
     }
-
-    if (!effectiveStaffId) {
-      return res.status(400).json({ error: 'No hay profesional disponible para este servicio en el negocio.' });
-    }
+    const effectiveStaffId = match.staffId;
 
     // ATOMIC AVAILABILITY CHECK WITH TRANSACTION
     sqlite.exec('BEGIN TRANSACTION;');
@@ -839,7 +832,7 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
       serviceId: service_id,
       dateStr: booking_date,
       startTime: start_time,
-      durationMinutes: service.duration_minutes,
+      durationMinutes: match.durationMinutes,
     });
 
     if (!available) {
@@ -847,10 +840,7 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
       return res.status(409).json({ error: 'El horario seleccionado ya no está disponible. Por favor elige otro horario.' });
     }
 
-    // Calculate end time
-    const [h, m] = start_time.split(':').map(Number);
-    const endMinutes = h * 60 + m + service.duration_minutes;
-    const endTimeStr = `${String(Math.floor(endMinutes / 60)).padStart(2, '0')}:${String(endMinutes % 60).padStart(2, '0')}`;
+    const endTimeStr = match.endTime;
 
     const bookingId = generateId('bk');
     const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -881,7 +871,7 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
       booking_date,
       start_time,
       endTimeStr,
-      service.duration_minutes,
+      match.durationMinutes,
       service.price_clp,
       modality || 'salon',
       initialStatus,
@@ -1052,6 +1042,32 @@ router.get('/bookings', requireAuth, (req: AuthRequest, res: Response) => listBo
 router.get('/bookings/my', requireAuth, (req: AuthRequest, res: Response) => listBookings(req, res, 'customer'));
 router.get('/bookings/business', requireAuth, (req: AuthRequest, res: Response) => listBookings(req, res, 'business'));
 
+router.get('/bookings/:id/reschedule-slots', requireAuth, (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
+  if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (booking.customer_user_id !== req.userId && authorizeBusiness(req, res, booking.business_id) === null) return;
+
+  const date = typeof req.query.date === 'string' ? req.query.date : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: 'El formato de fecha no es válido.' });
+  }
+  if (booking.status !== 'PENDING' && booking.status !== 'CONFIRMED') {
+    return res.status(400).json({ error: `No se puede reprogramar una reserva en estado ${booking.status}.` });
+  }
+
+  return res.json({
+    date,
+    slots: getAvailableSlots({
+      businessId: booking.business_id,
+      serviceId: booking.service_id,
+      dateStr: date,
+      staffId: booking.staff_id,
+      excludeBookingId: booking.id,
+    }),
+  });
+});
+
 router.get('/bookings/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare(`
@@ -1180,6 +1196,104 @@ const cancelBookingHandler = (req: AuthRequest, res: Response) => {
   return res.json({ message: 'Reserva cancelada correctamente.', status: 'CANCELLED' });
 };
 router.post('/bookings/:id/cancel', requireAuth, cancelBookingHandler);
+
+router.post('/bookings/:id/reschedule', requireAuth, (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
+  if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
+  if (booking.customer_user_id !== req.userId && authorizeBusiness(req, res, booking.business_id) === null) return;
+
+  const { booking_date, start_time, staff_id } = req.body;
+  if (
+    typeof booking_date !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(booking_date) ||
+    typeof start_time !== 'string' ||
+    !/^\d{2}:\d{2}$/.test(start_time)
+  ) {
+    return res.status(400).json({ error: 'El formato de fecha u hora no es válido.' });
+  }
+  if (booking.status !== 'PENDING' && booking.status !== 'CONFIRMED') {
+    return res.status(400).json({ error: `No se puede reprogramar una reserva en estado ${booking.status}.` });
+  }
+
+  const match = getAvailableSlots({
+    businessId: booking.business_id,
+    serviceId: booking.service_id,
+    dateStr: booking_date,
+    staffId: staff_id || booking.staff_id,
+    excludeBookingId: booking.id,
+  }).find(slot => slot.time === start_time);
+  if (!match) {
+    return res.status(409).json({ error: 'El horario seleccionado ya no está disponible. Por favor elige otro horario.' });
+  }
+
+  const now = new Date().toISOString();
+  const reason = `Reprogramada de ${booking.booking_date} ${booking.start_time} a ${booking_date} ${start_time}`;
+  const updated = withTransaction(db => {
+    const available = isSlotAvailable({
+      businessId: booking.business_id,
+      staffId: match.staffId,
+      serviceId: booking.service_id,
+      dateStr: booking_date,
+      startTime: start_time,
+      durationMinutes: match.durationMinutes,
+      excludeBookingId: booking.id,
+    });
+    if (!available) return false;
+
+    db.prepare(`
+      UPDATE bookings
+      SET booking_date = ?, start_time = ?, end_time = ?, staff_id = ?, duration_minutes = ?, updated_at = ?
+      WHERE id = ?
+    `).run(booking_date, start_time, match.endTime, match.staffId, match.durationMinutes, now, booking.id);
+    db.prepare(`
+      INSERT INTO booking_status_history (
+        id, booking_id, from_status, to_status, changed_by_user_id, reason, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(generateId('bsh'), booking.id, booking.status, booking.status, req.userId || null, reason, now);
+
+    const business = db.prepare('SELECT owner_id FROM businesses WHERE id = ?')
+      .get(booking.business_id) as { owner_id: string } | undefined;
+    if (booking.customer_user_id === req.userId && business) {
+      createNotification(
+        business.owner_id,
+        'booking_rescheduled',
+        'Reserva reprogramada',
+        `La clienta ${booking.client_name} reprogramó su cita del ${booking.booking_date} ${booking.start_time} al ${booking_date} ${start_time}.`,
+        'booking',
+        booking.id,
+        'high'
+      );
+    } else if (booking.customer_user_id) {
+      createNotification(
+        booking.customer_user_id,
+        'booking_rescheduled',
+        'Reserva reprogramada',
+        `Tu cita fue reprogramada por el negocio del ${booking.booking_date} ${booking.start_time} al ${booking_date} ${start_time}.`,
+        'booking',
+        booking.id,
+        'high'
+      );
+    }
+    return true;
+  });
+  if (!updated) {
+    return res.status(409).json({ error: 'El horario seleccionado ya no está disponible. Por favor elige otro horario.' });
+  }
+
+  return res.status(200).json({
+    message: 'Reserva reprogramada correctamente.',
+    booking: {
+      id: booking.id,
+      booking_date,
+      start_time,
+      end_time: match.endTime,
+      staff_id: match.staffId,
+      duration_minutes: match.durationMinutes,
+      status: booking.status,
+    },
+  });
+});
 
 const completeBookingHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();

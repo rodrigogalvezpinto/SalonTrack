@@ -334,6 +334,11 @@ export const BusinessBookingsView: React.FC = () => {
                         Cancelada
                       </span>
                     )}
+                    {b.status === 'EXPIRED' && (
+                      <span className="text-xs font-semibold text-slate-600 bg-slate-100 border border-slate-200 px-2.5 py-0.5 rounded-md">
+                        Expirada
+                      </span>
+                    )}
                     {b.status === 'NO_SHOW' && (
                       <span className="text-xs font-semibold text-slate-600 bg-slate-100 px-2.5 py-0.5 rounded-md">
                         Inasistencia

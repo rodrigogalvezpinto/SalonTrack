@@ -9,10 +9,11 @@ import express from 'express';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
 import { hashPassword, verifyPassword, seedDemoDataIfEmpty } from '../server/auth.js';
 import { createBackup, restoreBackup, verifyBackup } from '../server/backup.js';
+import { expireStalePendingBookings } from '../server/bookingExpiration.js';
 import { generateId } from '../server/db.js';
 import { listClients, listContactLogs, listServices } from '../server/crmRepository.js';
 import { checkMigrations, closeSqliteDb, getDatabasePath, getSqliteDb, MIGRATIONS, migrationChecksum, runMigrations, withTransaction } from '../server/sqlite.js';
-import { isSlotAvailable } from '../server/availability.js';
+import { getAvailableSlots, isSlotAvailable } from '../server/availability.js';
 import { localEmailProvider, localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
 import apiRouter from '../server/routes.js';
 
@@ -356,6 +357,65 @@ async function runIntegrationTests() {
   };
   const sendJson = (path: string, body: unknown, token?: string) =>
     requestJson(path, 'POST', token, body);
+  const getSantiagoDate = (date: Date) => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Santiago',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  };
+  const addDaysToDate = (dateStr: string, days: number) => {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day + days, 12));
+    return date.toISOString().slice(0, 10);
+  };
+  const findAvailableSlots = async (
+    businessId: string,
+    serviceId: string,
+    staffId?: string,
+    minimumSlots = 1,
+    afterDate?: string
+  ) => {
+    const today = afterDate || getSantiagoDate(new Date());
+    for (let dayOffset = 1; dayOffset <= 60; dayOffset++) {
+      const date = addDaysToDate(today, dayOffset);
+      const params = new URLSearchParams({
+        business_id: businessId,
+        service_id: serviceId,
+        date,
+        ...(staffId ? { staff_id: staffId } : {}),
+      });
+      const response = await requestJson(`/api/availability/slots?${params}`, 'GET');
+      assert.strictEqual(response.status, 200);
+      const body = await response.json() as {
+        slots: Array<{ time: string; endTime: string; staffId: string; durationMinutes: number }>;
+      };
+      if (body.slots.length >= minimumSlots) {
+        return { date, slots: body.slots };
+      }
+    }
+    throw new Error(`No se encontraron ${minimumSlots} horarios disponibles para ${businessId}/${serviceId}.`);
+  };
+  const selectSeparatedSlots = (
+    slots: Array<{ time: string; endTime: string; staffId: string; durationMinutes: number }>,
+    count: number
+  ) => {
+    const selected: typeof slots = [];
+    for (const slot of slots) {
+      const previous = selected[selected.length - 1];
+      if (previous) {
+        const [previousHour, previousMinute] = previous.time.split(':').map(Number);
+        const [hour, minute] = slot.time.split(':').map(Number);
+        if (hour * 60 + minute - (previousHour * 60 + previousMinute) < previous.durationMinutes + 15) continue;
+      }
+      selected.push(slot);
+      if (selected.length === count) return selected;
+    }
+    throw new Error(`No se encontraron ${count} horarios separados.`);
+  };
   const requestReset = async (email: string) => {
     let emailContent = '';
     const originalSend = localEmailProvider.send;
@@ -726,6 +786,291 @@ async function runIntegrationTests() {
       await requestJson(`/api/clients/${client.id}`, 'DELETE', login.token);
     });
 
+    await integrationTest('Reservas: POST solo acepta horarios disponibles', async () => {
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'cliente@gmail.com',
+        password: 'Cliente1234!',
+      });
+      const login = await loginResponse.json() as { token: string };
+      assert.strictEqual(loginResponse.status, 200);
+
+      const businessId = 'biz_valeria_studio';
+      const serviceId = 'srv_val_corte';
+      const { date, slots } = await findAvailableSlots(businessId, serviceId, 'stf_valeria');
+      const otherBusinessStaff = sqlite.prepare(`
+        SELECT id FROM staff WHERE business_id != ? AND is_active = 1 LIMIT 1
+      `).get(businessId) as { id: string };
+      const countBookings = () => (sqlite.prepare('SELECT COUNT(*) AS count FROM bookings').get() as { count: number }).count;
+      const payload = {
+        business_id: businessId,
+        service_id: serviceId,
+        staff_id: 'stf_valeria',
+        booking_date: date,
+        start_time: slots[0].time,
+        client_name: 'Cliente de prueba de disponibilidad',
+        client_phone: '+56912345678',
+        payment_method: 'presential',
+      };
+      const assertRejectedWithoutChanges = async (body: Record<string, unknown>, status: number) => {
+        const before = countBookings();
+        const response = await sendJson('/api/bookings', body, login.token);
+        assert.strictEqual(response.status, status);
+        assert.strictEqual(countBookings(), before);
+        return response;
+      };
+
+      const earlySlot = await assertRejectedWithoutChanges({ ...payload, start_time: '03:00' }, 409);
+      assert.deepStrictEqual(await earlySlot.json(), {
+        error: 'El horario seleccionado ya no está disponible. Por favor elige otro horario.',
+      });
+      await assertRejectedWithoutChanges({ ...payload, booking_date: '2000-01-01' }, 409);
+      await assertRejectedWithoutChanges({ ...payload, booking_date: '2099/01/01' }, 400);
+      await assertRejectedWithoutChanges({ ...payload, start_time: 'tres' }, 400);
+      await assertRejectedWithoutChanges({ ...payload, staff_id: otherBusinessStaff.id }, 409);
+
+      let createdBookingId: string | undefined;
+      try {
+        const response = await sendJson('/api/bookings', payload, login.token);
+        assert.strictEqual(response.status, 201);
+        const body = await response.json() as { booking: { id: string; booking_date: string; start_time: string; end_time: string; staff_id?: string } };
+        createdBookingId = body.booking.id;
+        const saved = sqlite.prepare(`
+          SELECT booking_date, start_time, end_time, staff_id
+          FROM bookings WHERE id = ?
+        `).get(createdBookingId) as {
+          booking_date: string;
+          start_time: string;
+          end_time: string;
+          staff_id: string;
+        };
+        assert.strictEqual(saved.booking_date, date);
+        assert.strictEqual(saved.start_time, slots[0].time);
+        assert.strictEqual(saved.end_time, slots[0].endTime);
+        assert.strictEqual(saved.staff_id, slots[0].staffId);
+      } finally {
+        if (createdBookingId) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(createdBookingId);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(createdBookingId);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(createdBookingId);
+        }
+      }
+    });
+
+    await integrationTest('Reservas: clientes y personal pueden reprogramar con autorización', async () => {
+      const login = async (email: string, password: string) => {
+        const response = await sendJson('/api/auth/login', { email, password });
+        const body = await response.json() as { token: string; user: { id: string } };
+        assert.strictEqual(response.status, 200);
+        return body;
+      };
+      const customer = await login('cliente@gmail.com', 'Cliente1234!');
+      const owner = await login('contacto@valeriaestudio.cl', 'Salon1234');
+      const staff = await login('camila@valeriaestudio.cl', 'Staff1234!');
+      const stranger = await login('ignacio@barberiaroute.cl', 'Barber1234!');
+      const businessId = 'biz_valeria_studio';
+      const serviceId = 'srv_val_corte';
+      const available = await findAvailableSlots(businessId, serviceId, 'stf_valeria', 20);
+      const { date } = available;
+      const slots = selectSeparatedSlots(available.slots, 4);
+      const currentStart = slots[0].time.split(':').map(Number).reduce((minutes, value) => minutes * 60 + value, 0);
+      const overlappingSlot = available.slots.find(slot => {
+        const [hour, minute] = slot.time.split(':').map(Number);
+        const candidateStart = hour * 60 + minute;
+        return candidateStart > currentStart &&
+          candidateStart < currentStart + slots[0].durationMinutes &&
+          candidateStart + slot.durationMinutes > currentStart;
+      });
+      assert.ok(overlappingSlot);
+      const bookingIds = [
+        generateId('reschedule'),
+        generateId('reschedule_occupied'),
+        generateId('reschedule_completed'),
+      ];
+      const now = new Date().toISOString();
+      const insertFixture = (
+        id: string,
+        status: string,
+        bookingDate: string,
+        slot: { time: string; endTime: string; durationMinutes: number }
+      ) => {
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, 'stf_valeria', ?, ?, ?, ?, ?, ?, 25000, 'salon', ?,
+            'presential', 'pending', 'Cliente de reprogramación', '+56912345670', ?, ?)
+        `).run(
+          id,
+          `RESCHEDULE-${id}`,
+          businessId,
+          serviceId,
+          customer.user.id,
+          bookingDate,
+          slot.time,
+          slot.endTime,
+          slot.durationMinutes,
+          status,
+          now,
+          now
+        );
+      };
+      insertFixture(bookingIds[0], 'PENDING', date, slots[0]);
+      insertFixture(bookingIds[1], 'PENDING', date, slots[1]);
+      insertFixture(bookingIds[2], 'COMPLETED', '2000-01-01', {
+        time: '10:00',
+        endTime: '10:50',
+        durationMinutes: 50,
+      });
+      sqlite.prepare('UPDATE bookings SET duration_minutes = 1 WHERE id = ?').run(bookingIds[0]);
+
+      const stateFor = (id: string) => ({
+        booking: sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(id),
+        historyCount: (sqlite.prepare('SELECT COUNT(*) AS count FROM booking_status_history WHERE booking_id = ?')
+          .get(id) as { count: number }).count,
+        notificationCount: (sqlite.prepare(`
+          SELECT COUNT(*) AS count FROM notifications
+          WHERE entity_type = 'booking' AND entity_id = ? AND type = 'booking_rescheduled'
+        `).get(id) as { count: number }).count,
+      });
+      const assertUnchanged = async (id: string, token: string, body: unknown, expectedStatus: number) => {
+        const before = stateFor(id);
+        const response = await sendJson(`/api/bookings/${id}/reschedule`, body, token);
+        assert.strictEqual(response.status, expectedStatus);
+        assert.deepStrictEqual(stateFor(id), before);
+      };
+
+      try {
+        const missingBooking = await sendJson('/api/bookings/no-existe/reschedule', {
+          booking_date: date,
+          start_time: slots[0].time,
+        }, customer.token);
+        assert.strictEqual(missingBooking.status, 404);
+        const missingSlotList = await requestJson(
+          `/api/bookings/no-existe/reschedule-slots?date=${date}`,
+          'GET',
+          customer.token
+        );
+        assert.strictEqual(missingSlotList.status, 404);
+        const invalidDateSlotList = await requestJson(
+          `/api/bookings/${bookingIds[0]}/reschedule-slots?date=mal`,
+          'GET',
+          customer.token
+        );
+        assert.strictEqual(invalidDateSlotList.status, 400);
+
+        const publicParams = new URLSearchParams({
+          business_id: businessId,
+          service_id: serviceId,
+          date,
+          staff_id: 'stf_valeria',
+        });
+        const publicSlotResponse = await requestJson(`/api/availability/slots?${publicParams}`, 'GET');
+        const publicSlotBody = await publicSlotResponse.json() as {
+          slots: Array<{ time: string }>;
+        };
+        assert.strictEqual(publicSlotResponse.status, 200);
+        assert.ok(!publicSlotBody.slots.some(slot => slot.time === overlappingSlot.time));
+        const rescheduleSlotResponse = await requestJson(
+          `/api/bookings/${bookingIds[0]}/reschedule-slots?date=${date}`,
+          'GET',
+          customer.token
+        );
+        const rescheduleSlotBody = await rescheduleSlotResponse.json() as {
+          date: string;
+          slots: Array<{ time: string }>;
+        };
+        assert.strictEqual(rescheduleSlotResponse.status, 200);
+        assert.strictEqual(rescheduleSlotBody.date, date);
+        assert.ok(rescheduleSlotBody.slots.some(slot => slot.time === overlappingSlot.time));
+        const strangerSlotResponse = await requestJson(
+          `/api/bookings/${bookingIds[0]}/reschedule-slots?date=${date}`,
+          'GET',
+          stranger.token
+        );
+        assert.strictEqual(strangerSlotResponse.status, 404);
+        const completedSlotResponse = await requestJson(
+          `/api/bookings/${bookingIds[2]}/reschedule-slots?date=${date}`,
+          'GET',
+          customer.token
+        );
+        assert.strictEqual(completedSlotResponse.status, 400);
+        const currentSlot = { booking_date: date, start_time: slots[0].time };
+        await assertUnchanged(bookingIds[0], customer.token, { booking_date: 'bad-date', start_time: slots[0].time }, 400);
+
+        const sameSlotResponse = await sendJson(
+          `/api/bookings/${bookingIds[0]}/reschedule`,
+          currentSlot,
+          customer.token
+        );
+        assert.strictEqual(sameSlotResponse.status, 200);
+        const sameSlotBody = await sameSlotResponse.json() as any;
+        assert.strictEqual(sameSlotBody.booking.start_time, slots[0].time);
+        assert.strictEqual(sameSlotBody.booking.duration_minutes, slots[0].durationMinutes);
+        assert.strictEqual((sqlite.prepare('SELECT duration_minutes FROM bookings WHERE id = ?')
+          .get(bookingIds[0]) as { duration_minutes: number }).duration_minutes, slots[0].durationMinutes);
+
+        const freeSlotResponse = await sendJson(`/api/bookings/${bookingIds[0]}/reschedule`, {
+          booking_date: date,
+          start_time: slots[2].time,
+        }, customer.token);
+        assert.strictEqual(freeSlotResponse.status, 200);
+        assert.deepStrictEqual((await freeSlotResponse.json() as any).booking, {
+          id: bookingIds[0],
+          booking_date: date,
+          start_time: slots[2].time,
+          end_time: slots[2].endTime,
+          staff_id: slots[2].staffId,
+          duration_minutes: slots[2].durationMinutes,
+          status: 'PENDING',
+        });
+        const history = sqlite.prepare(`
+          SELECT from_status, to_status, reason FROM booking_status_history
+          WHERE booking_id = ? AND reason = ?
+        `).get(
+          bookingIds[0],
+          `Reprogramada de ${date} ${slots[0].time} a ${date} ${slots[2].time}`
+        ) as { from_status: string; to_status: string; reason: string };
+        assert.deepStrictEqual({ ...history }, {
+          from_status: 'PENDING',
+          to_status: 'PENDING',
+          reason: `Reprogramada de ${date} ${slots[0].time} a ${date} ${slots[2].time}`,
+        });
+        assert.ok(sqlite.prepare(`
+          SELECT 1 FROM notifications
+          WHERE user_id = ? AND entity_type = 'booking' AND entity_id = ?
+            AND type = 'booking_rescheduled'
+        `).get(owner.user.id, bookingIds[0]));
+
+        await assertUnchanged(bookingIds[0], customer.token, {
+          booking_date: date,
+          start_time: slots[1].time,
+        }, 409);
+        await assertUnchanged(bookingIds[0], stranger.token, {
+          booking_date: date,
+          start_time: slots[3].time,
+        }, 404);
+        await assertUnchanged(bookingIds[2], customer.token, {
+          booking_date: date,
+          start_time: slots[3].time,
+        }, 400);
+
+        const staffResponse = await sendJson(`/api/bookings/${bookingIds[0]}/reschedule`, {
+          booking_date: date,
+          start_time: slots[3].time,
+        }, staff.token);
+        assert.strictEqual(staffResponse.status, 200);
+        assert.strictEqual((sqlite.prepare('SELECT status FROM bookings WHERE id = ?')
+          .get(bookingIds[0]) as { status: string }).status, 'PENDING');
+      } finally {
+        for (const id of bookingIds) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(id);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(id);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(id);
+        }
+      }
+    });
+
     await integrationTest('Autorización: reservas y acciones del negocio respetan membresías', async () => {
       const login = async (email: string, password: string) => {
         const response = await sendJson('/api/auth/login', { email, password });
@@ -913,12 +1258,13 @@ async function runIntegrationTests() {
       }
 
       sqlite.prepare("UPDATE businesses SET booking_mode = 'MANUAL' WHERE id = ?").run(targetBusinessId);
+      const customerBookingSlot = await findAvailableSlots(targetBusinessId, 'srv_val_corte', 'stf_valeria');
       const customerBookingResponse = await postAs('/api/bookings', bookingCustomer.token, {
         business_id: targetBusinessId,
         service_id: 'srv_val_corte',
         staff_id: 'stf_valeria',
-        booking_date: '2099-01-02',
-        start_time: '11:00',
+        booking_date: customerBookingSlot.date,
+        start_time: customerBookingSlot.slots[0].time,
         client_name: 'Cliente autenticada',
         client_phone: '+56912345002',
         payment_method: 'presential',
@@ -953,7 +1299,7 @@ async function runIntegrationTests() {
       `).get(customerBooking.id) as any;
       assert.strictEqual(completedService.color_formula, '7.1 + 20vol');
       assert.strictEqual(completedService.recommended_interval_days, 45);
-      assert.strictEqual(completedService.next_retouch_date, '2099-02-16');
+      assert.strictEqual(completedService.next_retouch_date, addDaysToDate(customerBookingSlot.date, 45));
 
       const staffMemberRole = (sqlite.prepare(`
         SELECT role FROM business_members WHERE business_id = ? AND user_id = ?
@@ -1717,6 +2063,119 @@ async function runIntegrationTests() {
       } finally {
         getSqliteDb().prepare('DELETE FROM clients WHERE id = ?').run(markerId);
         rmSync(backupDirectory, { recursive: true, force: true });
+      }
+    });
+
+    await integrationTest('Reservas: expira pendientes vencidas y libera su horario', async () => {
+      const sqlite = getSqliteDb();
+      const businessId = 'biz_valeria_studio';
+      const serviceId = 'srv_val_corte';
+      const staffId = 'stf_valeria';
+      const available = await findAvailableSlots(businessId, serviceId, staffId, 10);
+      const { date } = available;
+      const slots = selectSeparatedSlots(available.slots, 2);
+      const fixedNow = new Date(`${addDaysToDate(date, 1)}T21:00:00.000Z`);
+      const fixedParts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Santiago',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(fixedNow);
+      const fixedValues = Object.fromEntries(fixedParts.map(part => [part.type, part.value]));
+      const fixedToday = `${fixedValues.year}-${fixedValues.month}-${fixedValues.day}`;
+      const fixedTime = `${fixedValues.hour}:${fixedValues.minute}`;
+      const staleBefore = (sqlite.prepare(`
+        SELECT COUNT(*) AS count FROM bookings
+        WHERE status = 'PENDING'
+          AND (booking_date < ? OR (booking_date = ? AND start_time <= ?))
+      `).get(fixedToday, fixedToday, fixedTime) as { count: number }).count;
+      const futureSlots = await findAvailableSlots(
+        businessId,
+        serviceId,
+        staffId,
+        1,
+        fixedToday
+      );
+      const customerId = (sqlite.prepare('SELECT id FROM users WHERE email = ?')
+        .get('cliente@gmail.com') as { id: string }).id;
+      const ids = [
+        generateId('expire_pending'),
+        generateId('expire_future'),
+        generateId('expire_confirmed'),
+      ];
+      const createdAt = new Date().toISOString();
+      const insertBooking = (
+        id: string,
+        bookingDate: string,
+        slot: { time: string; endTime: string; durationMinutes: number },
+        status: 'PENDING' | 'CONFIRMED'
+      ) => {
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 25000, 'salon', ?, 'presential',
+            'pending', 'Cliente de vencimiento', '+56912345671', ?, ?)
+        `).run(
+          id,
+          `EXPIRE-${id}`,
+          businessId,
+          staffId,
+          serviceId,
+          customerId,
+          bookingDate,
+          slot.time,
+          slot.endTime,
+          slot.durationMinutes,
+          status,
+          createdAt,
+          createdAt
+        );
+      };
+      insertBooking(ids[0], date, slots[0], 'PENDING');
+      insertBooking(ids[1], futureSlots.date, futureSlots.slots[0], 'PENDING');
+      insertBooking(ids[2], date, slots[1], 'CONFIRMED');
+      const futureBefore = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(ids[1]);
+      const confirmedBefore = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(ids[2]);
+
+      try {
+        assert.ok(!getAvailableSlots({ businessId, serviceId, dateStr: date, staffId })
+          .some(slot => slot.time === slots[0].time));
+        assert.strictEqual(expireStalePendingBookings(fixedNow), staleBefore + 1);
+        const expired = sqlite.prepare('SELECT status FROM bookings WHERE id = ?').get(ids[0]) as { status: string };
+        assert.strictEqual(expired.status, 'EXPIRED');
+        const history = sqlite.prepare(`
+          SELECT from_status, to_status, changed_by_user_id, reason
+          FROM booking_status_history WHERE booking_id = ?
+        `).get(ids[0]);
+        assert.deepStrictEqual({ ...history }, {
+          from_status: 'PENDING',
+          to_status: 'EXPIRED',
+          changed_by_user_id: null,
+          reason: 'Expirada sin confirmación',
+        });
+        assert.deepStrictEqual({ ...sqlite.prepare(`
+          SELECT type, title, message FROM notifications
+          WHERE user_id = ? AND entity_type = 'booking' AND entity_id = ?
+        `).get(customerId, ids[0]) as object }, {
+          type: 'booking_expired',
+          title: 'Reserva expirada',
+          message: `Tu solicitud para el ${date} a las ${slots[0].time} hrs no fue confirmada a tiempo y expiró.`,
+        });
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(ids[1]), futureBefore);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(ids[2]), confirmedBefore);
+        assert.ok(getAvailableSlots({ businessId, serviceId, dateStr: date, staffId })
+          .some(slot => slot.time === slots[0].time));
+      } finally {
+        for (const id of ids) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(id);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(id);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(id);
+        }
       }
     });
 
