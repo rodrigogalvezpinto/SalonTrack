@@ -100,7 +100,7 @@ function authorizeBusiness(
   req: AuthRequest,
   res: Response,
   businessId: string,
-  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION']
+  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']
 ): string | null {
   const member = getSqliteDb().prepare(`
     SELECT role

@@ -623,6 +623,7 @@ async function runIntegrationTests() {
 
       const bookings = {
         confirm: createBooking('PENDING'),
+        ownerConfirm: createBooking('PENDING'),
         reject: createBooking('PENDING'),
         complete: createBooking('PENDING'),
         ownerCancel: createBooking('PENDING'),
@@ -655,11 +656,25 @@ async function runIntegrationTests() {
       }
 
       const staffConfirm = await postAs(`/api/bookings/${bookings.confirm}/confirm`, staff.token);
-      assert.strictEqual(staffConfirm.status, 403);
-      assert.deepStrictEqual(await staffConfirm.json(), {
-        error: 'No tienes permisos para esta acción en el negocio.',
-      });
-      assert.strictEqual((await postAs(`/api/bookings/${bookings.confirm}/confirm`, owner.token)).status, 200);
+      assert.strictEqual(staffConfirm.status, 200);
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.confirm}/complete`, staff.token)).status, 200);
+
+      const staffMembership = sqlite.prepare(`
+        SELECT id, business_id FROM business_members
+        WHERE user_id = ? AND business_id = ? AND is_active = 1 AND role = 'STAFF'
+      `).get(staff.user.id, targetBusinessId) as { id: string; business_id: string };
+      sqlite.prepare('UPDATE business_members SET business_id = ? WHERE id = ?')
+        .run('biz_route68_barber', staffMembership.id);
+      let crossBusinessStaffConfirm: Response;
+      try {
+        crossBusinessStaffConfirm = await postAs(`/api/bookings/${bookings.ownerConfirm}/confirm`, staff.token);
+      } finally {
+        sqlite.prepare('UPDATE business_members SET business_id = ? WHERE id = ?')
+          .run(staffMembership.business_id, staffMembership.id);
+      }
+      assert.strictEqual(crossBusinessStaffConfirm.status, 404);
+
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.ownerConfirm}/confirm`, owner.token)).status, 200);
       assert.strictEqual((await postAs(`/api/bookings/${bookings.reject}/reject`, owner.token, { reason: 'Prueba autorizada' })).status, 200);
       assert.strictEqual((await postAs(`/api/bookings/${bookings.complete}/complete`, owner.token)).status, 200);
       assert.strictEqual((await postAs(`/api/bookings/${bookings.ownerCancel}/cancel`, owner.token)).status, 200);
