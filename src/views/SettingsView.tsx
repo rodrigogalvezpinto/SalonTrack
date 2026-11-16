@@ -89,6 +89,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
           sound_enabled: soundEnabled,
         }),
       });
+      await reloadSession();
 
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);

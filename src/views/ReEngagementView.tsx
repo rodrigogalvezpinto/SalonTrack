@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 
 export const ReEngagementView: React.FC = () => {
-  const { profile } = useAuth();
+  const { profile, reloadSession } = useAuth();
   const [data, setData] = useState<ReEngagementResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [thresholdDays, setThresholdDays] = useState<number>(90);
@@ -112,6 +112,7 @@ export const ReEngagementView: React.FC = () => {
           threshold_days: thresholdDays,
         }),
       });
+      await reloadSession();
       setIsEditingTemplate(false);
       await fetchReEngagement(thresholdDays);
     } catch (err) {
