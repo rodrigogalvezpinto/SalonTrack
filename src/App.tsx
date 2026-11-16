@@ -40,6 +40,8 @@ function MainApp() {
   // Navigation state
   const [currentView, setCurrentView] = useState<string>('dashboard');
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const [clientsListVersion, setClientsListVersion] = useState(0);
+  const [clientDetailVersion, setClientDetailVersion] = useState(0);
   const [selectedBusinessSlug, setSelectedBusinessSlug] = useState<string>('valeria-henriquez-studio');
 
   // Modals
@@ -247,6 +249,7 @@ function MainApp() {
 
           {currentView === 'clients' && (
             <ClientsView
+              refreshKey={clientsListVersion}
               onSelectClient={handleSelectClient}
               onOpenWhatsApp={handleOpenWhatsApp}
               onNewClient={() => setNewClientModalOpen(true)}
@@ -256,6 +259,7 @@ function MainApp() {
           {currentView === 'client_detail' && selectedClientId && (
             <ClientDetailView
               clientId={selectedClientId}
+              refreshKey={clientDetailVersion}
               onBack={() => {
                 setSelectedClientId(null);
                 setCurrentView('clients');
@@ -319,6 +323,7 @@ function MainApp() {
         client={whatsAppTargetClient}
         service={whatsAppTargetService}
         onClose={() => setWhatsAppModalOpen(false)}
+        onContactLogged={() => setClientDetailVersion(v => v + 1)}
       />
 
       <NewClientModal
@@ -326,6 +331,7 @@ function MainApp() {
         onClose={() => setNewClientModalOpen(false)}
         onClientCreated={() => {
           setCurrentView('clients');
+          setClientsListVersion(v => v + 1);
         }}
       />
 
@@ -333,9 +339,7 @@ function MainApp() {
         isOpen={newServiceModalOpen}
         client={serviceTargetClient}
         onClose={() => setNewServiceModalOpen(false)}
-        onServiceCreated={() => {
-          // auto reloaded in ClientDetailView
-        }}
+        onServiceCreated={() => setClientDetailVersion(v => v + 1)}
       />
 
       <CheckoutModal

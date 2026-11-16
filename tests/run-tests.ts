@@ -1,19 +1,25 @@
 import './setup-env.js';
 import assert from 'node:assert';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
-import { hashPassword, verifyPassword, generateToken, seedDemoDataIfEmpty } from '../server/auth.js';
-import { getDb, saveDb, refreshDb, generateId, User, Profile, Client, Service } from '../server/db.js';
-import { getSqliteDb } from '../server/sqlite.js';
+import { hashPassword, verifyPassword, seedDemoDataIfEmpty } from '../server/auth.js';
+import { generateId } from '../server/db.js';
+import { listClients, listContactLogs, listServices } from '../server/crmRepository.js';
+import { getSqliteDb, withTransaction } from '../server/sqlite.js';
 import { isSlotAvailable } from '../server/availability.js';
 import { localEmailProvider, localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
 import apiRouter from '../server/routes.js';
 
 console.log('🧪 Iniciando Suite de Pruebas Automatizadas de SalonTrack Chile...\n');
+
+const databaseJsonPath = process.env.DATABASE_FILE_JSON!;
+const databaseJsonAtStart = existsSync(databaseJsonPath)
+  ? { exists: true, mtimeMs: statSync(databaseJsonPath).mtimeMs }
+  : { exists: false };
 
 // Seed test environment with Chilean demo data & categories
 seedDemoDataIfEmpty();
@@ -81,37 +87,63 @@ test('Autenticación Segura: Hash bcrypt y verificación de contraseñas', () =>
 
 // 7. Aislamiento entre Usuarios (Multi-tenant RLS)
 test('Aislamiento de Datos (RLS): Un estilista no puede ver datos de otro estilista', () => {
-  const user1Id = 'usr_test_1_' + Date.now();
-  const user2Id = 'usr_test_2_' + Date.now();
+  const sqlite = getSqliteDb();
+  const user1Id = generateId('usr');
+  const user2Id = generateId('usr');
+  const client1Id = generateId('cli');
+  const client2Id = generateId('cli');
+  const now = new Date().toISOString();
+  const insertUser = sqlite.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)');
+  const insertClient = sqlite.prepare(`
+    INSERT INTO clients (
+      id, user_id, full_name, phone, notes, preferred_contact, re_engagement_status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'whatsapp', 'none', ?, ?)
+  `);
 
-  const client1: Client = {
-    id: generateId('cli'),
-    user_id: user1Id,
-    full_name: 'Clienta de Estilista 1',
-    phone: '+56911111111',
-    notes: 'Datos privados estilista 1',
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
+  insertUser.run(user1Id, `${user1Id}@example.test`, 'test-hash', now);
+  insertUser.run(user2Id, `${user2Id}@example.test`, 'test-hash', now);
+  try {
+    insertClient.run(client1Id, user1Id, 'Clienta de Estilista 1', '+56911111111', 'Datos privados estilista 1', now, now);
+    insertClient.run(client2Id, user2Id, 'Clienta de Estilista 2', '+56922222222', 'Datos privados estilista 2', now, now);
 
-  const client2: Client = {
-    id: generateId('cli'),
-    user_id: user2Id,
-    full_name: 'Clienta de Estilista 2',
-    phone: '+56922222222',
-    notes: 'Datos privados estilista 2',
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
+    const user1Clients = listClients(user1Id);
+    assert.ok(user1Clients.some(client => client.id === client1Id));
+    assert.ok(!user1Clients.some(client => client.id === client2Id));
+  } finally {
+    sqlite.prepare('DELETE FROM users WHERE id IN (?, ?)').run(user1Id, user2Id);
+  }
+});
 
-  const db = getDb();
-  db.clients.push(client1, client2);
+test('Transacciones SQLite: revierte y anida savepoints correctamente', () => {
+  const sqlite = getSqliteDb();
+  const userId = 'usr_demo_valeria_estilista';
+  const rolledBackId = generateId('cli');
+  const outerId = generateId('cli');
+  const innerId = generateId('cli');
+  const insertClient = (id: string) => sqlite.prepare(`
+    INSERT INTO clients (id, user_id, full_name, phone, created_at, updated_at)
+    VALUES (?, ?, ?, '+56900000000', ?, ?)
+  `).run(id, userId, id, new Date().toISOString(), new Date().toISOString());
+  const countClient = (id: string) => (sqlite.prepare('SELECT COUNT(*) AS count FROM clients WHERE id = ?').get(id) as { count: number }).count;
 
-  // Consulta simulada para user1
-  const user1Clients = db.clients.filter(c => c.user_id === user1Id);
-  assert.ok(user1Clients.some(c => c.id === client1.id));
-  assert.ok(!user1Clients.some(c => c.id === client2.id));
-  db.clients = db.clients.filter(c => c.id !== client1.id && c.id !== client2.id);
+  assert.throws(() => withTransaction(db => {
+    insertClient(rolledBackId);
+    throw new Error('rollback');
+  }), /rollback/);
+  assert.strictEqual(countClient(rolledBackId), 0);
+
+  withTransaction(() => {
+    insertClient(outerId);
+    try {
+      withTransaction(() => {
+        insertClient(innerId);
+        throw new Error('rollback nested savepoint');
+      });
+    } catch {}
+  });
+  assert.strictEqual(countClient(outerId), 1);
+  assert.strictEqual(countClient(innerId), 0);
+  sqlite.prepare('DELETE FROM clients WHERE id IN (?, ?)').run(outerId, innerId);
 });
 
 // 8. Cálculo de Retoques según Intervalo
@@ -267,6 +299,58 @@ async function runIntegrationTests() {
   let olderResetToken = '';
 
   try {
+    await integrationTest('SQLite CRM: GET /clients refleja inserciones y eliminaciones externas', async () => {
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const login = await loginResponse.json() as { token: string };
+      assert.strictEqual(loginResponse.status, 200);
+
+      const clientId = generateId('cli');
+      const now = new Date().toISOString();
+      sqlite.prepare(`
+        INSERT INTO clients (
+          id, user_id, full_name, phone, notes, preferred_contact,
+          re_engagement_status, created_at, updated_at
+        ) VALUES (?, 'usr_demo_valeria_estilista', 'Inserción directa', '+56912345003', '', 'whatsapp', 'none', ?, ?)
+      `).run(clientId, now, now);
+
+      const afterInsert = await requestJson('/api/clients', 'GET', login.token);
+      assert.ok(((await afterInsert.json() as any).clients as any[]).some(client => client.id === clientId));
+
+      sqlite.prepare('DELETE FROM clients WHERE id = ?').run(clientId);
+      const afterDelete = await requestJson('/api/clients', 'GET', login.token);
+      assert.ok(!((await afterDelete.json() as any).clients as any[]).some(client => client.id === clientId));
+    });
+
+    await integrationTest('Backup: exporta clientes sin exponer hashes de contraseña', async () => {
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const login = await loginResponse.json() as { token: string };
+      assert.strictEqual(loginResponse.status, 200);
+
+      const clientResponse = await sendJson('/api/clients', {
+        full_name: 'Cliente incluido en respaldo',
+        phone: '+56912345009',
+      }, login.token);
+      assert.strictEqual(clientResponse.status, 201);
+      const clientId = (await clientResponse.json() as any).client.id as string;
+
+      try {
+        const exportResponse = await requestJson('/api/backup/export', 'GET', login.token);
+        assert.strictEqual(exportResponse.status, 200);
+        const exportBody = await exportResponse.json() as any;
+        assert.deepStrictEqual(Object.keys(exportBody.user).sort(), ['created_at', 'email', 'id']);
+        assert.ok(!JSON.stringify(exportBody).includes('password_hash'));
+        assert.ok(exportBody.clients.some((client: any) => client.id === clientId));
+      } finally {
+        await requestJson(`/api/clients/${clientId}`, 'DELETE', login.token, {});
+      }
+    });
+
     await integrationTest('Integridad SQLite: POST /clients conserva roles, membresías y reservas del demo owner', async () => {
       const loginResponse = await sendJson('/api/auth/login', {
         email: 'contacto@valeriaestudio.cl',
@@ -329,6 +413,12 @@ async function runIntegrationTests() {
       };
       assert.strictEqual(clientResponse.status, 201);
       assert.ok(createdClient.service);
+      assert.strictEqual((sqlite.prepare(
+        'SELECT COUNT(*) AS count FROM clients WHERE id = ? AND user_id = ?'
+      ).get(createdClient.client.id, 'usr_demo_valeria_estilista') as any).count, 1);
+      assert.strictEqual((sqlite.prepare(
+        'SELECT COUNT(*) AS count FROM client_service_history WHERE id = ? AND client_id = ?'
+      ).get(createdClient.service.id, createdClient.client.id) as any).count, 1);
 
       const extraServiceResponse = await sendJson('/api/services', {
         client_id: createdClient.client.id,
@@ -355,9 +445,8 @@ async function runIntegrationTests() {
         'SELECT COUNT(*) as count FROM client_service_history WHERE id = ? AND user_id = ?'
       ).get(createdClient.service.id, 'usr_demo_valeria_estilista')?.count, 0);
 
-      refreshDb();
-      assert.ok(!getDb().services.some(service => service.id === createdClient.service.id));
-      assert.ok(getDb().services.some(service => service.id === extraService.service.id));
+      assert.ok(!listServices('usr_demo_valeria_estilista').some(service => service.id === createdClient.service.id));
+      assert.ok(listServices('usr_demo_valeria_estilista').some(service => service.id === extraService.service.id));
 
       const clientDeleteResponse = await requestJson(
         `/api/clients/${createdClient.client.id}`,
@@ -376,10 +465,95 @@ async function runIntegrationTests() {
         'SELECT COUNT(*) as count FROM contact_logs WHERE client_id = ?'
       ).get(createdClient.client.id)?.count, 0);
 
-      refreshDb();
-      assert.ok(!getDb().clients.some(client => client.id === createdClient.client.id));
-      assert.ok(!getDb().services.some(service => service.id === extraService.service.id));
-      assert.ok(!getDb().contact_logs.some(log => log.client_id === createdClient.client.id));
+      assert.ok(!listClients('usr_demo_valeria_estilista').some(client => client.id === createdClient.client.id));
+      assert.ok(!listServices('usr_demo_valeria_estilista').some(service => service.id === extraService.service.id));
+      assert.ok(!listContactLogs('usr_demo_valeria_estilista', createdClient.client.id).length);
+    });
+
+    await integrationTest('Suscripciones: pago persistido, idempotente y aislado por usuario', async () => {
+      const ownerResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const owner = await ownerResponse.json() as { token: string; user: { id: string } };
+      const otherResponse = await sendJson('/api/auth/login', {
+        email: 'cliente@gmail.com',
+        password: 'Cliente1234!',
+      });
+      const other = await otherResponse.json() as { token: string };
+      const paymentRef = `CRM_${generateId('pay')}`;
+
+      const activation = await sendJson('/api/subscriptions/activate-license', {
+        plan_id: 'pro_quarterly',
+        payment_ref: paymentRef,
+      }, owner.token);
+      assert.strictEqual(activation.status, 200);
+      const activationBody = await activation.json() as any;
+      const paymentRow = sqlite.prepare(`
+        SELECT user_id, type, provider, provider_payment_id, status, payment_method, metadata
+        FROM payments
+        WHERE provider_payment_id = ?
+      `).get(paymentRef) as any;
+      assert.strictEqual(paymentRow.user_id, owner.user.id);
+      assert.strictEqual(paymentRow.type, 'subscription_payment');
+      assert.strictEqual(paymentRow.provider, 'mercadopago');
+      assert.strictEqual(paymentRow.status, 'approved');
+      assert.strictEqual(paymentRow.payment_method, 'simulated_online');
+      assert.deepStrictEqual(JSON.parse(paymentRow.metadata), { plan: 'pro_quarterly' });
+      assert.strictEqual(activationBody.payment.plan, 'pro_quarterly');
+
+      const repeated = await sendJson('/api/subscriptions/activate-license', {
+        plan_id: 'pro_quarterly',
+        payment_ref: paymentRef,
+      }, owner.token);
+      assert.deepStrictEqual(await repeated.json(), {
+        message: 'Este pago ya fue procesado.',
+        payment: activationBody.payment,
+      });
+      assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count, 1);
+
+      const crossUser = await sendJson('/api/subscriptions/activate-license', {
+        plan_id: 'pro_quarterly',
+        payment_ref: paymentRef,
+      }, other.token);
+      assert.strictEqual(crossUser.status, 409);
+      assert.deepStrictEqual(await crossUser.json(), { error: 'Este pago ya fue procesado.' });
+
+      const current = await requestJson('/api/subscriptions/current', 'GET', owner.token);
+      const currentBody = await current.json() as any;
+      assert.ok(currentBody.payments.some((payment: any) => payment.provider_payment_id === paymentRef));
+    });
+
+    await integrationTest('Re-engagement: actualiza el estado y registra el contacto en SQLite', async () => {
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const login = await loginResponse.json() as { token: string };
+      const clientResponse = await sendJson('/api/clients', {
+        full_name: 'Clienta de re-engagement',
+        phone: '+56912345004',
+      }, login.token);
+      const client = (await clientResponse.json() as any).client;
+      assert.strictEqual(clientResponse.status, 201);
+
+      const statusResponse = await sendJson('/api/re-engagement/status', {
+        client_id: client.id,
+        status: 'reactivated',
+        notes: 'Volvió a reservar',
+      }, login.token);
+      assert.strictEqual(statusResponse.status, 200);
+      assert.strictEqual((sqlite.prepare('SELECT re_engagement_status FROM clients WHERE id = ?').get(client.id) as any).re_engagement_status, 'reactivated');
+      const contact = sqlite.prepare(`
+        SELECT user_id, client_id, channel, status, notes
+        FROM contact_logs
+        WHERE client_id = ?
+      `).get(client.id) as any;
+      assert.strictEqual(contact.user_id, 'usr_demo_valeria_estilista');
+      assert.strictEqual(contact.channel, 'whatsapp');
+      assert.strictEqual(contact.status, 'scheduled');
+      assert.strictEqual(contact.notes, 'Volvió a reservar');
+      await requestJson(`/api/clients/${client.id}`, 'DELETE', login.token);
     });
 
     await integrationTest('Autorización: reservas y acciones del negocio respetan membresías', async () => {
@@ -449,6 +623,7 @@ async function runIntegrationTests() {
 
       const bookings = {
         confirm: createBooking('PENDING'),
+        ownerConfirm: createBooking('PENDING'),
         reject: createBooking('PENDING'),
         complete: createBooking('PENDING'),
         ownerCancel: createBooking('PENDING'),
@@ -481,11 +656,25 @@ async function runIntegrationTests() {
       }
 
       const staffConfirm = await postAs(`/api/bookings/${bookings.confirm}/confirm`, staff.token);
-      assert.strictEqual(staffConfirm.status, 403);
-      assert.deepStrictEqual(await staffConfirm.json(), {
-        error: 'No tienes permisos para esta acción en el negocio.',
-      });
-      assert.strictEqual((await postAs(`/api/bookings/${bookings.confirm}/confirm`, owner.token)).status, 200);
+      assert.strictEqual(staffConfirm.status, 200);
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.confirm}/complete`, staff.token)).status, 200);
+
+      const staffMembership = sqlite.prepare(`
+        SELECT id, business_id FROM business_members
+        WHERE user_id = ? AND business_id = ? AND is_active = 1 AND role = 'STAFF'
+      `).get(staff.user.id, targetBusinessId) as { id: string; business_id: string };
+      sqlite.prepare('UPDATE business_members SET business_id = ? WHERE id = ?')
+        .run('biz_route68_barber', staffMembership.id);
+      let crossBusinessStaffConfirm: Response;
+      try {
+        crossBusinessStaffConfirm = await postAs(`/api/bookings/${bookings.ownerConfirm}/confirm`, staff.token);
+      } finally {
+        sqlite.prepare('UPDATE business_members SET business_id = ? WHERE id = ?')
+          .run(staffMembership.business_id, staffMembership.id);
+      }
+      assert.strictEqual(crossBusinessStaffConfirm.status, 404);
+
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.ownerConfirm}/confirm`, owner.token)).status, 200);
       assert.strictEqual((await postAs(`/api/bookings/${bookings.reject}/reject`, owner.token, { reason: 'Prueba autorizada' })).status, 200);
       assert.strictEqual((await postAs(`/api/bookings/${bookings.complete}/complete`, owner.token)).status, 200);
       assert.strictEqual((await postAs(`/api/bookings/${bookings.ownerCancel}/cancel`, owner.token)).status, 200);
@@ -525,7 +714,6 @@ async function runIntegrationTests() {
       const savedMondayHours = ((await savedHoursBody.json() as any).hours as any[]).find(h => h.day_of_week === 1);
       assert.strictEqual(savedMondayHours.open_time, '10:30');
       assert.strictEqual(savedMondayHours.close_time, '19:30');
-      refreshDb();
       const refreshedHours = await getAs('/api/business/hours', owner.token);
       const refreshedMondayHours = ((await refreshedHours.json() as any).hours as any[]).find(h => h.day_of_week === 1);
       assert.strictEqual(refreshedMondayHours.open_time, '10:30');
@@ -578,7 +766,51 @@ async function runIntegrationTests() {
       const invalidStatus = await requestJson(`/api/bookings/${customerBooking.id}/status`, 'PUT', owner.token, { status: 'NO_SHOW' });
       assert.strictEqual(invalidStatus.status, 400);
       assert.strictEqual((await postAs(`/api/bookings/${customerBooking.id}/confirm`, owner.token)).status, 200);
-      assert.strictEqual((await requestJson(`/api/bookings/${customerBooking.id}/status`, 'PUT', owner.token, { status: 'COMPLETED' })).status, 200);
+      const completionResponse = await postAs(`/api/bookings/${customerBooking.id}/complete`, owner.token, {
+        formula_color: '7.1 + 20vol',
+        recommended_retouch_days: 45,
+        notes: 'x',
+      });
+      assert.strictEqual(completionResponse.status, 200);
+      const completedClient = sqlite.prepare(`
+        SELECT id FROM clients WHERE user_id = ? AND business_id = ? AND phone = ?
+      `).get(owner.user.id, targetBusinessId, '+56912345002') as any;
+      assert.ok(completedClient);
+      const completedService = sqlite.prepare(`
+        SELECT color_formula, recommended_interval_days, next_retouch_date
+        FROM client_service_history
+        WHERE booking_id = ?
+      `).get(customerBooking.id) as any;
+      assert.strictEqual(completedService.color_formula, '7.1 + 20vol');
+      assert.strictEqual(completedService.recommended_interval_days, 45);
+      assert.strictEqual(completedService.next_retouch_date, '2099-02-16');
+
+      const staffMemberRole = (sqlite.prepare(`
+        SELECT role FROM business_members WHERE business_id = ? AND user_id = ?
+      `).get(targetBusinessId, staff.user.id) as { role: string }).role;
+      const staffClientCountBefore = (sqlite.prepare(`
+        SELECT COUNT(*) AS count FROM clients WHERE user_id = ? AND business_id = ?
+      `).get(staff.user.id, targetBusinessId) as any).count;
+      sqlite.prepare(`
+        UPDATE business_members SET role = 'PROFESSIONAL'
+        WHERE business_id = ? AND user_id = ?
+      `).run(targetBusinessId, staff.user.id);
+      let repeatedCompletion: Response;
+      try {
+        repeatedCompletion = await postAs(`/api/bookings/${customerBooking.id}/complete`, staff.token);
+      } finally {
+        sqlite.prepare(`
+          UPDATE business_members SET role = ?
+          WHERE business_id = ? AND user_id = ?
+        `).run(staffMemberRole, targetBusinessId, staff.user.id);
+      }
+      assert.strictEqual(repeatedCompletion.status, 200);
+      assert.strictEqual((sqlite.prepare(`
+        SELECT COUNT(*) AS count FROM client_service_history WHERE booking_id = ?
+      `).get(customerBooking.id) as any).count, 1);
+      assert.strictEqual((sqlite.prepare(`
+        SELECT COUNT(*) AS count FROM clients WHERE user_id = ? AND business_id = ?
+      `).get(staff.user.id, targetBusinessId) as any).count, staffClientCountBefore);
 
       const catalogServiceResponse = await postAs('/api/business/services', owner.token, {
         name: 'Servicio desde catálogo',
@@ -750,6 +982,15 @@ async function runIntegrationTests() {
       assert.deepStrictEqual(await response.json(), {
         error: 'El enlace de recuperación no es válido o expiró.',
       });
+    });
+
+    await integrationTest('Persistencia CRM: DATABASE_FILE_JSON permanece intacto', async () => {
+      if (databaseJsonAtStart.exists) {
+        assert.ok(existsSync(databaseJsonPath));
+        assert.strictEqual(statSync(databaseJsonPath).mtimeMs, databaseJsonAtStart.mtimeMs);
+      } else {
+        assert.ok(!existsSync(databaseJsonPath));
+      }
     });
   } finally {
     await new Promise<void>((resolve, reject) => {

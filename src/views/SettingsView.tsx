@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { apiRequest } from '../utils/api';
+import { apiRequest, getStoredToken } from '../utils/api';
 import { formatCLP, formatChileanPhone } from '../utils/formatters';
 import { requestNotificationPermission, showPushNotification, playNotificationChime } from '../utils/notifications';
 import { 
@@ -89,6 +89,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
           sound_enabled: soundEnabled,
         }),
       });
+      await reloadSession();
 
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
@@ -109,8 +110,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
     }
   };
 
-  const handleDownloadBackup = () => {
-    window.location.href = '/api/backup/export';
+  const handleDownloadBackup = async () => {
+    try {
+      const response = await fetch('/api/backup/export', {
+        headers: { Authorization: `Bearer ${getStoredToken()}` },
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        alert(`No se pudo exportar el respaldo: ${body.error || response.statusText}`);
+        return;
+      }
+
+      const blob = await response.blob();
+      const filename = response.headers.get('Content-Disposition')
+        ?.match(/filename="?([^";]+)"?/i)?.[1] || 'salontrack_backup.json';
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error inesperado';
+      alert(`No se pudo exportar el respaldo: ${message}`);
+    }
   };
 
   return (

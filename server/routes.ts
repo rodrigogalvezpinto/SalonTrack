@@ -1,8 +1,39 @@
-import { Router, Response } from 'express';
+import { NextFunction, Request, Router, Response } from 'express';
 import { createHash, randomBytes } from 'node:crypto';
-import { getDb, saveDb, refreshDb, generateId, User, Profile, Subscription, Client, Service, ContactLog, Payment } from './db.js';
+import { generateId, Subscription, Client, Service, ContactLog } from './db.js';
 import { hashPassword, verifyPassword, generateToken, optionalAuth, requireAuth, requireRole, getUserRoles, AuthRequest } from './auth.js';
-import { getSqliteDb } from './sqlite.js';
+import { getSqliteDb, withTransaction } from './sqlite.js';
+import {
+  activateLicense,
+  createBookingPayment,
+  createBookingServiceRecord,
+  createClientWithInitialService,
+  createContactLog,
+  createProfileRecord,
+  createServiceRecord,
+  createTrialSubscription,
+  deleteClient,
+  deleteServiceRecord,
+  findOrCreateBookingClient,
+  getClient,
+  getApprovedPaymentRevenue,
+  getLatestSubscriptionRecord,
+  getOrCreateSubscription,
+  getProfile,
+  getSubscription,
+  getUser,
+  hasBookingServiceRecord,
+  listClients,
+  listContactLogs,
+  listPayments,
+  listServices,
+  listSubscriptionPayments,
+  setReEngagementStatus,
+  updateClient,
+  updateNotificationPreferences,
+  updateProfileDetails,
+  updateProfileTemplate,
+} from './crmRepository.js';
 import { getAvailableSlots, isSlotAvailable } from './availability.js';
 import { localGeolocationProvider, localWhatsAppProvider, localEmailProvider, localPaymentProvider } from './adapters/index.js';
 
@@ -58,22 +89,18 @@ function logAudit(userId: string | null, businessId: string | null, action: stri
 }
 
 function createNotification(userId: string, type: string, title: string, message: string, entityType?: string, entityId?: string, urgency: 'high' | 'medium' | 'low' = 'medium') {
-  try {
-    const db = getSqliteDb();
-    db.prepare(`
-      INSERT INTO notifications (id, user_id, type, title, message, is_read, entity_type, entity_id, urgency, created_at)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-    `).run(generateId('notif'), userId, type, title, message, entityType || null, entityId || null, urgency, new Date().toISOString());
-  } catch (err) {
-    console.error('Notification error:', err);
-  }
+  const db = getSqliteDb();
+  db.prepare(`
+    INSERT INTO notifications (id, user_id, type, title, message, is_read, entity_type, entity_id, urgency, created_at)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+  `).run(generateId('notif'), userId, type, title, message, entityType || null, entityId || null, urgency, new Date().toISOString());
 }
 
 function authorizeBusiness(
   req: AuthRequest,
   res: Response,
   businessId: string,
-  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION']
+  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']
 ): string | null {
   const member = getSqliteDb().prepare(`
     SELECT role
@@ -184,84 +211,72 @@ router.post('/auth/register', (req, res) => {
     const userId = generateId('usr');
     const now = new Date().toISOString();
     const passwordHash = hashPassword(password);
-
-    sqlite.prepare(`
-      INSERT INTO users (id, email, password_hash, is_active, created_at)
-      VALUES (?, ?, ?, 1, ?)
-    `).run(userId, email.trim().toLowerCase(), passwordHash, now);
-
     const profileId = generateId('prof');
     const cleanPhone = phone ? phone.trim() : '+56900000000';
     const bizName = (business_name || full_name).trim();
-
-    sqlite.prepare(`
-      INSERT INTO user_profiles (
-        id, user_id, full_name, phone, country, currency, timezone, default_interval_days,
-        whatsapp_template, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'Chile', 'CLP', 'America/Santiago', 30, ?, ?, ?)
-    `).run(
-      profileId,
-      userId,
-      full_name.trim(),
-      cleanPhone,
-      '¡Hola {nombre}! Te saluda {salon} ✨ Te escribo para coordinar tu cita recomendada.',
-      now,
-      now
-    );
-
-    // Determine initial roles
     const assignedRole = role === 'CUSTOMER' ? 'CUSTOMER' : 'BUSINESS_OWNER';
-    sqlite.prepare('INSERT INTO user_roles (id, user_id, role, created_at) VALUES (?, ?, ?, ?)').run(
-      generateId('role'), userId, assignedRole, now
-    );
-    if (assignedRole === 'BUSINESS_OWNER') {
+
+    withTransaction(() => {
+      sqlite.prepare(`
+        INSERT INTO users (id, email, password_hash, is_active, created_at)
+        VALUES (?, ?, ?, 1, ?)
+      `).run(userId, email.trim().toLowerCase(), passwordHash, now);
+
+      createProfileRecord({
+        id: profileId,
+        user_id: userId,
+        full_name: full_name.trim(),
+        phone: cleanPhone,
+        whatsapp_template: '¡Hola {nombre}! Te saluda {salon} ✨ Te escribo para coordinar tu cita recomendada.',
+        created_at: now,
+      });
       sqlite.prepare('INSERT INTO user_roles (id, user_id, role, created_at) VALUES (?, ?, ?, ?)').run(
-        generateId('role'), userId, 'PROFESSIONAL', now
+        generateId('role'), userId, assignedRole, now
       );
+      if (assignedRole === 'BUSINESS_OWNER') {
+        sqlite.prepare('INSERT INTO user_roles (id, user_id, role, created_at) VALUES (?, ?, ?, ?)').run(
+          generateId('role'), userId, 'PROFESSIONAL', now
+        );
 
-      // Create initial business for owner
-      const bizSlug = bizName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || `salon-${Date.now()}`;
-      const bizId = generateId('biz');
-      sqlite.prepare(`
-        INSERT INTO businesses (
-          id, owner_id, slug, name, description, phone, email, country, modality, status, booking_mode, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Chile', 'salon', 'PUBLISHED', 'AUTOMATIC', ?, ?)
-      `).run(bizId, userId, bizSlug, bizName, 'Servicios profesionales en Chile.', cleanPhone, email.trim().toLowerCase(), now, now);
-
-      sqlite.prepare('INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)').run(
-        generateId('bm'), bizId, userId, 'OWNER', now
-      );
-
-      // Create owner as staff member
-      const staffId = generateId('stf');
-      sqlite.prepare(`
-        INSERT INTO staff (id, business_id, user_id, name, specialty, phone, is_active, display_order, created_at)
-        VALUES (?, ?, ?, ?, 'Estilista Principal', ?, 1, 1, ?)
-      `).run(staffId, bizId, userId, full_name.trim(), cleanPhone, now);
-
-      // Business hours (Mon-Sat 09:30-19:30)
-      for (let d = 1; d <= 6; d++) {
+        // Create initial business for owner
+        const bizSlug = bizName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || `salon-${Date.now()}`;
+        const bizId = generateId('biz');
         sqlite.prepare(`
-          INSERT INTO business_hours (id, business_id, day_of_week, open_time, close_time, is_closed, created_at)
-          VALUES (?, ?, ?, '09:30', '19:30', 0, ?)
-        `).run(generateId('bh'), bizId, d, now);
+          INSERT INTO businesses (
+            id, owner_id, slug, name, description, phone, email, country, modality, status, booking_mode, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Chile', 'salon', 'PUBLISHED', 'AUTOMATIC', ?, ?)
+        `).run(bizId, userId, bizSlug, bizName, 'Servicios profesionales en Chile.', cleanPhone, email.trim().toLowerCase(), now, now);
 
+        sqlite.prepare('INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)').run(
+          generateId('bm'), bizId, userId, 'OWNER', now
+        );
+
+        // Create owner as staff member
+        const staffId = generateId('stf');
         sqlite.prepare(`
-          INSERT INTO staff_availability (id, staff_id, day_of_week, start_time, end_time, break_start, break_end, is_active, created_at)
-          VALUES (?, ?, ?, '09:30', '19:30', '14:00', '15:00', 1, ?)
-        `).run(generateId('sa'), staffId, d, now);
+          INSERT INTO staff (id, business_id, user_id, name, specialty, phone, is_active, display_order, created_at)
+          VALUES (?, ?, ?, ?, 'Estilista Principal', ?, 1, 1, ?)
+        `).run(staffId, bizId, userId, full_name.trim(), cleanPhone, now);
+
+        // Business hours (Mon-Sat 09:30-19:30)
+        for (let d = 1; d <= 6; d++) {
+          sqlite.prepare(`
+            INSERT INTO business_hours (id, business_id, day_of_week, open_time, close_time, is_closed, created_at)
+            VALUES (?, ?, ?, '09:30', '19:30', 0, ?)
+          `).run(generateId('bh'), bizId, d, now);
+
+          sqlite.prepare(`
+            INSERT INTO staff_availability (id, staff_id, day_of_week, start_time, end_time, break_start, break_end, is_active, created_at)
+            VALUES (?, ?, ?, '09:30', '19:30', '14:00', '15:00', 1, ?)
+          `).run(generateId('sa'), staffId, d, now);
+        }
       }
-    }
 
-    // 14 days free trial subscription
-    const trialExpire = new Date();
-    trialExpire.setDate(trialExpire.getDate() + 14);
-    sqlite.prepare(`
-      INSERT INTO subscriptions (id, user_id, plan, status, start_date, expiration_date, payment_provider, created_at)
-      VALUES (?, ?, 'pro_quarterly', 'trial', ?, ?, 'mercadopago', ?)
-    `).run(generateId('sub'), userId, now, trialExpire.toISOString(), now);
+      const trialExpire = new Date();
+      trialExpire.setDate(trialExpire.getDate() + 14);
+      createTrialSubscription(userId, now, trialExpire.toISOString());
+    });
 
-    refreshDb();
     logAudit(userId, null, 'USER_REGISTERED', 'user', userId, { email, role: assignedRole });
 
     const roles = getUserRoles(userId);
@@ -307,8 +322,8 @@ router.post('/auth/login', (req, res) => {
       return res.status(403).json({ error: 'Tu cuenta ha sido suspendida. Contacta a soporte.' });
     }
 
-    const profile = sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(user.id) as any;
-    const subscription = sqlite.prepare('SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(user.id) as any;
+    const profile = getProfile(user.id);
+    const subscription = getLatestSubscriptionRecord(user.id);
     const roles = getUserRoles(user.id);
 
     // Also get business owned or staffed
@@ -349,8 +364,8 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
     return res.status(404).json({ error: 'Usuario no encontrado.' });
   }
 
-  const profile = sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(req.userId || '') as any;
-  const subscription = sqlite.prepare('SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(req.userId || '') as any;
+  const profile = getProfile(req.userId || '');
+  const subscription = getLatestSubscriptionRecord(req.userId || '');
   const roles = getUserRoles(user.id);
 
   const business = sqlite.prepare(`
@@ -452,7 +467,6 @@ router.post('/auth/reset-password', (req, res) => {
     return res.status(500).json({ error: 'No se pudo actualizar la contraseña.' });
   }
 
-  refreshDb();
   return res.json({ message: 'Contraseña actualizada con éxito. Ya puedes iniciar sesión.' });
 });
 
@@ -460,39 +474,21 @@ router.post('/auth/reset-password', (req, res) => {
 // Profile & Settings Endpoints
 // -------------------------------------------------------------
 router.get('/profile', requireAuth, (req: AuthRequest, res: Response) => {
-  const sqlite = getSqliteDb();
-  const profile = sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(req.userId || '');
+  const profile = getProfile(req.userId || '');
   if (!profile) return res.status(404).json({ error: 'Perfil no encontrado.' });
   return res.json({ profile });
 });
 
 router.put('/profile', requireAuth, (req: AuthRequest, res: Response) => {
-  const sqlite = getSqliteDb();
   const { full_name, phone, default_interval_days, whatsapp_template, re_engagement_template, re_engagement_days_threshold } = req.body;
-
-  sqlite.prepare(`
-    UPDATE user_profiles
-    SET full_name = COALESCE(?, full_name),
-        phone = COALESCE(?, phone),
-        default_interval_days = COALESCE(?, default_interval_days),
-        whatsapp_template = COALESCE(?, whatsapp_template),
-        re_engagement_template = COALESCE(?, re_engagement_template),
-        re_engagement_days_threshold = COALESCE(?, re_engagement_days_threshold),
-        updated_at = ?
-    WHERE user_id = ?
-  `).run(
-    full_name?.trim() || null,
-    phone?.trim() || null,
-    default_interval_days ? Number(default_interval_days) : null,
-    whatsapp_template ?? null,
-    re_engagement_template ?? null,
-    re_engagement_days_threshold ? Number(re_engagement_days_threshold) : null,
-    new Date().toISOString(),
-    req.userId || ''
-  );
-
-  refreshDb();
-  const updated = sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(req.userId || '');
+  const updated = updateProfileDetails(req.userId || '', {
+    full_name,
+    phone,
+    default_interval_days,
+    whatsapp_template,
+    re_engagement_template,
+    re_engagement_days_threshold,
+  });
   return res.json({ message: 'Perfil actualizado exitosamente.', profile: updated });
 });
 
@@ -921,11 +917,18 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
         metadata: { bookingId, bookingCode },
       });
 
-      sqlite.prepare(`
-        INSERT INTO payments (
-          id, user_id, business_id, booking_id, type, amount_clp, currency, provider, provider_payment_id, status, payment_method, metadata, created_at
-        ) VALUES (?, ?, ?, ?, 'booking_payment', ?, 'CLP', 'local', ?, 'pending', 'simulated_online', ?, ?)
-      `).run(generateId('pay'), customerUserId, business_id, bookingId, service.price_clp, payResult.providerPaymentId, JSON.stringify(payResult), now);
+      createBookingPayment(sqlite, {
+        userId: customerUserId,
+        businessId: business_id,
+        bookingId,
+        amountClp: service.price_clp,
+        provider: 'local',
+        providerPaymentId: payResult.providerPaymentId,
+        status: 'pending',
+        paymentMethod: 'simulated_online',
+        metadata: JSON.stringify(payResult),
+        createdAt: now,
+      });
 
       paymentData = payResult;
     }
@@ -1172,7 +1175,17 @@ router.post('/bookings/:id/cancel', requireAuth, cancelBookingHandler);
 
 const completeBookingHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
-  const { color_formula, tint_brand, notes } = req.body;
+  const {
+    color_formula,
+    formula_color,
+    recommended_retouch_days,
+    recommended_interval_days,
+    tint_brand,
+    notes,
+  } = req.body;
+  const colorFormula = color_formula ?? formula_color ?? '';
+  const parsedDays = Number(recommended_retouch_days ?? recommended_interval_days);
+  const intervalDays = Number.isInteger(parsedDays) && parsedDays > 0 && parsedDays <= 365 ? parsedDays : 30;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
   if (authorizeBusiness(req, res, booking.business_id) === null) return;
@@ -1182,79 +1195,61 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
   }
 
   const now = new Date().toISOString();
+  withTransaction(db => {
+    db.prepare(`
+      UPDATE bookings
+      SET status = 'COMPLETED', payment_status = 'paid', completed_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(now, now, booking.id);
 
-  // 1. Update Booking status to COMPLETED
-  sqlite.prepare(`
-    UPDATE bookings
-    SET status = 'COMPLETED', payment_status = 'paid', completed_at = ?, updated_at = ?
-    WHERE id = ?
-  `).run(now, now, booking.id);
+    db.prepare(`
+      INSERT INTO booking_status_history (id, booking_id, from_status, to_status, changed_by_user_id, reason, created_at)
+      VALUES (?, ?, ?, 'COMPLETED', ?, 'Atención completada', ?)
+    `).run(generateId('bsh'), booking.id, booking.status, req.userId || '', now);
 
-  sqlite.prepare(`
-    INSERT INTO booking_status_history (id, booking_id, from_status, to_status, changed_by_user_id, reason, created_at)
-    VALUES (?, ?, ?, 'COMPLETED', ?, 'Atención completada', ?)
-  `).run(generateId('bsh'), booking.id, booking.status, req.userId || '', now);
+    if (!hasBookingServiceRecord(db, booking.id)) {
+      const crmClient = findOrCreateBookingClient(
+        db,
+        req.userId || '',
+        booking.business_id,
+        booking.client_name,
+        booking.client_phone,
+        now,
+      );
+      const srv = db.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
+      createBookingServiceRecord(db, {
+        id: generateId('srv'),
+        user_id: req.userId || '',
+        client_id: crmClient.id,
+        service_type: srv?.name || 'Servicio Profesional',
+        color_formula: colorFormula,
+        tint_brand: tint_brand || '',
+        service_date: booking.booking_date,
+        amount_clp: booking.amount_clp,
+        recommended_interval_days: intervalDays,
+        next_retouch_date: calculateNextDate(booking.booking_date, intervalDays),
+        notes: notes || 'Atención completada',
+        created_at: now,
+      }, booking.business_id, booking.id);
+    }
 
-  // 2. CRITICAL SECTION 12.7: INTEGRATION WITH CRM
-  // Link or find client in business CRM
-  let crmClient = sqlite.prepare(`
-    SELECT id FROM clients
-    WHERE business_id = ? AND (phone = ? OR full_name = ?)
-  `).get(booking.business_id, booking.client_phone, booking.client_name) as any;
+    createBookingPayment(db, {
+      userId: booking.customer_user_id,
+      businessId: booking.business_id,
+      bookingId: booking.id,
+      amountClp: booking.amount_clp,
+      provider: 'local',
+      providerPaymentId: `PRES_PAY_${booking.id}`,
+      status: 'approved',
+      paymentMethod: 'presential',
+      createdAt: now,
+      replace: true,
+    });
 
-  if (!crmClient) {
-    const newClientId = generateId('cli');
-    sqlite.prepare(`
-      INSERT INTO clients (id, user_id, business_id, full_name, phone, notes, preferred_contact, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'Clienta registrada automáticamente desde reserva marketplace', 'whatsapp', ?, ?)
-    `).run(newClientId, req.userId || '', booking.business_id, booking.client_name, booking.client_phone, now, now);
-    crmClient = { id: newClientId };
-  }
-
-  // Check service name
-  const srv = sqlite.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
-  const intervalDays = 30;
-  const nextRetouchDate = calculateNextDate(booking.booking_date, intervalDays);
-
-  // Prevent duplicate service history record
-  const existingHistory = sqlite.prepare('SELECT id FROM client_service_history WHERE booking_id = ?').get(booking.id);
-  if (!existingHistory) {
-    sqlite.prepare(`
-      INSERT INTO client_service_history (
-        id, user_id, business_id, client_id, service_type, color_formula, tint_brand,
-        service_date, amount_clp, recommended_interval_days, next_retouch_date, notes, booking_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      generateId('srv'),
-      req.userId || '',
-      booking.business_id,
-      crmClient.id,
-      srv?.name || 'Servicio Profesional',
-      color_formula || '',
-      tint_brand || '',
-      booking.booking_date,
-      booking.amount_clp,
-      intervalDays,
-      nextRetouchDate,
-      notes || 'Atención completada',
-      booking.id,
-      now
-    );
-  }
-
-  // 3. Mark payment as approved if presential payment
-  sqlite.prepare(`
-    INSERT OR REPLACE INTO payments (
-      id, user_id, business_id, booking_id, type, amount_clp, currency, provider, provider_payment_id, status, payment_method, created_at
-    ) VALUES (?, ?, ?, ?, 'booking_payment', ?, 'CLP', 'local', ?, 'approved', 'presential', ?)
-  `).run(generateId('pay'), booking.customer_user_id, booking.business_id, booking.id, booking.amount_clp, `PRES_PAY_${booking.id}`, now);
-
-  // Notify customer to leave a review
-  if (booking.customer_user_id) {
-    createNotification(booking.customer_user_id, 'review_request', '¿Cómo estuvo tu atención?', `Tu servicio en ${booking.business_id} ha finalizado. ¡Comparte tu opinión dejando una reseña!`, 'booking', booking.id, 'low');
-  }
-
-  refreshDb();
+    if (booking.customer_user_id) {
+      createNotification(booking.customer_user_id, 'review_request', '¿Cómo estuvo tu atención?', `Tu servicio en ${booking.business_id} ha finalizado. ¡Comparte tu opinión dejando una reseña!`, 'booking', booking.id, 'low');
+    }
+  });
   return res.json({ message: 'Atención completada y registrada en el historial del CRM.', status: 'COMPLETED' });
 };
 router.post('/bookings/:id/complete', requireAuth, completeBookingHandler);
@@ -1298,7 +1293,7 @@ router.put('/bookings/:id/status', requireAuth, (req: AuthRequest, res: Response
 // -------------------------------------------------------------
 // LOCAL CHECKOUT & PAYMENT SIMULATION (Section 13)
 // -------------------------------------------------------------
-router.post('/payments/checkout/simulate', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/payments/checkout/simulate', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const { booking_id, action } = req.body; // action: 'approve' | 'reject' | 'pending' | 'refund'
 
@@ -1336,21 +1331,18 @@ router.post('/payments/checkout/simulate', requireAuth, async (req: AuthRequest,
 
   // Record / update payment
   const providerId = `SIM_PAY_${booking.id}_${Date.now()}`;
-  sqlite.prepare(`
-    INSERT INTO payments (
-      id, user_id, business_id, booking_id, type, amount_clp, currency, provider, provider_payment_id, status, payment_method, metadata, created_at
-    ) VALUES (?, ?, ?, ?, 'booking_payment', ?, 'CLP', 'local', ?, ?, 'simulated_online', ?, ?)
-  `).run(
-    generateId('pay'),
-    req.userId || null,
-    booking.business_id,
-    booking.id,
-    booking.amount_clp,
-    providerId,
-    txStatus,
-    JSON.stringify({ simulated: true, action, date: now }),
-    now
-  );
+  createBookingPayment(sqlite, {
+    userId: req.userId || null,
+    businessId: booking.business_id,
+    bookingId: booking.id,
+    amountClp: booking.amount_clp,
+    provider: 'local',
+    providerPaymentId: providerId,
+    status: txStatus,
+    paymentMethod: 'simulated_online',
+    metadata: JSON.stringify({ simulated: true, action, date: now }),
+    createdAt: now,
+  });
 
   return res.json({
     message: txStatus === 'approved' ? '¡Pago simulado aprobado con éxito!' : `Pago marcado como ${txStatus}.`,
@@ -1395,8 +1387,7 @@ router.post('/reviews', requireAuth, (req: AuthRequest, res: Response) => {
     return res.status(400).json({ error: 'Ya has emitido una reseña para esta reserva.' });
   }
 
-  const profile = sqlite.prepare('SELECT full_name FROM user_profiles WHERE user_id = ?').get(userId) as any;
-  const customerName = profile?.full_name || booking.client_name;
+  const customerName = getProfile(userId)?.full_name || booking.client_name;
   const reviewId = generateId('rev');
   const now = new Date().toISOString();
 
@@ -1925,7 +1916,7 @@ router.get('/admin/dashboard', requireAuth, requireRole('PLATFORM_ADMIN'), (req,
   const totalBookings = sqlite.prepare('SELECT COUNT(*) as count FROM bookings').get() as any;
   const totalReviews = sqlite.prepare('SELECT COUNT(*) as count FROM reviews').get() as any;
 
-  const totalRevenue = sqlite.prepare('SELECT COALESCE(SUM(amount_clp), 0) as total FROM payments WHERE status = "approved"').get() as any;
+  const totalRevenue = getApprovedPaymentRevenue();
 
   const popularCategories = sqlite.prepare(`
     SELECT c.name, COUNT(b.id) as business_count
@@ -1951,7 +1942,7 @@ router.get('/admin/dashboard', requireAuth, requireRole('PLATFORM_ADMIN'), (req,
       total_businesses: totalBusinesses.count,
       total_bookings: totalBookings.count,
       total_reviews: totalReviews.count,
-      total_revenue_clp: totalRevenue.total,
+      total_revenue_clp: totalRevenue,
     },
     popular_categories: popularCategories,
     recent_bookings: recentBookings,
@@ -2021,12 +2012,13 @@ router.get('/admin/audit-logs', requireAuth, requireRole('PLATFORM_ADMIN'), (req
 // EXISTING CRM & RETOUCHES ROUTES (Preserved with 100% compatibility)
 // -------------------------------------------------------------
 router.get('/clients', requireAuth, (req: AuthRequest, res: Response) => {
-  const db = getDb();
   const userId = req.userId!;
   const { filter, search } = req.query;
   const todayStr = getSantiagoDateString();
 
-  let userClients = db.clients.filter(c => c.user_id === userId);
+  let userClients = listClients(userId);
+  const userServices = listServices(userId);
+  const userContactLogs = listContactLogs(userId);
 
   if (search && typeof search === 'string') {
     const q = search.trim().toLowerCase();
@@ -2037,14 +2029,14 @@ router.get('/clients', requireAuth, (req: AuthRequest, res: Response) => {
   }
 
   const enriched = userClients.map(client => {
-    const clientServices = db.services
-      .filter(s => s.user_id === userId && s.client_id === client.id)
+    const clientServices = userServices
+      .filter(s => s.client_id === client.id)
       .sort((a, b) => b.service_date.localeCompare(a.service_date));
 
     const latestService = clientServices[0] || null;
 
-    const clientLogs = db.contact_logs
-      .filter(l => l.user_id === userId && l.client_id === client.id)
+    const clientLogs = userContactLogs
+      .filter(l => l.client_id === client.id)
       .sort((a, b) => b.contact_date.localeCompare(a.contact_date));
 
     const latestContact = clientLogs[0] || null;
@@ -2090,7 +2082,6 @@ router.post('/clients', requireAuth, (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Nombre completo y teléfono son obligatorios.' });
     }
 
-    const db = getDb();
     const clientId = generateId('cli');
     const now = new Date().toISOString();
 
@@ -2109,8 +2100,6 @@ router.post('/clients', requireAuth, (req: AuthRequest, res: Response) => {
       created_at: now,
       updated_at: now,
     };
-
-    db.clients.push(newClient);
 
     let createdService = null;
     if (initial_service && initial_service.service_type) {
@@ -2132,10 +2121,9 @@ router.post('/clients', requireAuth, (req: AuthRequest, res: Response) => {
         notes: initial_service.notes?.trim() || '',
         created_at: now,
       };
-      db.services.push(createdService);
     }
 
-    saveDb(db);
+    createClientWithInitialService(newClient, createdService);
 
     return res.status(201).json({
       message: 'Clienta registrada con éxito.',
@@ -2150,17 +2138,14 @@ router.post('/clients', requireAuth, (req: AuthRequest, res: Response) => {
 
 router.get('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const client = db.clients.find(c => c.id === req.params.id && c.user_id === userId);
+  const client = getClient(userId, req.params.id);
 
   if (!client) return res.status(404).json({ error: 'Clienta no encontrada.' });
 
-  const services = db.services
-    .filter(s => s.client_id === client.id && s.user_id === userId)
+  const services = listServices(userId, client.id)
     .sort((a, b) => b.service_date.localeCompare(a.service_date));
 
-  const contactLogs = db.contact_logs
-    .filter(l => l.client_id === client.id && l.user_id === userId)
+  const contactLogs = listContactLogs(userId, client.id)
     .sort((a, b) => b.contact_date.localeCompare(a.contact_date));
 
   const todayStr = getSantiagoDateString();
@@ -2178,55 +2163,30 @@ router.get('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
 
 router.put('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const index = db.clients.findIndex(c => c.id === req.params.id && c.user_id === userId);
-
-  if (index === -1) return res.status(404).json({ error: 'Clienta no encontrada.' });
-
   const { full_name, phone, notes } = req.body;
   if (!full_name || !phone) return res.status(400).json({ error: 'Nombre y teléfono son obligatorios.' });
 
-  db.clients[index] = {
-    ...db.clients[index],
-    full_name: full_name.trim(),
-    phone: phone.trim(),
-    notes: notes !== undefined ? notes.trim() : db.clients[index].notes,
-    updated_at: new Date().toISOString(),
-  };
-
-  saveDb(db);
-  return res.json({ message: 'Clienta actualizada con éxito.', client: db.clients[index] });
+  const client = updateClient(userId, req.params.id, { full_name, phone, notes });
+  if (!client) return res.status(404).json({ error: 'Clienta no encontrada.' });
+  return res.json({ message: 'Clienta actualizada con éxito.', client });
 });
 
 router.delete('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const clientId = req.params.id;
-
-  const clientIndex = db.clients.findIndex(c => c.id === clientId && c.user_id === userId);
-  if (clientIndex === -1) return res.status(404).json({ error: 'Clienta no encontrada.' });
-
-  const sqlite = getSqliteDb();
-  sqlite.prepare('DELETE FROM clients WHERE id = ? AND user_id = ?').run(clientId, userId);
-  db.clients.splice(clientIndex, 1);
-  db.services = db.services.filter(s => !(s.client_id === clientId && s.user_id === userId));
-  db.contact_logs = db.contact_logs.filter(l => !(l.client_id === clientId && l.user_id === userId));
-
-  saveDb(db);
+  if (!deleteClient(userId, req.params.id)) return res.status(404).json({ error: 'Clienta no encontrada.' });
   return res.json({ message: 'Clienta y su historial han sido eliminados correctamente.' });
 });
 
 router.post('/services', requireAuth, (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId!;
-    const db = getDb();
     const { client_id, service_type, color_formula, tint_brand, service_date, amount_clp, recommended_interval_days, notes } = req.body;
 
     if (!client_id || !service_type) {
       return res.status(400).json({ error: 'Clienta y tipo de servicio son requeridos.' });
     }
 
-    const client = db.clients.find(c => c.id === client_id && c.user_id === userId);
+    const client = getClient(userId, client_id);
     if (!client) return res.status(404).json({ error: 'Clienta no encontrada.' });
 
     const sDate = service_date || getSantiagoDateString();
@@ -2248,9 +2208,7 @@ router.post('/services', requireAuth, (req: AuthRequest, res: Response) => {
       created_at: new Date().toISOString(),
     };
 
-    db.services.push(newService);
-    client.updated_at = new Date().toISOString();
-    saveDb(db);
+    if (!createServiceRecord(newService)) return res.status(404).json({ error: 'Clienta no encontrada.' });
 
     return res.status(201).json({ message: 'Servicio registrado correctamente en el historial.', service: newService });
   } catch (e: any) {
@@ -2260,25 +2218,17 @@ router.post('/services', requireAuth, (req: AuthRequest, res: Response) => {
 
 router.delete('/services/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const srvIndex = db.services.findIndex(s => s.id === req.params.id && s.user_id === userId);
-  if (srvIndex === -1) return res.status(404).json({ error: 'Servicio no encontrado.' });
-
-  const sqlite = getSqliteDb();
-  sqlite.prepare('DELETE FROM client_service_history WHERE id = ? AND user_id = ?').run(req.params.id, userId);
-  db.services.splice(srvIndex, 1);
-  saveDb(db);
+  if (!deleteServiceRecord(userId, req.params.id)) return res.status(404).json({ error: 'Servicio no encontrado.' });
   return res.json({ message: 'Servicio eliminado del historial.' });
 });
 
 router.post('/contact-logs', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
   const { client_id, status, notes } = req.body;
 
   if (!client_id) return res.status(400).json({ error: 'ID de clienta requerido.' });
 
-  const client = db.clients.find(c => c.id === client_id && c.user_id === userId);
+  const client = getClient(userId, client_id);
   if (!client) return res.status(404).json({ error: 'Clienta no encontrada.' });
 
   const log: ContactLog = {
@@ -2292,19 +2242,18 @@ router.post('/contact-logs', requireAuth, (req: AuthRequest, res: Response) => {
     created_at: new Date().toISOString(),
   };
 
-  db.contact_logs.push(log);
-  saveDb(db);
+  createContactLog(log);
 
   return res.status(201).json({ message: 'Contacto registrado.', log });
 });
 
 router.get('/dashboard/stats', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
   const todayStr = getSantiagoDateString();
 
-  const userClients = db.clients.filter(c => c.user_id === userId);
-  const userServices = db.services.filter(s => s.user_id === userId);
+  const userClients = listClients(userId);
+  const userServices = listServices(userId);
+  const userContactLogs = listContactLogs(userId);
 
   let retouchesThisWeek = 0;
   let retouchesOverdue = 0;
@@ -2326,7 +2275,7 @@ router.get('/dashboard/stats', requireAuth, (req: AuthRequest, res: Response) =>
       totalServiceAmounts += latestService.amount_clp;
       const status = getRetouchStatus(latestService.next_retouch_date, todayStr);
 
-      const recentContact = db.contact_logs.some(
+      const recentContact = userContactLogs.some(
         l => l.client_id === client.id &&
              l.user_id === userId &&
              (new Date().getTime() - new Date(l.contact_date).getTime() < 7 * 24 * 60 * 60 * 1000)
@@ -2394,15 +2343,15 @@ router.get('/dashboard/stats', requireAuth, (req: AuthRequest, res: Response) =>
 
 router.get('/calendar', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
   const todayStr = getSantiagoDateString();
 
-  const userClients = db.clients.filter(c => c.user_id === userId);
+  const userClients = listClients(userId);
+  const userServices = listServices(userId);
   const events: any[] = [];
 
   userClients.forEach(client => {
-    const clientServices = db.services
-      .filter(s => s.client_id === client.id && s.user_id === userId)
+    const clientServices = userServices
+      .filter(s => s.client_id === client.id)
       .sort((a, b) => b.service_date.localeCompare(a.service_date));
 
     const latest = clientServices[0];
@@ -2471,34 +2420,13 @@ router.get('/subscriptions/plans', (req, res) => {
 
 router.get('/subscriptions/current', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  let sub = db.subscriptions.find(s => s.user_id === userId);
-
-  if (!sub) {
-    const trialExpire = new Date();
-    trialExpire.setDate(trialExpire.getDate() + 14);
-    sub = {
-      id: generateId('sub'),
-      user_id: userId,
-      plan: 'pro_quarterly',
-      status: 'trial',
-      start_date: new Date().toISOString(),
-      expiration_date: trialExpire.toISOString(),
-      payment_provider: 'mercadopago',
-      created_at: new Date().toISOString(),
-    };
-    db.subscriptions.push(sub);
-    saveDb(db);
-  }
+  const sub = getOrCreateSubscription(userId);
 
   const expDate = new Date(sub.expiration_date);
   const now = new Date();
   const daysRemaining = Math.max(0, Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
   const isExpired = expDate.getTime() < now.getTime();
-
-  const userPayments = db.payments
-    .filter(p => p.user_id === userId)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const userPayments = listSubscriptionPayments(userId);
 
   return res.json({
     subscription: {
@@ -2537,57 +2465,27 @@ router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, r
     const plan = PLANS[plan_id];
     if (!plan) return res.status(400).json({ error: 'Plan seleccionado no existe.' });
 
-    const db = getDb();
     const providerPaymentId = payment_ref || `MP_${Date.now()}`;
-
-    const existingPayment = db.payments.find(p => p.provider_payment_id === providerPaymentId);
-    if (existingPayment) {
-      return res.json({ message: 'Este pago ya fue procesado.', payment: existingPayment });
+    const result = activateLicense(
+      userId,
+      plan_id as Subscription['plan'],
+      plan.price_clp,
+      plan.duration_days,
+      providerPaymentId,
+    );
+    if (result.kind === 'conflict') {
+      return res.status(409).json({ error: 'Este pago ya fue procesado.' });
+    }
+    if (result.kind === 'duplicate') {
+      return res.json({ message: 'Este pago ya fue procesado.', payment: result.payment });
     }
 
-    const newPayment: Payment = {
-      id: generateId('pay'),
-      user_id: userId,
-      amount_clp: plan.price_clp,
-      currency: 'CLP',
-      provider: 'mercadopago',
-      provider_payment_id: providerPaymentId,
-      status: 'approved',
-      plan: plan_id,
-      created_at: new Date().toISOString(),
-    };
-    db.payments.push(newPayment);
-
-    let sub = db.subscriptions.find(s => s.user_id === userId);
-    const startDate = new Date();
-    let currentExp = sub ? new Date(sub.expiration_date) : new Date();
-    const baseDate = (currentExp.getTime() > startDate.getTime()) ? currentExp : startDate;
-    baseDate.setDate(baseDate.getDate() + plan.duration_days);
-
-    if (sub) {
-      sub.plan = plan_id as any;
-      sub.status = 'active';
-      sub.expiration_date = baseDate.toISOString();
-    } else {
-      sub = {
-        id: generateId('sub'),
-        user_id: userId,
-        plan: plan_id as any,
-        status: 'active',
-        start_date: startDate.toISOString(),
-        expiration_date: baseDate.toISOString(),
-        payment_provider: 'mercadopago',
-        created_at: startDate.toISOString(),
-      };
-      db.subscriptions.push(sub);
-    }
-
-    saveDb(db);
-
+    const { payment, subscription } = result;
+    const baseDate = new Date(subscription.expiration_date);
     return res.json({
       message: `¡Licencia activada con éxito! Acceso habilitado hasta el ${baseDate.toLocaleDateString('es-CL')}.`,
-      subscription: sub,
-      payment: newPayment,
+      subscription,
+      payment,
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Error al activar la licencia.' });
@@ -2596,15 +2494,15 @@ router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, r
 
 router.get('/backup/export', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
+  const user = getUser(userId);
   const exportData = {
-    user: db.users.find(u => u.id === userId),
-    profile: db.profiles.find(p => p.user_id === userId),
-    clients: db.clients.filter(c => c.user_id === userId),
-    services: db.services.filter(s => s.user_id === userId),
-    contact_logs: db.contact_logs.filter(l => l.user_id === userId),
-    subscription: db.subscriptions.find(s => s.user_id === userId),
-    payments: db.payments.filter(p => p.user_id === userId),
+    user: user ? { id: user.id, email: user.email, created_at: user.created_at } : null,
+    profile: getProfile(userId),
+    clients: listClients(userId),
+    services: listServices(userId),
+    contact_logs: listContactLogs(userId),
+    subscription: getSubscription(userId),
+    payments: listPayments(userId),
     exported_at: new Date().toISOString(),
   };
 
@@ -2616,8 +2514,7 @@ router.get('/backup/export', requireAuth, (req: AuthRequest, res: Response) => {
 // Re-engagement Module
 router.get('/re-engagement', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const profile = db.profiles.find(p => p.user_id === userId);
+  const profile = getProfile(userId);
   const todayStr = getSantiagoDateString();
   const [ty, tm, td] = todayStr.split('-').map(Number);
   const todayMs = new Date(Date.UTC(ty, tm - 1, td)).getTime();
@@ -2625,8 +2522,8 @@ router.get('/re-engagement', requireAuth, (req: AuthRequest, res: Response) => {
   const queryThreshold = req.query.threshold_days ? Number(req.query.threshold_days) : null;
   const thresholdDays = queryThreshold || profile?.re_engagement_days_threshold || 90;
 
-  const userClients = db.clients.filter(c => c.user_id === userId);
-  const userServices = db.services.filter(s => s.user_id === userId);
+  const userClients = listClients(userId);
+  const userServices = listServices(userId);
 
   const defaultReEngagementTemplate = profile?.re_engagement_template ||
     '¡Hola {nombre}! En {salon} te extrañamos un montón 💕 Vimos que han pasado varias semanas desde tu último {servicio}. Queremos invitarte a renovar tu look con un beneficio especial: 15% de descuento en tu retoque o baño de luz si reservas esta semana. ¿Te gustaría agendar? ✨💇‍♀️';
@@ -2694,52 +2591,27 @@ router.get('/re-engagement', requireAuth, (req: AuthRequest, res: Response) => {
 
 router.post('/re-engagement/status', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
   const { client_id, status, notes } = req.body;
 
   if (!client_id || !status) return res.status(400).json({ error: 'client_id y status son requeridos.' });
 
-  const client = db.clients.find(c => c.id === client_id && c.user_id === userId);
-  if (!client) return res.status(404).json({ error: 'Clienta no encontrada.' });
-
-  client.re_engagement_status = status;
-  client.updated_at = new Date().toISOString();
-
-  const log: ContactLog = {
-    id: generateId('log'),
-    user_id: userId,
-    client_id,
-    contact_date: new Date().toISOString(),
-    channel: 'whatsapp',
-    status: status === 'reactivated' ? 'scheduled' : 'contacted',
-    notes: notes || `Módulo Re-engagement: Marcada como ${status}`,
-    created_at: new Date().toISOString(),
-  };
-  db.contact_logs.push(log);
-  saveDb(db);
-
+  const result = setReEngagementStatus(userId, client_id, status, notes);
+  if (!result) return res.status(404).json({ error: 'Clienta no encontrada.' });
+  const { client, log } = result;
   return res.json({ message: `Clienta ${client.full_name} actualizada a estado '${status}'.`, client, log });
 });
 
 router.put('/re-engagement/template', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const profileIndex = db.profiles.findIndex(p => p.user_id === userId);
-  if (profileIndex === -1) return res.status(404).json({ error: 'Perfil no encontrado.' });
-
   const { template, threshold_days } = req.body;
-  if (template !== undefined) db.profiles[profileIndex].re_engagement_template = template;
-  if (threshold_days !== undefined) db.profiles[profileIndex].re_engagement_days_threshold = Number(threshold_days);
-  db.profiles[profileIndex].updated_at = new Date().toISOString();
-
-  saveDb(db);
-  return res.json({ message: 'Plantilla de Re-engagement actualizada con éxito.', profile: db.profiles[profileIndex] });
+  const profile = updateProfileTemplate(userId, template, threshold_days);
+  if (!profile) return res.status(404).json({ error: 'Perfil no encontrado.' });
+  return res.json({ message: 'Plantilla de Re-engagement actualizada con éxito.', profile });
 });
 
 router.get('/notifications/preferences', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const profile = db.profiles.find(p => p.user_id === userId);
+  const profile = getProfile(userId);
   return res.json({
     preferences: profile?.notification_preferences || { push_enabled: true, alert_time: '09:00', notify_days_before: 3, sound_enabled: true },
     timezone: profile?.timezone || 'America/Santiago',
@@ -2748,33 +2620,26 @@ router.get('/notifications/preferences', requireAuth, (req: AuthRequest, res: Re
 
 router.put('/notifications/preferences', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const profileIndex = db.profiles.findIndex(p => p.user_id === userId);
-  if (profileIndex === -1) return res.status(404).json({ error: 'Perfil no encontrado.' });
-
   const { push_enabled, alert_time, notify_days_before, sound_enabled, push_subscription } = req.body;
-  db.profiles[profileIndex].notification_preferences = {
-    push_enabled: push_enabled !== undefined ? Boolean(push_enabled) : true,
-    alert_time: alert_time || '09:00',
-    notify_days_before: Number(notify_days_before) || 3,
-    sound_enabled: sound_enabled !== undefined ? Boolean(sound_enabled) : true,
-    push_subscription: push_subscription || db.profiles[profileIndex].notification_preferences?.push_subscription,
-  };
-  db.profiles[profileIndex].updated_at = new Date().toISOString();
-  saveDb(db);
-
-  return res.json({ message: 'Preferencias guardadas.', preferences: db.profiles[profileIndex].notification_preferences });
+  const profile = updateNotificationPreferences(userId, {
+    push_enabled,
+    alert_time,
+    notify_days_before,
+    sound_enabled,
+    push_subscription,
+  });
+  if (!profile) return res.status(404).json({ error: 'Perfil no encontrado.' });
+  return res.json({ message: 'Preferencias guardadas.', preferences: profile.notification_preferences });
 });
 
 router.get('/notifications/upcoming', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
-  const db = getDb();
-  const profile = db.profiles.find(p => p.user_id === userId);
+  const profile = getProfile(userId);
   const todayStr = getSantiagoDateString();
   const daysBefore = profile?.notification_preferences?.notify_days_before || 3;
 
-  const userClients = db.clients.filter(c => c.user_id === userId);
-  const userServices = db.services.filter(s => s.user_id === userId);
+  const userClients = listClients(userId);
+  const userServices = listServices(userId);
   const notifications: any[] = [];
 
   userClients.forEach(client => {
@@ -2828,6 +2693,11 @@ router.get('/notifications/upcoming', requireAuth, (req: AuthRequest, res: Respo
     santiago_date: todayStr,
     alert_time: profile?.notification_preferences?.alert_time || '09:00',
   });
+});
+
+router.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('API error:', err);
+  res.status(500).json({ error: 'Error interno del servidor.' });
 });
 
 export default router;

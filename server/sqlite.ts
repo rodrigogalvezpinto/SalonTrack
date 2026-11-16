@@ -11,6 +11,7 @@ if (!fs.existsSync(dbDir)) {
 }
 
 let sqliteDbInstance: DatabaseSync | null = null;
+let transactionDepth = 0;
 
 export function getSqliteDb(): DatabaseSync {
   if (!sqliteDbInstance) {
@@ -20,6 +21,24 @@ export function getSqliteDb(): DatabaseSync {
     initMigrations(sqliteDbInstance);
   }
   return sqliteDbInstance;
+}
+
+export function withTransaction<T>(fn: (db: DatabaseSync) => T): T {
+  const db = getSqliteDb();
+  const savepoint = `sp_${transactionDepth++}`;
+  db.exec(`SAVEPOINT ${savepoint}`);
+  try {
+    const result = fn(db);
+    if (result instanceof Promise) throw new Error('withTransaction requires a synchronous callback');
+    db.exec(`RELEASE ${savepoint}`);
+    return result;
+  } catch (error) {
+    db.exec(`ROLLBACK TO ${savepoint}`);
+    db.exec(`RELEASE ${savepoint}`);
+    throw error;
+  } finally {
+    transactionDepth--;
+  }
 }
 
 function initMigrations(db: DatabaseSync) {

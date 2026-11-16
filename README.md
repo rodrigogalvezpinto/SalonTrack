@@ -65,7 +65,7 @@ Muchas peluqueras en Chile gestionan sus clientas en libretas de papel, notas de
 
 - **Frontend:** React 19, TypeScript, Tailwind CSS, Lucide React, Motion.
 - **Backend:** Express, Node.js 22, TypeScript (tsx).
-- **Persistencia:** Almacenamiento transaccional atómico persistente con esquemas tipados (`data/salontrack.json`), preparado para migración a PostgreSQL / Supabase.
+- **Persistencia:** SQLite con WAL, configurada mediante `DATABASE_FILE` (por defecto `data/salontrack.sqlite`); el CRM usa repositorios y transacciones. `data/salontrack.json` se conserva solo como fuente de importación heredada.
 - **Seguridad:** JWT (JSON Web Tokens), contraseñas con hashing `bcryptjs`, aislamiento multi-tenant RLS por `user_id`.
 - **Pagos:** Mercado Pago Chile API & Webhooks con verificación de estado e idempotencia.
 
