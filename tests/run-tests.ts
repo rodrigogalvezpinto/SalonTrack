@@ -324,6 +324,33 @@ async function runIntegrationTests() {
       assert.ok(!((await afterDelete.json() as any).clients as any[]).some(client => client.id === clientId));
     });
 
+    await integrationTest('Backup: exporta clientes sin exponer hashes de contraseña', async () => {
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const login = await loginResponse.json() as { token: string };
+      assert.strictEqual(loginResponse.status, 200);
+
+      const clientResponse = await sendJson('/api/clients', {
+        full_name: 'Cliente incluido en respaldo',
+        phone: '+56912345009',
+      }, login.token);
+      assert.strictEqual(clientResponse.status, 201);
+      const clientId = (await clientResponse.json() as any).client.id as string;
+
+      try {
+        const exportResponse = await requestJson('/api/backup/export', 'GET', login.token);
+        assert.strictEqual(exportResponse.status, 200);
+        const exportBody = await exportResponse.json() as any;
+        assert.deepStrictEqual(Object.keys(exportBody.user).sort(), ['created_at', 'email', 'id']);
+        assert.ok(!JSON.stringify(exportBody).includes('password_hash'));
+        assert.ok(exportBody.clients.some((client: any) => client.id === clientId));
+      } finally {
+        await requestJson(`/api/clients/${clientId}`, 'DELETE', login.token, {});
+      }
+    });
+
     await integrationTest('Integridad SQLite: POST /clients conserva roles, membresías y reservas del demo owner', async () => {
       const loginResponse = await sendJson('/api/auth/login', {
         email: 'contacto@valeriaestudio.cl',
@@ -730,9 +757,29 @@ async function runIntegrationTests() {
       `).get(owner.user.id, targetBusinessId, '+56912345002') as any;
       assert.ok(completedClient);
       assert.strictEqual((sqlite.prepare(`
-        SELECT COUNT(*) AS count FROM client_service_history
-        WHERE user_id = ? AND client_id = ? AND booking_id = ?
-      `).get(owner.user.id, completedClient.id, customerBooking.id) as any).count, 1);
+        SELECT COUNT(*) AS count FROM client_service_history WHERE booking_id = ?
+      `).get(customerBooking.id) as any).count, 1);
+
+      const staffMemberRole = (sqlite.prepare(`
+        SELECT role FROM business_members WHERE business_id = ? AND user_id = ?
+      `).get(targetBusinessId, staff.user.id) as { role: string }).role;
+      sqlite.prepare(`
+        UPDATE business_members SET role = 'PROFESSIONAL'
+        WHERE business_id = ? AND user_id = ?
+      `).run(targetBusinessId, staff.user.id);
+      let repeatedCompletion: Response;
+      try {
+        repeatedCompletion = await postAs(`/api/bookings/${customerBooking.id}/complete`, staff.token);
+      } finally {
+        sqlite.prepare(`
+          UPDATE business_members SET role = ?
+          WHERE business_id = ? AND user_id = ?
+        `).run(staffMemberRole, targetBusinessId, staff.user.id);
+      }
+      assert.strictEqual(repeatedCompletion.status, 200);
+      assert.strictEqual((sqlite.prepare(`
+        SELECT COUNT(*) AS count FROM client_service_history WHERE booking_id = ?
+      `).get(customerBooking.id) as any).count, 1);
 
       const catalogServiceResponse = await postAs('/api/business/services', owner.token, {
         name: 'Servicio desde catálogo',

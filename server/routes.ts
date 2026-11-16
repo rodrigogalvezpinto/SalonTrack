@@ -1207,7 +1207,7 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
     );
     const srv = db.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
     const intervalDays = 30;
-    if (!hasBookingServiceRecord(db, req.userId || '', booking.id)) {
+    if (!hasBookingServiceRecord(db, booking.id)) {
       createBookingServiceRecord(db, {
         id: generateId('srv'),
         user_id: req.userId || '',
@@ -2485,8 +2485,9 @@ router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, r
 
 router.get('/backup/export', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
+  const user = getUser(userId);
   const exportData = {
-    user: getUser(userId),
+    user: user ? { id: user.id, email: user.email, created_at: user.created_at } : null,
     profile: getProfile(userId),
     clients: listClients(userId),
     services: listServices(userId),

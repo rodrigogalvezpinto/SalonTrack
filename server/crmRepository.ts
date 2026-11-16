@@ -376,12 +376,12 @@ export function createBookingServiceRecord(
   insertServiceRecord(db, service, businessId, bookingId);
 }
 
-export function hasBookingServiceRecord(db: DatabaseSync, userId: string, bookingId: string): boolean {
+export function hasBookingServiceRecord(db: DatabaseSync, bookingId: string): boolean {
   return Boolean(db.prepare(`
     SELECT id FROM client_service_history
-    WHERE user_id = ? AND booking_id = ?
+    WHERE booking_id = ?
     LIMIT 1
-  `).get(userId, bookingId));
+  `).get(bookingId));
 }
 
 export function createBookingPayment(
