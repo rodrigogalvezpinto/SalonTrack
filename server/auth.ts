@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { getDb, saveDb, refreshDb, generateId, User, Profile, Subscription } from './db.js';
+import { generateId, User } from './db.js';
 import { getSqliteDb } from './sqlite.js';
 import { seedDemoDataIfEmpty as seedSqliteDemoData } from './seedData.js';
 
@@ -105,5 +105,4 @@ export function requireRole(...allowedRoles: string[]) {
 
 export function seedDemoDataIfEmpty() {
   seedSqliteDemoData();
-  refreshDb();
 }

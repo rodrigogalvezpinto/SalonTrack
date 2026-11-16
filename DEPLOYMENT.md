@@ -31,8 +31,8 @@ MERCADO_PAGO_WEBHOOK_SECRET="whsec_..."
 RESEND_API_KEY="re_..."
 RESEND_FROM_EMAIL="SalonTrack Chile <notificaciones@salontrack.cl>"
 
-# Ruta de almacenamiento
-DATABASE_FILE="./data/salontrack.json"
+# Ruta persistente de la base SQLite (por defecto: ./data/salontrack.sqlite)
+DATABASE_FILE="./data/salontrack.sqlite"
 ```
 
 ---
