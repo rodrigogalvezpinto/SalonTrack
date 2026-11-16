@@ -763,6 +763,9 @@ async function runIntegrationTests() {
       const staffMemberRole = (sqlite.prepare(`
         SELECT role FROM business_members WHERE business_id = ? AND user_id = ?
       `).get(targetBusinessId, staff.user.id) as { role: string }).role;
+      const staffClientCountBefore = (sqlite.prepare(`
+        SELECT COUNT(*) AS count FROM clients WHERE user_id = ? AND business_id = ?
+      `).get(staff.user.id, targetBusinessId) as any).count;
       sqlite.prepare(`
         UPDATE business_members SET role = 'PROFESSIONAL'
         WHERE business_id = ? AND user_id = ?
@@ -780,6 +783,9 @@ async function runIntegrationTests() {
       assert.strictEqual((sqlite.prepare(`
         SELECT COUNT(*) AS count FROM client_service_history WHERE booking_id = ?
       `).get(customerBooking.id) as any).count, 1);
+      assert.strictEqual((sqlite.prepare(`
+        SELECT COUNT(*) AS count FROM clients WHERE user_id = ? AND business_id = ?
+      `).get(staff.user.id, targetBusinessId) as any).count, staffClientCountBefore);
 
       const catalogServiceResponse = await postAs('/api/business/services', owner.token, {
         name: 'Servicio desde catálogo',

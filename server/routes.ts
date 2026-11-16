@@ -1197,17 +1197,17 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
       VALUES (?, ?, ?, 'COMPLETED', ?, 'Atención completada', ?)
     `).run(generateId('bsh'), booking.id, booking.status, req.userId || '', now);
 
-    const crmClient = findOrCreateBookingClient(
-      db,
-      req.userId || '',
-      booking.business_id,
-      booking.client_name,
-      booking.client_phone,
-      now,
-    );
-    const srv = db.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
-    const intervalDays = 30;
     if (!hasBookingServiceRecord(db, booking.id)) {
+      const crmClient = findOrCreateBookingClient(
+        db,
+        req.userId || '',
+        booking.business_id,
+        booking.client_name,
+        booking.client_phone,
+        now,
+      );
+      const srv = db.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
+      const intervalDays = 30;
       createBookingServiceRecord(db, {
         id: generateId('srv'),
         user_id: req.userId || '',
