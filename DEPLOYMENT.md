@@ -49,7 +49,27 @@ npm run start
 
 ---
 
-## 4. Configuración del Webhook en Mercado Pago
+## 4. Respaldo y restauración de la base SQLite
+
+Crea y verifica un respaldo con:
+
+```bash
+npm run db:backup
+```
+
+Antes de restaurar, detén el servidor para evitar escrituras concurrentes. La restauración verifica integridad y migraciones, crea un respaldo `pre_restore_` de la base actual y luego reemplaza el archivo configurado por `DATABASE_FILE`:
+
+```bash
+npm run db:restore -- ./data/backups/salontrack_backup_<fecha>.sqlite
+```
+
+En producción, agrega `--force` para confirmar la operación:
+
+```bash
+npm run db:restore -- ./data/backups/salontrack_backup_<fecha>.sqlite --force
+```
+
+## 5. Configuración del Webhook en Mercado Pago
 
 1. Ingrese a su consola de desarrolladores en [Mercado Pago Developers](https://www.mercadopago.cl/developers).
 2. En la sección **Webhooks / Notificaciones IPN**, agregue la URL:

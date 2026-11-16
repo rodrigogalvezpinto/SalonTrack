@@ -91,6 +91,24 @@ Abre tu navegador en `http://localhost:3000`.
 
 ---
 
+## 💾 Respaldo y restauración SQLite
+
+Crear y verificar un respaldo:
+
+```bash
+npm run db:backup
+```
+
+Para restaurar, detén primero el servidor. La operación valida el archivo antes de reemplazar la base y crea un respaldo `pre_restore_` de la base actual cuando existe:
+
+```bash
+npm run db:restore -- data/backups/salontrack_backup_<fecha>.sqlite
+```
+
+En producción, la restauración requiere agregar `--force` al comando.
+
+---
+
 ## 🧪 Pruebas Automatizadas
 
 Para ejecutar la suite de pruebas unitarias y de integración:

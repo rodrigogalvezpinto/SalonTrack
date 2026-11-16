@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -13,14 +14,123 @@ if (!fs.existsSync(dbDir)) {
 let sqliteDbInstance: DatabaseSync | null = null;
 let transactionDepth = 0;
 
+export function getDatabasePath(): string {
+  return DB_PATH;
+}
+
 export function getSqliteDb(): DatabaseSync {
   if (!sqliteDbInstance) {
-    sqliteDbInstance = new DatabaseSync(DB_PATH);
-    sqliteDbInstance.exec('PRAGMA foreign_keys = ON;');
-    sqliteDbInstance.exec('PRAGMA journal_mode = WAL;');
-    initMigrations(sqliteDbInstance);
+    const db = new DatabaseSync(DB_PATH);
+    sqliteDbInstance = db;
+    try {
+      db.exec('PRAGMA foreign_keys = ON;');
+      db.exec('PRAGMA journal_mode = WAL;');
+      runMigrations(db);
+    } catch (error) {
+      sqliteDbInstance = null;
+      try {
+        db.close();
+      } catch {}
+      throw error;
+    }
   }
   return sqliteDbInstance;
+}
+
+export function closeSqliteDb(): void {
+  if (transactionDepth > 0) throw new Error('No se puede cerrar SQLite durante una transacción.');
+  if (!sqliteDbInstance) return;
+  sqliteDbInstance.close();
+  sqliteDbInstance = null;
+}
+
+export function migrationChecksum(migration: Migration): string {
+  return createHash('sha256').update(migration.sql).digest('hex');
+}
+
+export function checkMigrations(db: DatabaseSync, migrations: Migration[] = MIGRATIONS): string[] {
+  const table = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name = 'schema_migrations'
+  `).get();
+  if (!table) return ['No existe la tabla schema_migrations.'];
+
+  const columns = db.prepare('PRAGMA table_info(schema_migrations)').all() as Array<{ name: string }>;
+  const hasChecksum = columns.some(column => column.name === 'checksum');
+
+  const recorded = db.prepare(
+    hasChecksum
+      ? 'SELECT version, checksum FROM schema_migrations ORDER BY version ASC'
+      : 'SELECT version, NULL AS checksum FROM schema_migrations ORDER BY version ASC'
+  )
+    .all() as Array<{ version: number; checksum: string | null }>;
+  const problems: string[] = [];
+
+  for (const row of recorded) {
+    const migration = migrations.find(item => item.version === row.version);
+    if (!migration) {
+      problems.push(`La base de datos tiene la migración ${row.version}, más nueva que esta versión de SalonTrack.`);
+    } else if (row.checksum !== null && row.checksum !== migrationChecksum(migration)) {
+      problems.push(
+        `La migración ${migration.version} (${migration.name}) cambió después de aplicarse: checksum registrado ${row.checksum}, esperado ${migrationChecksum(migration)}.`
+      );
+    }
+  }
+
+  return problems;
+}
+
+export function runMigrations(db: DatabaseSync, migrations: Migration[] = MIGRATIONS): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at TEXT NOT NULL,
+      checksum TEXT
+    );
+  `);
+
+  const columns = db.prepare('PRAGMA table_info(schema_migrations)').all() as Array<{ name: string }>;
+  if (!columns.some(column => column.name === 'checksum')) {
+    db.exec('ALTER TABLE schema_migrations ADD COLUMN checksum TEXT');
+  }
+
+  const problems = checkMigrations(db, migrations);
+  if (problems.length > 0) throw new Error(problems.join('\n'));
+
+  const appliedRows = db.prepare('SELECT version, checksum FROM schema_migrations ORDER BY version ASC')
+    .all() as Array<{ version: number; checksum: string | null }>;
+  const appliedByVersion = new Map(appliedRows.map(row => [row.version, row]));
+
+  for (const migration of [...migrations].sort((a, b) => a.version - b.version)) {
+    const applied = appliedByVersion.get(migration.version);
+    const checksum = migrationChecksum(migration);
+    if (applied) {
+      if (applied.checksum === null) {
+        db.prepare('UPDATE schema_migrations SET checksum = ? WHERE version = ?').run(checksum, migration.version);
+      }
+      continue;
+    }
+
+    const savepoint = `migration_v${migration.version}`;
+    db.exec(`SAVEPOINT ${savepoint}`);
+    try {
+      db.exec(migration.sql);
+      db.prepare(`
+        INSERT INTO schema_migrations (version, name, applied_at, checksum)
+        VALUES (?, ?, ?, ?)
+      `).run(migration.version, migration.name, new Date().toISOString(), checksum);
+      db.exec(`RELEASE ${savepoint}`);
+    } catch (error) {
+      db.exec(`ROLLBACK TO ${savepoint}`);
+      db.exec(`RELEASE ${savepoint}`);
+      throw error;
+    }
+
+    if (migration.version === 1) {
+      console.log('✅ SQLite Migration v1 (SalonTrack 2.0 Schema) applied successfully.');
+    }
+  }
 }
 
 export function withTransaction<T>(fn: (db: DatabaseSync) => T): T {
@@ -41,50 +151,7 @@ export function withTransaction<T>(fn: (db: DatabaseSync) => T): T {
   }
 }
 
-function initMigrations(db: DatabaseSync) {
-  // Migrations table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
-
-  const appliedRows = db.prepare('SELECT version FROM schema_migrations ORDER BY version ASC').all() as Array<{ version: number }>;
-  const appliedVersions = new Set(appliedRows.map(r => r.version));
-
-  if (!appliedVersions.has(1)) {
-    applyMigrationV1(db);
-    db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
-      1,
-      'initial_relational_schema_v2',
-      new Date().toISOString()
-    );
-    console.log('✅ SQLite Migration v1 (SalonTrack 2.0 Schema) applied successfully.');
-  }
-
-  if (!appliedVersions.has(2)) {
-    applyMigrationV2(db);
-    db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
-      2,
-      'password_reset_tokens',
-      new Date().toISOString()
-    );
-  }
-
-  if (!appliedVersions.has(3)) {
-    db.exec('ALTER TABLE businesses ADD COLUMN verified INTEGER NOT NULL DEFAULT 0');
-    db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)').run(
-      3,
-      'business_verification',
-      new Date().toISOString()
-    );
-  }
-}
-
-function applyMigrationV1(db: DatabaseSync) {
-  db.exec(`
+const MIGRATION_V1_SQL = `
     -- 1. Users
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
@@ -483,11 +550,9 @@ function applyMigrationV1(db: DatabaseSync) {
       value TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
-  `);
-}
+  `;
 
-function applyMigrationV2(db: DatabaseSync) {
-  db.exec(`
+const MIGRATION_V2_SQL = `
     CREATE TABLE IF NOT EXISTS password_reset_tokens (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -498,5 +563,17 @@ function applyMigrationV2(db: DatabaseSync) {
     );
     CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
       ON password_reset_tokens(user_id);
-  `);
+  `;
+
+
+export interface Migration {
+  version: number;
+  name: string;
+  sql: string;
 }
+
+export const MIGRATIONS: Migration[] = [
+  { version: 1, name: 'initial_relational_schema_v2', sql: MIGRATION_V1_SQL },
+  { version: 2, name: 'password_reset_tokens', sql: MIGRATION_V2_SQL },
+  { version: 3, name: 'business_verification', sql: 'ALTER TABLE businesses ADD COLUMN verified INTEGER NOT NULL DEFAULT 0' },
+];

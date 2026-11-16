@@ -1,15 +1,17 @@
 import './setup-env.js';
 import assert from 'node:assert';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
 import { hashPassword, verifyPassword, seedDemoDataIfEmpty } from '../server/auth.js';
+import { createBackup, restoreBackup, verifyBackup } from '../server/backup.js';
 import { generateId } from '../server/db.js';
 import { listClients, listContactLogs, listServices } from '../server/crmRepository.js';
-import { getSqliteDb, withTransaction } from '../server/sqlite.js';
+import { checkMigrations, getSqliteDb, MIGRATIONS, migrationChecksum, runMigrations, withTransaction } from '../server/sqlite.js';
 import { isSlotAvailable } from '../server/availability.js';
 import { localEmailProvider, localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
 import apiRouter from '../server/routes.js';
@@ -111,6 +113,79 @@ test('Aislamiento de Datos (RLS): Un estilista no puede ver datos de otro estili
     assert.ok(!user1Clients.some(client => client.id === client2Id));
   } finally {
     sqlite.prepare('DELETE FROM users WHERE id IN (?, ?)').run(user1Id, user2Id);
+  }
+});
+
+test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transaccional', () => {
+  const tempDirectory = mkdtempSync(join(tmpdir(), 'salontrack-migrations-'));
+  const db = new DatabaseSync(join(tempDirectory, 'migrations.sqlite'));
+
+  try {
+    assert.deepStrictEqual(checkMigrations(db), ['No existe la tabla schema_migrations.']);
+    runMigrations(db);
+    const recorded = db.prepare('SELECT version, checksum FROM schema_migrations ORDER BY version')
+      .all() as Array<{ version: number; checksum: string }>;
+    assert.strictEqual(recorded.length, 3);
+    assert.deepStrictEqual(
+      recorded.map(row => row.checksum),
+      MIGRATIONS.map(migrationChecksum)
+    );
+
+    db.prepare('UPDATE schema_migrations SET checksum = NULL WHERE version = 2').run();
+    runMigrations(db);
+    assert.strictEqual(
+      (db.prepare('SELECT checksum FROM schema_migrations WHERE version = 2').get() as { checksum: string }).checksum,
+      migrationChecksum(MIGRATIONS[1])
+    );
+
+    db.prepare('UPDATE schema_migrations SET checksum = ? WHERE version = 2').run('alterado');
+    assert.throws(() => runMigrations(db), /cambió después de aplicarse/);
+    assert.strictEqual(checkMigrations(db).length, 1);
+    db.prepare('UPDATE schema_migrations SET checksum = ? WHERE version = 2').run(migrationChecksum(MIGRATIONS[1]));
+
+    db.prepare(`
+      INSERT INTO schema_migrations (version, name, applied_at, checksum)
+      VALUES (99, 'future_migration', ?, 'future')
+    `).run(new Date().toISOString());
+    assert.throws(() => runMigrations(db), /más nueva que esta versión/);
+    db.prepare('DELETE FROM schema_migrations WHERE version = 99').run();
+
+    const brokenMigrations = [
+      ...MIGRATIONS,
+      { version: 4, name: 'rota', sql: 'CREATE TABLE tmp_rota (id TEXT); SELECT * FROM tabla_inexistente;' },
+    ];
+    assert.throws(() => runMigrations(db, brokenMigrations), /tabla_inexistente/);
+    assert.strictEqual(
+      (db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'tmp_rota'")
+        .get() as { count: number }).count,
+      0
+    );
+    assert.strictEqual(
+      (db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 4').get() as { count: number }).count,
+      0
+    );
+  } finally {
+    db.close();
+    rmSync(tempDirectory, { recursive: true, force: true });
+  }
+
+  const legacyDirectory = mkdtempSync(join(tmpdir(), 'salontrack-legacy-migrations-'));
+  const legacyDb = new DatabaseSync(join(legacyDirectory, 'legacy.sqlite'));
+  try {
+    legacyDb.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    assert.deepStrictEqual(checkMigrations(legacyDb), []);
+    runMigrations(legacyDb);
+    const columns = legacyDb.prepare('PRAGMA table_info(schema_migrations)').all() as Array<{ name: string }>;
+    assert.ok(columns.some(column => column.name === 'checksum'));
+  } finally {
+    legacyDb.close();
+    rmSync(legacyDirectory, { recursive: true, force: true });
   }
 });
 
@@ -982,6 +1057,91 @@ async function runIntegrationTests() {
       assert.deepStrictEqual(await response.json(), {
         error: 'El enlace de recuperación no es válido o expiró.',
       });
+    });
+
+    await integrationTest('Respaldo y restauración SQLite: captura WAL, verifica seguridad y reabre la API', async () => {
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'NuevaClaveSegura123!',
+      });
+      const login = await loginResponse.json() as { token: string };
+      assert.strictEqual(loginResponse.status, 200);
+
+      const backupDirectory = mkdtempSync(join(tmpdir(), 'salontrack-backup-tests-'));
+      const markerId = generateId('cli');
+      const now = new Date().toISOString();
+      const currentDb = getSqliteDb();
+
+      try {
+        currentDb.prepare(`
+          INSERT INTO clients (
+            id, user_id, full_name, phone, notes, preferred_contact,
+            re_engagement_status, created_at, updated_at
+          ) VALUES (?, 'usr_demo_valeria_estilista', 'Marcador de respaldo WAL', '+56912345077', '', 'whatsapp', 'none', ?, ?)
+        `).run(markerId, now, now);
+        const backupFile = createBackup(backupDirectory);
+        assert.deepStrictEqual(verifyBackup(backupFile), { ok: true });
+
+        const backupDb = new DatabaseSync(backupFile, { readOnly: true });
+        try {
+          assert.strictEqual(
+            (backupDb.prepare('SELECT COUNT(*) AS count FROM clients WHERE id = ?').get(markerId) as { count: number }).count,
+            1
+          );
+        } finally {
+          backupDb.close();
+        }
+
+        getSqliteDb().prepare('DELETE FROM clients WHERE id = ?').run(markerId);
+        const restored = restoreBackup(backupFile);
+        assert.ok(restored.safetyBackup && existsSync(restored.safetyBackup));
+        assert.ok(restored.safetyBackup && restored.safetyBackup.includes('pre_restore_'));
+
+        const restoredDb = getSqliteDb();
+        assert.strictEqual(
+          (restoredDb.prepare('SELECT COUNT(*) AS count FROM clients WHERE id = ?').get(markerId) as { count: number }).count,
+          1
+        );
+
+        const safetyDb = new DatabaseSync(restored.safetyBackup!, { readOnly: true });
+        try {
+          assert.strictEqual(
+            (safetyDb.prepare('SELECT COUNT(*) AS count FROM clients WHERE id = ?').get(markerId) as { count: number }).count,
+            0
+          );
+        } finally {
+          safetyDb.close();
+        }
+
+        const apiResponse = await requestJson('/api/clients', 'GET', login.token);
+        assert.strictEqual(apiResponse.status, 200);
+        assert.ok(((await apiResponse.json() as any).clients as any[]).some(client => client.id === markerId));
+
+        const garbageFile = join(backupDirectory, 'respaldo-invalido.sqlite');
+        writeFileSync(garbageFile, 'no es una base SQLite');
+        const garbageVerification = verifyBackup(garbageFile);
+        assert.strictEqual(garbageVerification.ok, false);
+        assert.throws(() => restoreBackup(garbageFile), /Respaldo inválido/);
+        assert.strictEqual(
+          (getSqliteDb().prepare('SELECT COUNT(*) AS count FROM clients WHERE id = ?').get(markerId) as { count: number }).count,
+          1
+        );
+
+        const tamperedFile = join(backupDirectory, 'respaldo-alterado.sqlite');
+        copyFileSync(backupFile, tamperedFile);
+        const tamperedDb = new DatabaseSync(tamperedFile);
+        try {
+          tamperedDb.prepare('UPDATE schema_migrations SET checksum = ? WHERE version = 1').run('alterado');
+        } finally {
+          tamperedDb.close();
+        }
+        const tamperedVerification = verifyBackup(tamperedFile);
+        assert.strictEqual(tamperedVerification.ok, false);
+        assert.ok(!tamperedVerification.ok && tamperedVerification.error.includes('checksum registrado'));
+      } finally {
+        getSqliteDb().prepare('DELETE FROM clients WHERE id = ?').run(markerId);
+        rmSync(backupDirectory, { recursive: true, force: true });
+      }
     });
 
     await integrationTest('Persistencia CRM: DATABASE_FILE_JSON permanece intacto', async () => {
