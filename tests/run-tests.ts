@@ -599,6 +599,101 @@ async function runIntegrationTests() {
       assert.ok(currentBody.payments.some((payment: any) => payment.provider_payment_id === paymentRef));
     });
 
+    await integrationTest('Pagos simulados: bloqueo en producción y activación explícita para demos', async () => {
+      const registeredResponse = await sendJson('/api/auth/register', {
+        email: `payment-gate-${generateId('customer')}@example.test`,
+        password: 'PaymentGate123!',
+        full_name: 'Cuenta temporal para probar pagos',
+        phone: '+56912345011',
+        role: 'CUSTOMER',
+      });
+      const registered = await registeredResponse.json() as { token: string; user: { id: string } };
+      assert.strictEqual(registeredResponse.status, 201);
+
+      const userId = registered.user.id;
+      const bookingId = generateId('payment_gate_booking');
+      const paymentRef = `PRODUCTION_GATE_${generateId('pay')}`;
+      const now = new Date().toISOString();
+      const originalNodeEnv = process.env.NODE_ENV;
+      const originalAllowSimulatedPayments = process.env.ALLOW_SIMULATED_PAYMENTS;
+      const restoreEnvironmentValue = (name: string, value: string | undefined) => {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      };
+
+      try {
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, client_email,
+            created_at, updated_at
+          ) VALUES (?, ?, 'biz_valeria_studio', 'stf_valeria', 'srv_val_tintura_raiz', ?, '2099-03-01',
+            '11:00', '12:15', 75, 45000, 'salon', 'PENDING', 'online', 'pending',
+            'Cuenta de prueba', '+56912345011', 'payment-gate@example.test', ?, ?)
+        `).run(bookingId, `PAYMENT-GATE-${bookingId}`, userId, now, now);
+
+        process.env.NODE_ENV = 'production';
+        delete process.env.ALLOW_SIMULATED_PAYMENTS;
+
+        const subscriptionBefore = sqlite.prepare(
+          'SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id'
+        ).all(userId);
+        const bookingBefore = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookingId);
+        const bookingPaymentsBefore = sqlite.prepare(
+          'SELECT * FROM payments WHERE booking_id = ? ORDER BY id'
+        ).all(bookingId);
+
+        const blockedActivation = await sendJson('/api/subscriptions/activate-license', {
+          plan_id: 'pro_quarterly',
+          payment_ref: paymentRef,
+        }, registered.token);
+        assert.strictEqual(blockedActivation.status, 403);
+        assert.deepStrictEqual(await blockedActivation.json(), {
+          error: 'Los pagos simulados no están disponibles en producción.',
+        });
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM subscriptions WHERE user_id = ? ORDER BY id').all(userId),
+          subscriptionBefore
+        );
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count,
+          0
+        );
+
+        const blockedCheckout = await sendJson('/api/payments/checkout/simulate', {
+          booking_id: bookingId,
+          action: 'approve',
+        }, registered.token);
+        assert.strictEqual(blockedCheckout.status, 403);
+        assert.deepStrictEqual(await blockedCheckout.json(), {
+          error: 'Los pagos simulados no están disponibles en producción.',
+        });
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookingId), bookingBefore);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM payments WHERE booking_id = ? ORDER BY id').all(bookingId),
+          bookingPaymentsBefore
+        );
+
+        process.env.ALLOW_SIMULATED_PAYMENTS = 'true';
+        const allowedActivation = await sendJson('/api/subscriptions/activate-license', {
+          plan_id: 'pro_quarterly',
+          payment_ref: paymentRef,
+        }, registered.token);
+        assert.strictEqual(allowedActivation.status, 200);
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count,
+          1
+        );
+      } finally {
+        restoreEnvironmentValue('NODE_ENV', originalNodeEnv);
+        restoreEnvironmentValue('ALLOW_SIMULATED_PAYMENTS', originalAllowSimulatedPayments);
+        sqlite.prepare('DELETE FROM payments WHERE user_id = ?').run(userId);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+      }
+    });
+
     await integrationTest('Re-engagement: actualiza el estado y registra el contacto en SQLite', async () => {
       const loginResponse = await sendJson('/api/auth/login', {
         email: 'contacto@valeriaestudio.cl',
@@ -952,6 +1047,454 @@ async function runIntegrationTests() {
       }
       assert.strictEqual((await requestJson(`/api/admin/businesses/${targetBusinessId}/status`, 'PUT', platformAdmin.token, { status: 'INVALID' })).status, 400);
       await requestJson(`/api/admin/businesses/${targetBusinessId}/status`, 'PUT', platformAdmin.token, { status: 'PUBLISHED' });
+    });
+
+    await integrationTest('Autorización integral: aislamiento entre negocios, roles y CRM', async () => {
+      const login = async (email: string, password: string) => {
+        const response = await sendJson('/api/auth/login', { email, password });
+        const body = await response.json() as { token: string; user: { id: string } };
+        assert.strictEqual(response.status, 200);
+        return body;
+      };
+
+      const ownerA = await login('contacto@valeriaestudio.cl', 'Salon1234');
+      const ownerB = await login('ignacio@barberiaroute.cl', 'Barber1234!');
+      const staffA = await login('camila@valeriaestudio.cl', 'Staff1234!');
+      const customerA = await login('cliente@gmail.com', 'Cliente1234!');
+      const otherCustomerResponse = await sendJson('/api/auth/register', {
+        email: `authz-customer-${generateId('customer')}@example.test`,
+        password: 'AuthzCustomer123!',
+        full_name: 'Otra clienta para aislamiento',
+        phone: '+56912345012',
+        role: 'CUSTOMER',
+      });
+      const otherCustomer = await otherCustomerResponse.json() as { token: string; user: { id: string } };
+      assert.strictEqual(otherCustomerResponse.status, 201);
+
+      const businessAId = 'biz_valeria_studio';
+      const businessBId = 'biz_route68_barber';
+      const now = new Date().toISOString();
+      const pendingBookingId = generateId('authz_pending');
+      const completedBookingId = generateId('authz_completed');
+      const clientId = generateId('authz_client');
+      const serviceHistoryId = generateId('authz_history');
+      const reviewId = generateId('authz_review');
+      const notificationId = generateId('authz_notification');
+      const fixturePhone = `authz-${clientId}`;
+      const createdServiceName = `Servicio de B ${clientId}`;
+      const createdStaffName = `Trabajador de B ${clientId}`;
+      const staffMembership = sqlite.prepare(`
+        SELECT id, role, is_active
+        FROM business_members
+        WHERE business_id = ? AND user_id = ?
+      `).get(businessAId, staffA.user.id) as { id: string; role: string; is_active: number };
+      const businessBefore = sqlite.prepare('SELECT * FROM businesses WHERE id = ?').get(businessAId) as any;
+      const serviceBefore = sqlite.prepare('SELECT * FROM services WHERE id = ?').get('srv_val_tintura_raiz') as any;
+      const staffBefore = sqlite.prepare('SELECT * FROM staff WHERE id = ?').get('stf_camila') as any;
+      const hoursBefore = sqlite.prepare(`
+        SELECT * FROM business_hours WHERE business_id = ? ORDER BY day_of_week, id
+      `).all(businessAId) as any[];
+      const businessBMembership = sqlite.prepare(`
+        SELECT id FROM business_members WHERE business_id = ? AND user_id = ?
+      `).get(businessBId, ownerB.user.id) as { id: string } | undefined;
+      let createdBusinessBMembershipId: string | null = null;
+
+      if (!businessBMembership) {
+        createdBusinessBMembershipId = generateId('bm');
+        sqlite.prepare(`
+          INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+          VALUES (?, ?, ?, 'OWNER', 1, ?)
+        `).run(createdBusinessBMembershipId, businessBId, ownerB.user.id, now);
+      }
+
+      const createBooking = (id: string, status: 'PENDING' | 'COMPLETED') => {
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, client_email,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, 'stf_valeria', 'srv_val_tintura_raiz', ?, '2099-04-01',
+            '11:00', '12:15', 75, 45000, 'salon', ?, 'presential', 'pending', ?, ?, ?, ?, ?)
+        `).run(
+          id,
+          `AUTHZ-INTEGRAL-${id}`,
+          businessAId,
+          customerA.user.id,
+          status,
+          'Clienta de autorización',
+          fixturePhone,
+          'cliente@gmail.com',
+          now,
+          now
+        );
+      };
+      const restoreRow = (table: string, row: Record<string, any>) => {
+        const columns = Object.keys(row).filter(column => column !== 'id');
+        sqlite.prepare(
+          `UPDATE ${table} SET ${columns.map(column => `${column} = ?`).join(', ')} WHERE id = ?`
+        ).run(...columns.map(column => row[column]), row.id);
+      };
+
+      try {
+        assert.strictEqual(staffMembership.role, 'STAFF');
+        assert.strictEqual(sqlite.prepare(`
+          SELECT COUNT(*) AS count FROM business_members WHERE user_id = ? AND business_id = ?
+        `).get(ownerB.user.id, businessAId)?.count, 0);
+
+        createBooking(pendingBookingId, 'PENDING');
+        createBooking(completedBookingId, 'COMPLETED');
+        sqlite.prepare(`
+          INSERT INTO clients (
+          id, user_id, business_id, full_name, phone, notes, preferred_contact,
+          re_engagement_status, created_at, updated_at
+          ) VALUES (?, ?, ?, 'Clienta de Negocio A', ?, 'No modificar', 'whatsapp', 'none', ?, ?)
+        `).run(clientId, ownerA.user.id, businessAId, fixturePhone, now, now);
+        sqlite.prepare(`
+          INSERT INTO client_service_history (
+            id, user_id, business_id, client_id, service_type, color_formula, tint_brand,
+            service_date, amount_clp, recommended_interval_days, next_retouch_date, notes, created_at
+          ) VALUES (?, ?, ?, ?, 'Color de prueba', '7.1', 'Marca de prueba',
+            '2099-03-01', 45000, 30, '2099-03-31', 'Historial protegido', ?)
+        `).run(serviceHistoryId, ownerA.user.id, businessAId, clientId, now);
+        sqlite.prepare(`
+          INSERT INTO reviews (
+            id, business_id, staff_id, booking_id, user_id, customer_name,
+            rating, comment, is_reported, is_hidden, created_at
+          ) VALUES (?, ?, 'stf_valeria', ?, ?, 'Clienta de prueba', 5, 'Reseña protegida', 0, 0, ?)
+        `).run(reviewId, businessAId, completedBookingId, customerA.user.id, now);
+        sqlite.prepare(`
+          INSERT INTO notifications (
+            id, user_id, type, title, message, is_read, entity_type, entity_id, urgency, created_at
+          ) VALUES (?, ?, 'test', 'Notificación protegida', 'No debe marcarse', 0, 'client', ?, 'low', ?)
+        `).run(notificationId, ownerA.user.id, clientId, now);
+
+        const problems: string[] = [];
+        const checkUnchanged = async (
+          label: string,
+          request: () => Promise<Response>,
+          expectedStatus: number,
+          readTarget: () => unknown
+        ) => {
+          const before = JSON.stringify(readTarget());
+          const response = await request();
+          let body: unknown = null;
+          try {
+            body = await response.json();
+          } catch {}
+          if (response.status !== expectedStatus) {
+            problems.push(`${label}: esperado HTTP ${expectedStatus}, recibido HTTP ${response.status}; respuesta=${JSON.stringify(body)}`);
+          }
+          const after = JSON.stringify(readTarget());
+          if (after !== before) {
+            problems.push(`${label}: el estado SQLite cambió; antes=${before}; después=${after}`);
+          }
+          return { response, body };
+        };
+        const readBooking = (id: string) => sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(id);
+        const readService = () => sqlite.prepare('SELECT * FROM services WHERE id = ?').get('srv_val_tintura_raiz');
+        const readStaff = () => sqlite.prepare('SELECT * FROM staff WHERE id = ?').get('stf_camila');
+        const readBusiness = () => sqlite.prepare('SELECT * FROM businesses WHERE id = ?').get(businessAId);
+        const readHours = () => sqlite.prepare(`
+          SELECT * FROM business_hours WHERE business_id = ? ORDER BY day_of_week, id
+        `).all(businessAId);
+        const readClient = () => sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(clientId);
+        const readHistory = () => sqlite.prepare('SELECT * FROM client_service_history WHERE id = ?').get(serviceHistoryId);
+        const readContactLogs = () => sqlite.prepare('SELECT * FROM contact_logs WHERE client_id = ? ORDER BY id').all(clientId);
+        const readNotification = () => sqlite.prepare('SELECT * FROM notifications WHERE id = ?').get(notificationId);
+        const readReview = () => sqlite.prepare('SELECT * FROM reviews WHERE id = ?').get(reviewId);
+        const readBusinessServices = () => sqlite.prepare(
+          'SELECT * FROM services WHERE business_id = ? ORDER BY id'
+        ).all(businessAId);
+        const readBusinessStaff = () => sqlite.prepare(
+          'SELECT * FROM staff WHERE business_id = ? ORDER BY id'
+        ).all(businessAId);
+        await checkUnchanged(
+          'B GET booking A',
+          () => requestJson(`/api/bookings/${pendingBookingId}`, 'GET', ownerB.token),
+          404,
+          () => readBooking(pendingBookingId)
+        );
+        await checkUnchanged(
+          'B confirms booking A',
+          () => sendJson(`/api/bookings/${pendingBookingId}/confirm`, {}, ownerB.token),
+          404,
+          () => readBooking(pendingBookingId)
+        );
+        await checkUnchanged(
+          'B rejects booking A',
+          () => sendJson(`/api/bookings/${pendingBookingId}/reject`, { reason: 'No autorizado' }, ownerB.token),
+          404,
+          () => readBooking(pendingBookingId)
+        );
+        await checkUnchanged(
+          'B completes booking A',
+          () => sendJson(`/api/bookings/${pendingBookingId}/complete`, {}, ownerB.token),
+          404,
+          () => readBooking(pendingBookingId)
+        );
+        await checkUnchanged(
+          'B cancels booking A',
+          () => sendJson(`/api/bookings/${pendingBookingId}/cancel`, {}, ownerB.token),
+          404,
+          () => readBooking(pendingBookingId)
+        );
+        await checkUnchanged(
+          'B updates booking A status',
+          () => requestJson(`/api/bookings/${pendingBookingId}/status`, 'PUT', ownerB.token, { status: 'CONFIRMED' }),
+          404,
+          () => readBooking(pendingBookingId)
+        );
+        await checkUnchanged(
+          'B lists business A bookings',
+          () => requestJson(`/api/bookings/business?business_id=${businessAId}`, 'GET', ownerB.token),
+          404,
+          () => readBooking(pendingBookingId)
+        );
+
+        await checkUnchanged(
+          'B updates business A service',
+          () => requestJson('/api/business/services/srv_val_tintura_raiz', 'PUT', ownerB.token, {
+            name: 'Servicio alterado por B',
+            price_clp: 1,
+          }),
+          404,
+          readService
+        );
+        await checkUnchanged(
+          'B deletes business A service',
+          () => requestJson('/api/business/services/srv_val_tintura_raiz', 'DELETE', ownerB.token),
+          404,
+          readService
+        );
+        await checkUnchanged(
+          'B deletes business A staff',
+          () => requestJson('/api/business/staff/stf_camila', 'DELETE', ownerB.token),
+          404,
+          readStaff
+        );
+        await checkUnchanged(
+          'B creates a service for business A',
+          () => sendJson(`/api/business/${businessAId}/services`, { name: createdServiceName, price_clp: 15000 }, ownerB.token),
+          404,
+          readBusinessServices
+        );
+        await checkUnchanged(
+          'B creates staff for business A',
+          () => sendJson(`/api/business/${businessAId}/staff`, { name: createdStaffName }, ownerB.token),
+          404,
+          readBusinessStaff
+        );
+        await checkUnchanged(
+          'B changes business A hours',
+          () => requestJson(`/api/business/${businessAId}/hours`, 'PUT', ownerB.token, {
+            hours: [{ day_of_week: 1, open_time: '07:00', close_time: '15:00', is_closed: 0 }],
+          }),
+          404,
+          readHours
+        );
+        await checkUnchanged(
+          'B changes business A',
+          () => requestJson(`/api/business/${businessAId}`, 'PUT', ownerB.token, { description: 'Alteración de B' }),
+          404,
+          readBusiness
+        );
+        await checkUnchanged(
+          'B responds to business A review',
+          () => sendJson(`/api/reviews/${reviewId}/respond`, { response: 'Respuesta de B' }, ownerB.token),
+          404,
+          readReview
+        );
+
+        await checkUnchanged(
+          'STAFF updates business A service',
+          () => requestJson('/api/business/services/srv_val_tintura_raiz', 'PUT', staffA.token, {
+            name: 'Servicio alterado por STAFF',
+            price_clp: 1,
+          }),
+          403,
+          readService
+        );
+        await checkUnchanged(
+          'STAFF changes business A hours',
+          () => requestJson(`/api/business/${businessAId}/hours`, 'PUT', staffA.token, {
+            hours: [{ day_of_week: 1, open_time: '06:00', close_time: '14:00', is_closed: 0 }],
+          }),
+          403,
+          readHours
+        );
+        await checkUnchanged(
+          'STAFF responds to business A review',
+          () => sendJson(`/api/reviews/${reviewId}/respond`, { response: 'Respuesta de STAFF' }, staffA.token),
+          403,
+          readReview
+        );
+
+        sqlite.prepare('UPDATE business_members SET is_active = 0 WHERE id = ?').run(staffMembership.id);
+        await checkUnchanged(
+          'Miembro desactivado confirms booking A',
+          () => sendJson(`/api/bookings/${pendingBookingId}/confirm`, {}, staffA.token),
+          404,
+          () => readBooking(pendingBookingId)
+        );
+
+        await checkUnchanged(
+          'B gets client A',
+          () => requestJson(`/api/clients/${clientId}`, 'GET', ownerB.token),
+          404,
+          readClient
+        );
+        await checkUnchanged(
+          'B updates client A',
+          () => requestJson(`/api/clients/${clientId}`, 'PUT', ownerB.token, {
+            full_name: 'Clienta alterada por B',
+            phone: '+56912345014',
+          }),
+          404,
+          readClient
+        );
+        await checkUnchanged(
+          'B deletes client A',
+          () => requestJson(`/api/clients/${clientId}`, 'DELETE', ownerB.token, {}),
+          404,
+          readClient
+        );
+        await checkUnchanged(
+          'B creates service history for client A',
+          () => sendJson('/api/services', {
+            client_id: clientId,
+            service_type: 'Servicio de B',
+          }, ownerB.token),
+          404,
+          () => ({
+            client: readClient(),
+            history: sqlite.prepare('SELECT * FROM client_service_history WHERE client_id = ? ORDER BY id').all(clientId),
+          })
+        );
+        await checkUnchanged(
+          'B deletes service history A',
+          () => requestJson(`/api/services/${serviceHistoryId}`, 'DELETE', ownerB.token),
+          404,
+          readHistory
+        );
+        await checkUnchanged(
+          'B creates a contact log for client A',
+          () => sendJson('/api/contact-logs', { client_id: clientId, status: 'contacted' }, ownerB.token),
+          404,
+          () => ({
+            client: readClient(),
+            logs: readContactLogs(),
+          })
+        );
+        await checkUnchanged(
+          'B changes re-engagement status for client A',
+          () => sendJson('/api/re-engagement/status', {
+            client_id: clientId,
+            status: 'reactivated',
+            notes: 'Intento de B',
+          }, ownerB.token),
+          404,
+          () => ({
+            client: readClient(),
+            logs: readContactLogs(),
+          })
+        );
+        const notificationAttempt = await checkUnchanged(
+          'B marks notification A read',
+          () => requestJson(`/api/notifications/${notificationId}/read`, 'PATCH', ownerB.token),
+          200,
+          readNotification
+        );
+        if ((notificationAttempt.body as any)?.message !== 'Notificación leída.') {
+          problems.push(`B marks notification A read: respuesta inesperada=${JSON.stringify(notificationAttempt.body)}`);
+        }
+        const clientListAttempt = await checkUnchanged(
+          'B lists clients without client A',
+          () => requestJson('/api/clients', 'GET', ownerB.token),
+          200,
+          readClient
+        );
+        if (((clientListAttempt.body as any)?.clients as any[] | undefined)?.some(client => client.id === clientId)) {
+          problems.push('B GET /clients incluyó una clienta de business A.');
+        }
+
+        await checkUnchanged(
+          'Otra clienta simulates payment for booking A',
+          () => sendJson('/api/payments/checkout/simulate', {
+            booking_id: completedBookingId,
+            action: 'approve',
+          }, otherCustomer.token),
+          404,
+          () => ({
+            booking: readBooking(completedBookingId),
+            payments: sqlite.prepare('SELECT * FROM payments WHERE booking_id = ? ORDER BY id').all(completedBookingId),
+          })
+        );
+        await checkUnchanged(
+          'Otra clienta reviews booking A',
+          () => sendJson('/api/reviews', {
+            booking_id: completedBookingId,
+            rating: 5,
+            comment: 'Reseña ajena',
+          }, otherCustomer.token),
+          403,
+          () => ({
+            booking: readBooking(completedBookingId),
+            reviews: sqlite.prepare('SELECT * FROM reviews WHERE booking_id = ? ORDER BY id').all(completedBookingId),
+          })
+        );
+
+        assert.strictEqual(problems.length, 0, problems.join('\n'));
+      } finally {
+        sqlite.prepare('UPDATE business_members SET is_active = ? WHERE id = ?')
+          .run(staffMembership.is_active, staffMembership.id);
+        restoreRow('businesses', businessBefore);
+        restoreRow('services', serviceBefore);
+        restoreRow('staff', staffBefore);
+        sqlite.prepare('DELETE FROM business_hours WHERE business_id = ?').run(businessAId);
+        for (const row of hoursBefore) {
+          sqlite.prepare(`
+            INSERT INTO business_hours (id, business_id, day_of_week, open_time, close_time, is_closed, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            row.id,
+            row.business_id,
+            row.day_of_week,
+            row.open_time,
+            row.close_time,
+            row.is_closed,
+            row.created_at
+          );
+        }
+        sqlite.prepare('DELETE FROM services WHERE business_id = ? AND name = ?').run(businessAId, createdServiceName);
+        sqlite.prepare('DELETE FROM staff WHERE business_id = ? AND name = ?').run(businessAId, createdStaffName);
+        const sideEffectClients = sqlite.prepare(`
+          SELECT id FROM clients WHERE user_id = ? AND business_id = ? AND phone = ?
+        `).all(ownerB.user.id, businessAId, fixturePhone) as Array<{ id: string }>;
+        for (const client of sideEffectClients) {
+          sqlite.prepare('DELETE FROM client_service_history WHERE client_id = ?').run(client.id);
+          sqlite.prepare('DELETE FROM contact_logs WHERE client_id = ?').run(client.id);
+          sqlite.prepare('DELETE FROM clients WHERE id = ?').run(client.id);
+        }
+        sqlite.prepare('DELETE FROM notifications WHERE id = ?').run(notificationId);
+        sqlite.prepare(`
+          DELETE FROM notifications WHERE entity_type = 'review' AND entity_id = ?
+        `).run(reviewId);
+        sqlite.prepare(`
+          DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id IN (?, ?)
+        `).run(pendingBookingId, completedBookingId);
+        sqlite.prepare('DELETE FROM reviews WHERE id = ?').run(reviewId);
+        sqlite.prepare('DELETE FROM client_service_history WHERE id = ?').run(serviceHistoryId);
+        sqlite.prepare('DELETE FROM contact_logs WHERE client_id = ?').run(clientId);
+        sqlite.prepare('DELETE FROM clients WHERE id = ?').run(clientId);
+        sqlite.prepare('DELETE FROM payments WHERE booking_id IN (?, ?)').run(pendingBookingId, completedBookingId);
+        sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id IN (?, ?)').run(pendingBookingId, completedBookingId);
+        sqlite.prepare('DELETE FROM bookings WHERE id IN (?, ?)').run(pendingBookingId, completedBookingId);
+        sqlite.prepare('DELETE FROM users WHERE id = ?').run(otherCustomer.user.id);
+        if (createdBusinessBMembershipId) {
+          sqlite.prepare('DELETE FROM business_members WHERE id = ?').run(createdBusinessBMembershipId);
+        }
+      }
     });
 
     await integrationTest('Reset de contraseña: rechaza solicitudes sin token', async () => {
