@@ -511,18 +511,24 @@ async function runIntegrationTests() {
         loginBody.token
       );
       assert.strictEqual(clientResponse.status, 201);
+      const createdClient = (await clientResponse.json() as any).client as { id: string };
 
-      const rolesAfter = sqlite.prepare('SELECT * FROM user_roles ORDER BY id').all();
-      const membershipsAfter = sqlite.prepare('SELECT * FROM business_members ORDER BY id').all();
-      const bookingsAfter = sqlite.prepare(`
-        SELECT * FROM bookings
-        WHERE business_id IN (SELECT business_id FROM business_members WHERE user_id = ?)
-           OR customer_user_id = ?
-        ORDER BY id
-      `).all(loginBody.user.id, loginBody.user.id);
-      assert.deepStrictEqual(rolesAfter, rolesBefore);
-      assert.deepStrictEqual(membershipsAfter, membershipsBefore);
-      assert.deepStrictEqual(bookingsAfter, bookingsBefore);
+      try {
+        const rolesAfter = sqlite.prepare('SELECT * FROM user_roles ORDER BY id').all();
+        const membershipsAfter = sqlite.prepare('SELECT * FROM business_members ORDER BY id').all();
+        const bookingsAfter = sqlite.prepare(`
+          SELECT * FROM bookings
+          WHERE business_id IN (SELECT business_id FROM business_members WHERE user_id = ?)
+             OR customer_user_id = ?
+          ORDER BY id
+        `).all(loginBody.user.id, loginBody.user.id);
+        assert.deepStrictEqual(rolesAfter, rolesBefore);
+        assert.deepStrictEqual(membershipsAfter, membershipsBefore);
+        assert.deepStrictEqual(bookingsAfter, bookingsBefore);
+      } finally {
+        const cleanup = await requestJson(`/api/clients/${createdClient.id}`, 'DELETE', loginBody.token, {});
+        assert.strictEqual(cleanup.status, 200);
+      }
     });
 
     await integrationTest('CRM: eliminaciones de cliente e historial persisten en SQLite', async () => {
@@ -1071,6 +1077,320 @@ async function runIntegrationTests() {
       }
     });
 
+    await integrationTest('Reservas completadas: CRM del dueño, teléfono e invalidación de estados', async () => {
+      const login = async (email: string, password: string) => {
+        const response = await sendJson('/api/auth/login', { email, password });
+        const body = await response.json() as { token: string; user: { id: string } };
+        assert.strictEqual(response.status, 200);
+        return body;
+      };
+      const owner = await login('contacto@valeriaestudio.cl', 'Salon1234');
+      const staff = await login('camila@valeriaestudio.cl', 'Staff1234!');
+      const customer = await login('cliente@gmail.com', 'Cliente1234!');
+      const businessId = 'biz_valeria_studio';
+      const business = sqlite.prepare('SELECT owner_id, name FROM businesses WHERE id = ?')
+        .get(businessId) as { owner_id: string; name: string };
+      assert.strictEqual(business.owner_id, owner.user.id);
+      const membership = sqlite.prepare(`
+        SELECT role FROM business_members
+        WHERE business_id = ? AND user_id = ? AND is_active = 1
+      `).get(businessId, staff.user.id) as { role: string };
+      assert.strictEqual(membership.role, 'STAFF');
+
+      const bookingIds: string[] = [];
+      const createdClientIds = new Set<string>();
+      const now = new Date().toISOString();
+      const insertBooking = (status: string, clientName: string, clientPhone: string) => {
+        const id = generateId('crm_booking');
+        bookingIds.push(id);
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, client_email,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, 'stf_valeria', 'srv_val_corte', ?, '2099-01-01',
+            '10:00', '11:00', 60, 25000, 'salon', ?, 'presential', 'pending', ?, ?, ?, ?, ?)
+        `).run(
+          id,
+          `CRM-${id}`,
+          businessId,
+          customer.user.id,
+          status,
+          clientName,
+          clientPhone,
+          'cliente@gmail.com',
+          now,
+          now
+        );
+        return id;
+      };
+      const completeAsStaff = (bookingId: string) =>
+        sendJson(`/api/bookings/${bookingId}/complete`, {}, staff.token);
+      const createClientCount = () => listClients(owner.user.id).length;
+      const ownerClientsBefore = createClientCount();
+
+      try {
+        const staffClientBooking = insertBooking(
+          'CONFIRMED',
+          'Clienta registrada por Camila',
+          '+56911122334'
+        );
+        const staffCompletion = await completeAsStaff(staffClientBooking);
+        assert.strictEqual(staffCompletion.status, 200);
+        const staffService = sqlite.prepare(`
+          SELECT id, user_id, client_id FROM client_service_history WHERE booking_id = ?
+        `).get(staffClientBooking) as { id: string; user_id: string; client_id: string };
+        assert.strictEqual(staffService.user_id, owner.user.id);
+        createdClientIds.add(staffService.client_id);
+        assert.ok(listClients(owner.user.id).some(client => client.id === staffService.client_id));
+        assert.ok(listServices(owner.user.id).some(service => service.id === staffService.id));
+        assert.ok(!listClients(staff.user.id).some(client => client.id === staffService.client_id));
+        assert.ok(!listServices(staff.user.id).some(service => service.id === staffService.id));
+        assert.strictEqual(createClientCount(), ownerClientsBefore + 1);
+        assert.strictEqual(
+          (sqlite.prepare('SELECT changed_by_user_id FROM booking_status_history WHERE booking_id = ? AND to_status = ?')
+            .get(staffClientBooking, 'COMPLETED') as { changed_by_user_id: string }).changed_by_user_id,
+          staff.user.id
+        );
+        const reviewRequest = sqlite.prepare(`
+          SELECT message FROM notifications
+          WHERE user_id = ? AND type = 'review_request' AND entity_id = ?
+        `).get(customer.user.id, staffClientBooking) as { message: string };
+        assert.ok(reviewRequest.message.includes(business.name));
+        assert.ok(!reviewRequest.message.includes(businessId));
+
+        const manualClientResponse = await sendJson('/api/clients', {
+          full_name: 'Clienta de teléfono legado',
+          phone: '912345678',
+        }, owner.token);
+        assert.strictEqual(manualClientResponse.status, 201);
+        const manualClient = (await manualClientResponse.json() as any).client;
+        createdClientIds.add(manualClient.id);
+        assert.strictEqual(
+          (sqlite.prepare('SELECT business_id FROM clients WHERE id = ?').get(manualClient.id) as { business_id: string | null }).business_id,
+          null
+        );
+        assert.strictEqual(createClientCount(), ownerClientsBefore + 2);
+
+        const phoneMatchBooking = insertBooking(
+          'CONFIRMED',
+          'Clienta de teléfono legado con nombre distinto',
+          '+56 9 1234 5678'
+        );
+        assert.strictEqual((await completeAsStaff(phoneMatchBooking)).status, 200);
+        const phoneMatchService = sqlite.prepare(`
+          SELECT client_id FROM client_service_history WHERE booking_id = ?
+        `).get(phoneMatchBooking) as { client_id: string };
+        assert.strictEqual(phoneMatchService.client_id, manualClient.id);
+        assert.strictEqual(createClientCount(), ownerClientsBefore + 2);
+
+        const sameNameBooking = insertBooking(
+          'CONFIRMED',
+          'Clienta de teléfono legado',
+          '+56 9 8765 4321'
+        );
+        assert.strictEqual((await completeAsStaff(sameNameBooking)).status, 200);
+        const sameNameService = sqlite.prepare(`
+          SELECT client_id FROM client_service_history WHERE booking_id = ?
+        `).get(sameNameBooking) as { client_id: string };
+        createdClientIds.add(sameNameService.client_id);
+        assert.notStrictEqual(sameNameService.client_id, manualClient.id);
+        assert.strictEqual(createClientCount(), ownerClientsBefore + 3);
+
+        const priorityPhone = `9${Date.now().toString().slice(-8)}`;
+        const globalClientResponse = await sendJson('/api/clients', {
+          full_name: 'Clienta global para prioridad de negocio',
+          phone: priorityPhone,
+        }, owner.token);
+        assert.strictEqual(globalClientResponse.status, 201);
+        const globalClient = (await globalClientResponse.json() as any).client;
+        createdClientIds.add(globalClient.id);
+        const businessClientId = generateId('cli');
+        sqlite.prepare(`
+          INSERT INTO clients (
+            id, user_id, business_id, full_name, phone, notes, preferred_contact,
+            re_engagement_status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, '', 'whatsapp', 'none', ?, ?)
+        `).run(
+          businessClientId,
+          owner.user.id,
+          businessId,
+          'Clienta del negocio para prioridad',
+          globalClient.phone,
+          now,
+          now
+        );
+        createdClientIds.add(businessClientId);
+        const priorityClientCount = createClientCount();
+        const priorityBooking = insertBooking(
+          'CONFIRMED',
+          'Reserva que coincide con clienta del negocio',
+          globalClient.phone
+        );
+        assert.strictEqual((await completeAsStaff(priorityBooking)).status, 200);
+        const priorityService = sqlite.prepare(`
+          SELECT client_id FROM client_service_history WHERE booking_id = ?
+        `).get(priorityBooking) as { client_id: string };
+        assert.strictEqual(priorityService.client_id, businessClientId);
+        assert.notStrictEqual(priorityService.client_id, globalClient.id);
+        assert.strictEqual(createClientCount(), priorityClientCount);
+
+        const catalogServicesBefore = (sqlite.prepare('SELECT COUNT(*) AS count FROM services').get() as { count: number }).count;
+        for (const status of ['COMPLETED', 'EXPIRED', 'PENDING']) {
+          const bookingId = insertBooking(status, `Reserva ${status}`, '+56911122335');
+          const snapshot = () => ({
+            booking: sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookingId),
+            history: sqlite.prepare('SELECT * FROM booking_status_history WHERE booking_id = ? ORDER BY id').all(bookingId),
+            serviceHistory: sqlite.prepare('SELECT * FROM client_service_history WHERE booking_id = ? ORDER BY id').all(bookingId),
+            payments: sqlite.prepare('SELECT * FROM payments WHERE booking_id = ? ORDER BY id').all(bookingId),
+            catalogServices: (sqlite.prepare('SELECT COUNT(*) AS count FROM services').get() as { count: number }).count,
+          });
+          const before = snapshot();
+          const rejected = await sendJson(`/api/bookings/${bookingId}/complete`, {}, owner.token);
+          assert.strictEqual(rejected.status, 400);
+          assert.deepStrictEqual(await rejected.json(), {
+            error: `No se puede completar una reserva en estado ${status}.`,
+          });
+          assert.deepStrictEqual(snapshot(), before);
+        }
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM services').get() as { count: number }).count,
+          catalogServicesBefore
+        );
+      } finally {
+        for (const bookingId of bookingIds) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(bookingId);
+          sqlite.prepare('DELETE FROM payments WHERE booking_id = ?').run(bookingId);
+          sqlite.prepare('DELETE FROM client_service_history WHERE booking_id = ?').run(bookingId);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(bookingId);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        }
+        for (const clientId of createdClientIds) {
+          sqlite.prepare('DELETE FROM client_service_history WHERE client_id = ?').run(clientId);
+          sqlite.prepare('DELETE FROM clients WHERE id = ?').run(clientId);
+        }
+      }
+    });
+
+    await integrationTest('Reservas: creación concurrente protege un único horario', async () => {
+      const loginResponse = await sendJson('/api/auth/login', {
+        email: 'cliente@gmail.com',
+        password: 'Cliente1234!',
+      });
+      const customer = await loginResponse.json() as { token: string };
+      assert.strictEqual(loginResponse.status, 200);
+      const businessId = 'biz_valeria_studio';
+      const serviceId = 'srv_val_corte';
+      const { date, slots } = await findAvailableSlots(businessId, serviceId, 'stf_valeria');
+      const payload = {
+        business_id: businessId,
+        service_id: serviceId,
+        staff_id: 'stf_valeria',
+        booking_date: date,
+        start_time: slots[0].time,
+        client_name: 'Cliente de concurrencia',
+        client_phone: '+56999887701',
+        payment_method: 'presential',
+      };
+      const createdBookingIds: string[] = [];
+      try {
+        const responses = await Promise.all(
+          Array.from({ length: 5 }, () => sendJson('/api/bookings', payload, customer.token))
+        );
+        for (const response of responses.filter(candidate => candidate.status === 201)) {
+          const created = await response.json() as { booking: { id: string } };
+          createdBookingIds.push(created.booking.id);
+        }
+        const statuses = responses.map(response => response.status).sort((a, b) => a - b);
+        assert.deepStrictEqual(statuses, [201, 409, 409, 409, 409]);
+        const activeCount = (sqlite.prepare(`
+          SELECT COUNT(*) AS count FROM bookings
+          WHERE staff_id = ? AND booking_date = ? AND start_time = ?
+            AND status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+        `).get('stf_valeria', date, slots[0].time) as { count: number }).count;
+        assert.strictEqual(activeCount, 1);
+      } finally {
+        for (const bookingId of createdBookingIds) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(bookingId);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(bookingId);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        }
+      }
+    });
+
+    await integrationTest('Reservas: reprogramación concurrente ocupa el destino una sola vez', async () => {
+      const ownerResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const owner = await ownerResponse.json() as { token: string; user: { id: string } };
+      assert.strictEqual(ownerResponse.status, 200);
+      const businessId = 'biz_valeria_studio';
+      const serviceId = 'srv_val_corte';
+      const available = await findAvailableSlots(businessId, serviceId, 'stf_valeria', 20);
+      const { date } = available;
+      const [firstSlot, secondSlot, targetSlot] = selectSeparatedSlots(available.slots, 3);
+      const now = new Date().toISOString();
+      const bookingIds = [generateId('concurrent_reschedule'), generateId('concurrent_reschedule')];
+      const insertBooking = (id: string, slot: { time: string; endTime: string; durationMinutes: number }) => {
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, 'stf_valeria', ?, ?, ?, ?, ?, ?, 25000, 'salon', 'CONFIRMED',
+            'presential', 'pending', 'Cliente concurrencia reprogramación', '+56999887702', ?, ?)
+        `).run(
+          id,
+          `RACE-${id}`,
+          businessId,
+          serviceId,
+          owner.user.id,
+          date,
+          slot.time,
+          slot.endTime,
+          slot.durationMinutes,
+          now,
+          now
+        );
+      };
+      try {
+        insertBooking(bookingIds[0], firstSlot);
+        insertBooking(bookingIds[1], secondSlot);
+        const originalBookings = new Map(bookingIds.map(id => [
+          id,
+          sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(id),
+        ]));
+        const responses = await Promise.all(bookingIds.map(async id => ({
+          id,
+          response: await sendJson(
+            `/api/bookings/${id}/reschedule`,
+            { booking_date: date, start_time: targetSlot.time },
+            owner.token
+          ),
+        })));
+        assert.deepStrictEqual(responses.map(result => result.response.status).sort((a, b) => a - b), [200, 409]);
+        const rejected = responses.find(result => result.response.status === 409)!;
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(rejected.id),
+          originalBookings.get(rejected.id)
+        );
+        const activeCount = (sqlite.prepare(`
+          SELECT COUNT(*) AS count FROM bookings
+          WHERE staff_id = ? AND booking_date = ? AND start_time = ?
+            AND status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+        `).get('stf_valeria', date, targetSlot.time) as { count: number }).count;
+        assert.strictEqual(activeCount, 1);
+      } finally {
+        for (const id of bookingIds) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(id);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(id);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(id);
+        }
+      }
+    });
+
     await integrationTest('Autorización: reservas y acciones del negocio respetan membresías', async () => {
       const login = async (email: string, password: string) => {
         const response = await sendJson('/api/auth/login', { email, password });
@@ -1140,7 +1460,7 @@ async function runIntegrationTests() {
         confirm: createBooking('PENDING'),
         ownerConfirm: createBooking('PENDING'),
         reject: createBooking('PENDING'),
-        complete: createBooking('PENDING'),
+        complete: createBooking('CONFIRMED'),
         ownerCancel: createBooking('PENDING'),
         customerCancel: createBooking('PENDING'),
         staffCancel: createBooking('PENDING'),
@@ -1311,6 +1631,12 @@ async function runIntegrationTests() {
         UPDATE business_members SET role = 'PROFESSIONAL'
         WHERE business_id = ? AND user_id = ?
       `).run(targetBusinessId, staff.user.id);
+      const repeatedCompletionBefore = {
+        booking: sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(customerBooking.id),
+        history: sqlite.prepare('SELECT * FROM booking_status_history WHERE booking_id = ? ORDER BY id').all(customerBooking.id),
+        services: sqlite.prepare('SELECT * FROM client_service_history WHERE booking_id = ? ORDER BY id').all(customerBooking.id),
+        payments: sqlite.prepare('SELECT * FROM payments WHERE booking_id = ? ORDER BY id').all(customerBooking.id),
+      };
       let repeatedCompletion: Response;
       try {
         repeatedCompletion = await postAs(`/api/bookings/${customerBooking.id}/complete`, staff.token);
@@ -1320,7 +1646,16 @@ async function runIntegrationTests() {
           WHERE business_id = ? AND user_id = ?
         `).run(staffMemberRole, targetBusinessId, staff.user.id);
       }
-      assert.strictEqual(repeatedCompletion.status, 200);
+      assert.strictEqual(repeatedCompletion.status, 400);
+      assert.deepStrictEqual(await repeatedCompletion.json(), {
+        error: 'No se puede completar una reserva en estado COMPLETED.',
+      });
+      assert.deepStrictEqual({
+        booking: sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(customerBooking.id),
+        history: sqlite.prepare('SELECT * FROM booking_status_history WHERE booking_id = ? ORDER BY id').all(customerBooking.id),
+        services: sqlite.prepare('SELECT * FROM client_service_history WHERE booking_id = ? ORDER BY id').all(customerBooking.id),
+        payments: sqlite.prepare('SELECT * FROM payments WHERE booking_id = ? ORDER BY id').all(customerBooking.id),
+      }, repeatedCompletionBefore);
       assert.strictEqual((sqlite.prepare(`
         SELECT COUNT(*) AS count FROM client_service_history WHERE booking_id = ?
       `).get(customerBooking.id) as any).count, 1);
