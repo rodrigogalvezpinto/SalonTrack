@@ -751,14 +751,24 @@ async function runIntegrationTests() {
       const invalidStatus = await requestJson(`/api/bookings/${customerBooking.id}/status`, 'PUT', owner.token, { status: 'NO_SHOW' });
       assert.strictEqual(invalidStatus.status, 400);
       assert.strictEqual((await postAs(`/api/bookings/${customerBooking.id}/confirm`, owner.token)).status, 200);
-      assert.strictEqual((await requestJson(`/api/bookings/${customerBooking.id}/status`, 'PUT', owner.token, { status: 'COMPLETED' })).status, 200);
+      const completionResponse = await postAs(`/api/bookings/${customerBooking.id}/complete`, owner.token, {
+        formula_color: '7.1 + 20vol',
+        recommended_retouch_days: 45,
+        notes: 'x',
+      });
+      assert.strictEqual(completionResponse.status, 200);
       const completedClient = sqlite.prepare(`
         SELECT id FROM clients WHERE user_id = ? AND business_id = ? AND phone = ?
       `).get(owner.user.id, targetBusinessId, '+56912345002') as any;
       assert.ok(completedClient);
-      assert.strictEqual((sqlite.prepare(`
-        SELECT COUNT(*) AS count FROM client_service_history WHERE booking_id = ?
-      `).get(customerBooking.id) as any).count, 1);
+      const completedService = sqlite.prepare(`
+        SELECT color_formula, recommended_interval_days, next_retouch_date
+        FROM client_service_history
+        WHERE booking_id = ?
+      `).get(customerBooking.id) as any;
+      assert.strictEqual(completedService.color_formula, '7.1 + 20vol');
+      assert.strictEqual(completedService.recommended_interval_days, 45);
+      assert.strictEqual(completedService.next_retouch_date, '2099-02-16');
 
       const staffMemberRole = (sqlite.prepare(`
         SELECT role FROM business_members WHERE business_id = ? AND user_id = ?

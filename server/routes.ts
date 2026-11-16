@@ -1175,7 +1175,17 @@ router.post('/bookings/:id/cancel', requireAuth, cancelBookingHandler);
 
 const completeBookingHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
-  const { color_formula, tint_brand, notes } = req.body;
+  const {
+    color_formula,
+    formula_color,
+    recommended_retouch_days,
+    recommended_interval_days,
+    tint_brand,
+    notes,
+  } = req.body;
+  const colorFormula = color_formula ?? formula_color ?? '';
+  const parsedDays = Number(recommended_retouch_days ?? recommended_interval_days);
+  const intervalDays = Number.isInteger(parsedDays) && parsedDays > 0 && parsedDays <= 365 ? parsedDays : 30;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
   if (authorizeBusiness(req, res, booking.business_id) === null) return;
@@ -1207,13 +1217,12 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
         now,
       );
       const srv = db.prepare('SELECT name FROM services WHERE id = ?').get(booking.service_id) as any;
-      const intervalDays = 30;
       createBookingServiceRecord(db, {
         id: generateId('srv'),
         user_id: req.userId || '',
         client_id: crmClient.id,
         service_type: srv?.name || 'Servicio Profesional',
-        color_formula: color_formula || '',
+        color_formula: colorFormula,
         tint_brand: tint_brand || '',
         service_date: booking.booking_date,
         amount_clp: booking.amount_clp,
