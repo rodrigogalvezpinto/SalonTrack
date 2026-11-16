@@ -76,11 +76,22 @@ export function restoreBackup(file: string): { restoredFrom: string; safetyBacku
     }
   }
 
+  const temporaryDatabasePath = `${databasePath}.restore-tmp`;
+  try {
+    fs.rmSync(temporaryDatabasePath, { force: true });
+    fs.copyFileSync(backupFile, temporaryDatabasePath);
+  } catch (error) {
+    try {
+      fs.rmSync(temporaryDatabasePath, { force: true });
+    } catch {}
+    throw error;
+  }
+
   closeSqliteDb();
-  for (const filePath of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
+  for (const filePath of [`${databasePath}-wal`, `${databasePath}-shm`]) {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
-  fs.copyFileSync(backupFile, databasePath);
+  fs.renameSync(temporaryDatabasePath, databasePath);
   getSqliteDb();
 
   return { restoredFrom: backupFile, safetyBackup };

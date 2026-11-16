@@ -2,7 +2,7 @@ import './setup-env.js';
 import assert from 'node:assert';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
@@ -1090,6 +1090,21 @@ async function runIntegrationTests() {
           );
         } finally {
           backupDb.close();
+        }
+
+        const temporaryDatabasePath = `${getDatabasePath()}.restore-tmp`;
+        mkdirSync(temporaryDatabasePath);
+        try {
+          assert.throws(() => restoreBackup(backupFile));
+          assert.strictEqual(
+            (getSqliteDb().prepare('SELECT COUNT(*) AS count FROM clients WHERE id = ?').get(markerId) as { count: number }).count,
+            1
+          );
+          const apiAfterCopyFailure = await requestJson('/api/clients', 'GET', login.token);
+          assert.strictEqual(apiAfterCopyFailure.status, 200);
+          assert.ok(((await apiAfterCopyFailure.json() as any).clients as any[]).some(client => client.id === markerId));
+        } finally {
+          rmSync(temporaryDatabasePath, { recursive: true, force: true });
         }
 
         getSqliteDb().prepare('DELETE FROM clients WHERE id = ?').run(markerId);
