@@ -354,7 +354,7 @@ export function findOrCreateBookingClient(
     SELECT id, phone
     FROM clients
     WHERE user_id = ? AND (business_id = ? OR business_id IS NULL)
-    ORDER BY rowid ASC
+    ORDER BY (business_id IS NULL) ASC, rowid ASC
   `).all(userId, businessId) as Array<{ id: string; phone: string }>;
   const client = phoneKey
     ? clients.find(candidate => phoneMatchKey(candidate.phone) === phoneKey)

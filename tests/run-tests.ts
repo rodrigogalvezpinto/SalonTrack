@@ -1198,6 +1198,44 @@ async function runIntegrationTests() {
         assert.notStrictEqual(sameNameService.client_id, manualClient.id);
         assert.strictEqual(createClientCount(), ownerClientsBefore + 3);
 
+        const priorityPhone = `9${Date.now().toString().slice(-8)}`;
+        const globalClientResponse = await sendJson('/api/clients', {
+          full_name: 'Clienta global para prioridad de negocio',
+          phone: priorityPhone,
+        }, owner.token);
+        assert.strictEqual(globalClientResponse.status, 201);
+        const globalClient = (await globalClientResponse.json() as any).client;
+        createdClientIds.add(globalClient.id);
+        const businessClientId = generateId('cli');
+        sqlite.prepare(`
+          INSERT INTO clients (
+            id, user_id, business_id, full_name, phone, notes, preferred_contact,
+            re_engagement_status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, '', 'whatsapp', 'none', ?, ?)
+        `).run(
+          businessClientId,
+          owner.user.id,
+          businessId,
+          'Clienta del negocio para prioridad',
+          globalClient.phone,
+          now,
+          now
+        );
+        createdClientIds.add(businessClientId);
+        const priorityClientCount = createClientCount();
+        const priorityBooking = insertBooking(
+          'CONFIRMED',
+          'Reserva que coincide con clienta del negocio',
+          globalClient.phone
+        );
+        assert.strictEqual((await completeAsStaff(priorityBooking)).status, 200);
+        const priorityService = sqlite.prepare(`
+          SELECT client_id FROM client_service_history WHERE booking_id = ?
+        `).get(priorityBooking) as { client_id: string };
+        assert.strictEqual(priorityService.client_id, businessClientId);
+        assert.notStrictEqual(priorityService.client_id, globalClient.id);
+        assert.strictEqual(createClientCount(), priorityClientCount);
+
         const catalogServicesBefore = (sqlite.prepare('SELECT COUNT(*) AS count FROM services').get() as { count: number }).count;
         for (const status of ['COMPLETED', 'EXPIRED', 'PENDING']) {
           const bookingId = insertBooking(status, `Reserva ${status}`, '+56911122335');
