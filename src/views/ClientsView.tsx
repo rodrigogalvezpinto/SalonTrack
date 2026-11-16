@@ -16,12 +16,14 @@ import {
 } from 'lucide-react';
 
 interface ClientsViewProps {
+  refreshKey?: number;
   onSelectClient: (client: Client) => void;
   onOpenWhatsApp: (client: Client, service?: any) => void;
   onNewClient: () => void;
 }
 
 export const ClientsView: React.FC<ClientsViewProps> = ({
+  refreshKey,
   onSelectClient,
   onOpenWhatsApp,
   onNewClient,
@@ -52,7 +54,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
       fetchClients();
     }, 200);
     return () => clearTimeout(timer);
-  }, [search, filter]);
+  }, [search, filter, refreshKey]);
 
   return (
     <div className="space-y-6">

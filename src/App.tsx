@@ -40,6 +40,7 @@ function MainApp() {
   // Navigation state
   const [currentView, setCurrentView] = useState<string>('dashboard');
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const [clientsListVersion, setClientsListVersion] = useState(0);
   const [clientDetailVersion, setClientDetailVersion] = useState(0);
   const [selectedBusinessSlug, setSelectedBusinessSlug] = useState<string>('valeria-henriquez-studio');
 
@@ -248,6 +249,7 @@ function MainApp() {
 
           {currentView === 'clients' && (
             <ClientsView
+              refreshKey={clientsListVersion}
               onSelectClient={handleSelectClient}
               onOpenWhatsApp={handleOpenWhatsApp}
               onNewClient={() => setNewClientModalOpen(true)}
@@ -329,6 +331,7 @@ function MainApp() {
         onClose={() => setNewClientModalOpen(false)}
         onClientCreated={() => {
           setCurrentView('clients');
+          setClientsListVersion(v => v + 1);
         }}
       />
 
