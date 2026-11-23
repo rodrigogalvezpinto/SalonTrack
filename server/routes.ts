@@ -1517,18 +1517,25 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
       }, booking.business_id, booking.id);
     }
 
-    createBookingPayment(db, {
-      userId: booking.customer_user_id,
-      businessId: booking.business_id,
-      bookingId: booking.id,
-      amountClp: booking.amount_clp,
-      provider: 'local',
-      providerPaymentId: `PRES_PAY_${booking.id}`,
-      status: 'approved',
-      paymentMethod: 'presential',
-      createdAt: now,
-      replace: true,
-    });
+    const hasApprovedPayment = db.prepare(`
+      SELECT 1 FROM payments
+      WHERE booking_id = ? AND type = 'booking_payment' AND status = 'approved'
+      LIMIT 1
+    `).get(booking.id);
+    if (!hasApprovedPayment) {
+      createBookingPayment(db, {
+        userId: booking.customer_user_id,
+        businessId: booking.business_id,
+        bookingId: booking.id,
+        amountClp: booking.amount_clp,
+        provider: 'local',
+        providerPaymentId: `PRES_PAY_${booking.id}`,
+        status: 'approved',
+        paymentMethod: 'presential',
+        createdAt: now,
+        replace: true,
+      });
+    }
 
     if (booking.customer_user_id) {
       createNotification(booking.customer_user_id, 'review_request', '¿Cómo estuvo tu atención?', `Tu servicio en ${business.name} ha finalizado. ¡Comparte tu opinión dejando una reseña!`, 'booking', booking.id, 'low');
