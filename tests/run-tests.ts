@@ -478,6 +478,13 @@ async function runIntegrationTests() {
       emailProvider.send = originalSend;
     }
   };
+  const backdatePasswordResetTokens = (email: string, ageMs: number) => {
+    const user = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?')
+      .get(email.trim().toLowerCase()) as { id: string } | undefined;
+    assert.ok(user, `Debe existir la cuenta ${email} para ajustar sus tokens de prueba.`);
+    sqlite.prepare('UPDATE password_reset_tokens SET created_at = ? WHERE user_id = ?')
+      .run(new Date(Date.now() - ageMs).toISOString(), user.id);
+  };
   let olderResetToken = '';
 
   try {
@@ -3054,6 +3061,7 @@ async function runIntegrationTests() {
         process.env.RESEND_FROM_EMAIL = from;
         process.env.APP_URL = appUrl;
         responseStatus = 200;
+        backdatePasswordResetTokens('contacto@valeriaestudio.cl', 2 * 60 * 60 * 1000);
         const successfulDelivery = waitForNextRequest();
         const genericMessage = {
           message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.',
@@ -3070,6 +3078,7 @@ async function runIntegrationTests() {
         assert.ok(successfulEmail.body.html.includes('vence en 30 minutos'));
         assert.ok(successfulEmail.body.text.includes('vence en 30 minutos'));
 
+        backdatePasswordResetTokens('contacto@valeriaestudio.cl', 61_000);
         responseStatus = 500;
         console.error = (...args: unknown[]) => {
           loggedErrors.push(args.join(' '));
@@ -3095,6 +3104,7 @@ async function runIntegrationTests() {
         restoreEnvironmentValue('DEV_MAIL_DIR', originalEnvironment.devMailDir);
         restoreEnvironmentValue('NODE_ENV', originalEnvironment.nodeEnv);
         restoreEnvironmentValue('APP_URL', originalEnvironment.appUrl);
+        backdatePasswordResetTokens('contacto@valeriaestudio.cl', 2 * 60 * 60 * 1000);
         await new Promise<void>((resolve, reject) => {
           fakeResendServer.close(error => error ? reject(error) : resolve());
         });
@@ -3132,6 +3142,58 @@ async function runIntegrationTests() {
       rmSync(outboxDir, { recursive: true, force: true });
     });
 
+    await integrationTest('Recuperación: limita solicitudes repetidas por cuenta', async () => {
+      const primaryEmail = 'contacto@valeriaestudio.cl';
+      const otherEmail = 'camila@valeriaestudio.cl';
+      const primaryUser = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?')
+        .get(primaryEmail) as { id: string } | undefined;
+      const otherUser = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?')
+        .get(otherEmail) as { id: string } | undefined;
+      assert.ok(primaryUser);
+      assert.ok(otherUser);
+      sqlite.prepare('DELETE FROM password_reset_tokens WHERE user_id IN (?, ?)')
+        .run(primaryUser.id, otherUser.id);
+
+      const previousWarn = console.warn;
+      const warnings: string[] = [];
+      console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+      try {
+        const first = await requestReset(primaryEmail);
+        const second = await requestReset(primaryEmail);
+        const genericMessage = {
+          message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.',
+        };
+        assert.strictEqual(first.response.status, 200);
+        assert.strictEqual(second.response.status, 200);
+        assert.deepStrictEqual(first.body, genericMessage);
+        assert.deepStrictEqual(second.body, genericMessage);
+        assert.match(first.emailContent, /reset_token=/);
+        assert.strictEqual(second.emailContent, '');
+        assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ?')
+          .get(primaryUser.id) as { count: number }).count, 1);
+        assert.deepStrictEqual(warnings, ['[Password reset] Solicitud limitada por frecuencia.']);
+
+        backdatePasswordResetTokens(primaryEmail, 61_000);
+        const third = await requestReset(primaryEmail);
+        assert.strictEqual(third.response.status, 200);
+        assert.deepStrictEqual(third.body, genericMessage);
+        assert.match(third.emailContent, /reset_token=/);
+        assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ?')
+          .get(primaryUser.id) as { count: number }).count, 2);
+
+        const other = await requestReset(otherEmail);
+        assert.strictEqual(other.response.status, 200);
+        assert.deepStrictEqual(other.body, genericMessage);
+        assert.match(other.emailContent, /reset_token=/);
+        assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ?')
+          .get(otherUser.id) as { count: number }).count, 1);
+      } finally {
+        console.warn = previousWarn;
+        sqlite.prepare('DELETE FROM password_reset_tokens WHERE user_id IN (?, ?)')
+          .run(primaryUser.id, otherUser.id);
+      }
+    });
+
     await integrationTest('Recuperación: mismo cuerpo para correo registrado y no registrado', async () => {
       const existing = await requestReset('contacto@valeriaestudio.cl');
       const unknown = await requestReset('no-existe@salontrack.cl');
@@ -3156,6 +3218,7 @@ async function runIntegrationTests() {
     });
 
     await integrationTest('Reset de contraseña: token válido funciona una vez e invalida los anteriores', async () => {
+      backdatePasswordResetTokens('contacto@valeriaestudio.cl', 2 * 60 * 60 * 1000);
       const request = await requestReset('contacto@valeriaestudio.cl');
       const match = request.emailContent.match(/reset_token=([a-f0-9]{64})/);
       assert.ok(match);
