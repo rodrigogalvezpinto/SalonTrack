@@ -4850,6 +4850,11 @@ async function runIntegrationTests() {
           .get(inactiveStaffInvite.invitation.id) as { status: string }).status, 'pending');
         assert.strictEqual(sqlite.prepare('SELECT 1 FROM business_members WHERE business_id = ? AND user_id = ?')
           .get(businessId, customer.user.id), undefined);
+        assert.strictEqual((await requestJson(
+          `/api/business/invitations/${inactiveStaffInvite.invitation.id}`,
+          'DELETE',
+          owner.token,
+        )).status, 200);
 
         const revoked = await sendJson('/api/business/staff', { name: 'Invitación revocable' }, owner.token);
         assert.strictEqual(revoked.status, 201);
