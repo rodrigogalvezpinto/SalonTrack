@@ -16,8 +16,9 @@ Configure las siguientes variables en el panel de secretos de su proveedor:
 # Puerto del servidor
 PORT=3000
 
-# Configure el número de proxies confiables si el servicio está detrás de uno.
+# Configure el número exacto de saltos de proxy confiables.
 # Por ejemplo, use 1 detrás de un único proxy de Railway, Fly o un balanceador.
+# Nunca use true: confiaría cualquier X-Forwarded-For y permitiría evadir los límites por IP.
 # TRUST_PROXY=1
 
 # URL canónica del servicio; debe ser pública y usar HTTPS en producción.
@@ -46,7 +47,7 @@ Los pagos simulados están bloqueados en producción por defecto; no establezca 
 
 ## Proxy confiable y límites de autenticación
 
-Configure `TRUST_PROXY` según los saltos de proxy confiables de su despliegue (por ejemplo, `1` detrás de un proxy de Railway, Fly o un balanceador). Esto permite que los límites por IP usen la dirección del cliente. Los limitadores se mantienen en memoria y comparten estado únicamente dentro de una instancia; esta protección presupone una sola instancia.
+Configure `TRUST_PROXY` con el número exacto de saltos de proxy confiables de su despliegue (por ejemplo, `1` detrás de un único proxy de Railway, Fly o un balanceador). No use `true`: Express confiaría cualquier valor de `X-Forwarded-For`, lo que permitiría falsificar la IP y evadir los límites. Los limitadores se mantienen en memoria y comparten estado únicamente dentro de una instancia; esta protección presupone una sola instancia.
 
 ## Correo transaccional con Resend
 
