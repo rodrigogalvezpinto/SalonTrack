@@ -45,6 +45,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
 
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     if (profile) {
@@ -66,6 +67,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
 
   const handleSaveAll = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaveError(null);
     setSaving(true);
     setSavedSuccess(false);
 
@@ -93,8 +95,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
 
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
-    } catch (err) {
-      console.error('Error saving settings:', err);
+    } catch (error) {
+      console.error('Error saving settings:', error);
+      setSaveError(error instanceof Error ? error.message : 'No se pudieron guardar los cambios.');
     } finally {
       setSaving(false);
     }
@@ -339,11 +342,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
               <span>Estado de Licencia & Pagos (Mercado Pago Chile)</span>
             </h3>
             <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+              subscription?.is_active === false ? 'bg-rose-100 text-rose-800' :
               subscription?.status === 'active' ? 'bg-emerald-100 text-emerald-800' :
               subscription?.status === 'trial' ? 'bg-amber-100 text-amber-800' :
               'bg-rose-100 text-rose-800'
             }`}>
-              {subscription?.status === 'active' ? 'Licencia Activa' :
+              {subscription?.is_active === false ? 'Vencida' :
+               subscription?.status === 'active' ? 'Licencia Activa' :
                subscription?.status === 'trial' ? `Prueba (${subscription.days_remaining} días restantes)` :
                'Vencida'}
             </span>
@@ -385,7 +390,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
         </div>
 
         {/* Save Bar */}
-        <div className="flex items-center justify-end gap-3 pt-2">
+        <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+          {saveError && (
+            <div role="alert" className="max-w-xl rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+              {saveError}
+            </div>
+          )}
+
           {savedSuccess && (
             <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
               <Check className="w-4 h-4 stroke-[3]" />

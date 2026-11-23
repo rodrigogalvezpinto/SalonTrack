@@ -505,6 +505,12 @@ export function getOrCreateSubscription(userId: string): Subscription {
   return getSubscription(userId) || createTrialSubscription(userId);
 }
 
+export function isSubscriptionActive(userId: string, now = new Date()): boolean {
+  const subscription = getOrCreateSubscription(userId);
+  return (subscription.status === 'trial' || subscription.status === 'active')
+    && new Date(subscription.expiration_date) > now;
+}
+
 export function listPayments(userId: string): Payment[] {
   return getSqliteDb().prepare(`
     SELECT ${PAYMENT_COLUMNS}

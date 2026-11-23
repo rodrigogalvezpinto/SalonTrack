@@ -760,6 +760,293 @@ async function runIntegrationTests() {
       }
     });
 
+    await integrationTest('Suscripción vencida: CRM y negocio quedan de solo lectura, reservas siguen activas', async () => {
+      const registeredResponse = await sendJson('/api/auth/register', {
+        email: `subscription-expired-${generateId('user')}@example.test`,
+        password: 'SubscriptionTest123!',
+        full_name: 'Profesional de prueba de suscripción',
+        business_name: `Negocio prueba ${generateId('business')}`,
+        phone: '+56912345021',
+      });
+      assert.strictEqual(registeredResponse.status, 201);
+      const registered = await registeredResponse.json() as { token: string; user: { id: string } };
+      const userId = registered.user.id;
+      const paymentRef = `SUBSCRIPTION_TEST_${generateId('pay')}`;
+
+      try {
+        const existingClientResponse = await sendJson('/api/clients', {
+          full_name: 'Clienta protegida por expiración',
+          phone: '+56912345022',
+          initial_service: { service_type: 'Servicio previo', amount_clp: 15000 },
+        }, registered.token);
+        assert.strictEqual(existingClientResponse.status, 201);
+        const existingClient = (await existingClientResponse.json() as any).client;
+        const existingService = sqlite.prepare(
+          'SELECT id FROM client_service_history WHERE client_id = ?'
+        ).get(existingClient.id) as { id: string };
+
+        const expiredAt = new Date(Date.now() - 60_000).toISOString();
+        sqlite.prepare('UPDATE subscriptions SET expiration_date = ? WHERE user_id = ?').run(expiredAt, userId);
+        const expiredError = {
+          error: 'Tu licencia de SalonTrack venció. Renuévala en Configuración para seguir editando.',
+          code: 'SUBSCRIPTION_EXPIRED',
+        };
+        const clientCount = () => (sqlite.prepare(
+          'SELECT COUNT(*) AS count FROM clients WHERE user_id = ?'
+        ).get(userId) as { count: number }).count;
+        const clientsBeforeCreate = clientCount();
+
+        const blockedCreate = await sendJson('/api/clients', {
+          full_name: 'No debe insertarse',
+          phone: '+56912345023',
+        }, registered.token);
+        assert.strictEqual(blockedCreate.status, 402);
+        assert.deepStrictEqual(await blockedCreate.json(), expiredError);
+        assert.strictEqual(clientCount(), clientsBeforeCreate);
+
+        const clientList = await requestJson('/api/clients', 'GET', registered.token);
+        assert.strictEqual(clientList.status, 200);
+        assert.ok((await clientList.json() as any).clients.some((client: any) => client.id === existingClient.id));
+        const backup = await requestJson('/api/backup/export', 'GET', registered.token);
+        assert.strictEqual(backup.status, 200);
+
+        const clientBeforeMutation = sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(existingClient.id);
+        const blockedUpdate = await requestJson(`/api/clients/${existingClient.id}`, 'PUT', registered.token, {
+          full_name: 'Nombre no autorizado',
+          phone: '+56912345022',
+        });
+        assert.strictEqual(blockedUpdate.status, 402);
+        assert.deepStrictEqual(await blockedUpdate.json(), expiredError);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(existingClient.id), clientBeforeMutation);
+
+        const blockedDelete = await requestJson(`/api/clients/${existingClient.id}`, 'DELETE', registered.token);
+        assert.strictEqual(blockedDelete.status, 402);
+        assert.deepStrictEqual(await blockedDelete.json(), expiredError);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(existingClient.id), clientBeforeMutation);
+
+        const serviceHistoryBefore = sqlite.prepare(
+          'SELECT * FROM client_service_history WHERE user_id = ? ORDER BY id'
+        ).all(userId);
+        const blockedServiceCreate = await sendJson('/api/services', {
+          client_id: existingClient.id,
+          service_type: 'Servicio no autorizado',
+        }, registered.token);
+        assert.strictEqual(blockedServiceCreate.status, 402);
+        assert.deepStrictEqual(await blockedServiceCreate.json(), expiredError);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM client_service_history WHERE user_id = ? ORDER BY id').all(userId),
+          serviceHistoryBefore
+        );
+
+        const blockedServiceDelete = await requestJson(`/api/services/${existingService.id}`, 'DELETE', registered.token);
+        assert.strictEqual(blockedServiceDelete.status, 402);
+        assert.deepStrictEqual(await blockedServiceDelete.json(), expiredError);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM client_service_history WHERE user_id = ? ORDER BY id').all(userId),
+          serviceHistoryBefore
+        );
+
+        const contactLogsBefore = sqlite.prepare(
+          'SELECT * FROM contact_logs WHERE user_id = ? ORDER BY id'
+        ).all(userId);
+        const blockedContact = await sendJson('/api/contact-logs', {
+          client_id: existingClient.id,
+          status: 'contacted',
+          notes: 'No debe registrarse',
+        }, registered.token);
+        assert.strictEqual(blockedContact.status, 402);
+        assert.deepStrictEqual(await blockedContact.json(), expiredError);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM contact_logs WHERE user_id = ? ORDER BY id').all(userId),
+          contactLogsBefore
+        );
+
+        const blockedReengagement = await sendJson('/api/re-engagement/status', {
+          client_id: existingClient.id,
+          status: 'recontacted',
+          notes: 'No debe actualizarse',
+        }, registered.token);
+        assert.strictEqual(blockedReengagement.status, 402);
+        assert.deepStrictEqual(await blockedReengagement.json(), expiredError);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM clients WHERE id = ?').get(existingClient.id), clientBeforeMutation);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM contact_logs WHERE user_id = ? ORDER BY id').all(userId),
+          contactLogsBefore
+        );
+
+        const profileBefore = sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId) as any;
+        const blockedProfileTemplate = await requestJson('/api/profile', 'PUT', registered.token, {
+          re_engagement_template: `${profileBefore.re_engagement_template || ''} cambio no autorizado`,
+        });
+        assert.strictEqual(blockedProfileTemplate.status, 402);
+        assert.deepStrictEqual(await blockedProfileTemplate.json(), expiredError);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId), profileBefore);
+
+        const blockedProfileThreshold = await requestJson('/api/profile', 'PUT', registered.token, {
+          re_engagement_days_threshold: Number(profileBefore.re_engagement_days_threshold || 90) + 1,
+        });
+        assert.strictEqual(blockedProfileThreshold.status, 402);
+        assert.deepStrictEqual(await blockedProfileThreshold.json(), expiredError);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId), profileBefore);
+
+        const allowedProfileUpdate = await requestJson('/api/profile', 'PUT', registered.token, {
+          full_name: 'Nombre actualizado con licencia vencida',
+          phone: profileBefore.phone,
+          default_interval_days: profileBefore.default_interval_days,
+          whatsapp_template: profileBefore.whatsapp_template,
+          re_engagement_template: profileBefore.re_engagement_template || '',
+          re_engagement_days_threshold: profileBefore.re_engagement_days_threshold || 90,
+        });
+        assert.strictEqual(allowedProfileUpdate.status, 200);
+        const profileAfterNameUpdate = sqlite.prepare(
+          'SELECT * FROM user_profiles WHERE user_id = ?'
+        ).get(userId) as any;
+        assert.strictEqual(profileAfterNameUpdate.full_name, 'Nombre actualizado con licencia vencida');
+        assert.strictEqual(
+          profileAfterNameUpdate.re_engagement_template || '',
+          profileBefore.re_engagement_template || ''
+        );
+        assert.strictEqual(
+          profileAfterNameUpdate.re_engagement_days_threshold || 90,
+          profileBefore.re_engagement_days_threshold || 90
+        );
+
+        const blockedTemplate = await requestJson('/api/re-engagement/template', 'PUT', registered.token, {
+          template: 'No debe guardarse',
+          threshold_days: 120,
+        });
+        assert.strictEqual(blockedTemplate.status, 402);
+        assert.deepStrictEqual(await blockedTemplate.json(), expiredError);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId),
+          profileAfterNameUpdate
+        );
+
+        const activation = await sendJson('/api/subscriptions/activate-license', {
+          plan_id: 'pro_quarterly',
+          payment_ref: paymentRef,
+        }, registered.token);
+        assert.strictEqual(activation.status, 200);
+        const activeSubscription = sqlite.prepare(
+          'SELECT status, expiration_date FROM subscriptions WHERE user_id = ?'
+        ).get(userId) as { status: string; expiration_date: string };
+        assert.strictEqual(activeSubscription.status, 'active');
+        assert.ok(new Date(activeSubscription.expiration_date).getTime() > Date.now());
+
+        const reactivatedCreate = await sendJson('/api/clients', {
+          full_name: 'Clienta luego de reactivar',
+          phone: '+56912345024',
+        }, registered.token);
+        assert.strictEqual(reactivatedCreate.status, 201);
+
+        const ownerResponse = await sendJson('/api/auth/login', {
+          email: 'contacto@valeriaestudio.cl',
+          password: 'Salon1234',
+        });
+        const owner = await ownerResponse.json() as { token: string; user: { id: string } };
+        assert.strictEqual(ownerResponse.status, 200);
+        const customerResponse = await sendJson('/api/auth/login', {
+          email: 'cliente@gmail.com',
+          password: 'Cliente1234!',
+        });
+        const customer = await customerResponse.json() as { token: string };
+        assert.strictEqual(customerResponse.status, 200);
+
+        const businessId = 'biz_valeria_studio';
+        await requestJson('/api/subscriptions/current', 'GET', owner.token);
+        const ownerSubscription = sqlite.prepare(
+          'SELECT expiration_date FROM subscriptions WHERE user_id = ?'
+        ).get(owner.user.id) as { expiration_date: string };
+        const businessBefore = sqlite.prepare(
+          'SELECT booking_mode FROM businesses WHERE id = ?'
+        ).get(businessId) as { booking_mode: string };
+        const hoursBefore = sqlite.prepare(
+          'SELECT * FROM business_hours WHERE business_id = ? ORDER BY day_of_week'
+        ).all(businessId);
+        const catalogBefore = sqlite.prepare(
+          'SELECT * FROM services WHERE business_id = ? ORDER BY id'
+        ).all(businessId);
+        let createdBookingId: string | undefined;
+
+        try {
+          sqlite.prepare('UPDATE subscriptions SET expiration_date = ? WHERE user_id = ?')
+            .run(expiredAt, owner.user.id);
+
+          const blockedHours = await requestJson(`/api/business/${businessId}/hours`, 'PUT', owner.token, {
+            hours: [{ day_of_week: 1, open_time: '10:00', close_time: '18:00', is_closed: 0 }],
+          });
+          assert.strictEqual(blockedHours.status, 402);
+          assert.deepStrictEqual(await blockedHours.json(), expiredError);
+          assert.deepStrictEqual(
+            sqlite.prepare('SELECT * FROM business_hours WHERE business_id = ? ORDER BY day_of_week').all(businessId),
+            hoursBefore
+          );
+
+          const blockedCatalogCreate = await sendJson(`/api/business/${businessId}/services`, {
+            name: 'Servicio no autorizado',
+            price_clp: 15000,
+            duration_minutes: 45,
+          }, owner.token);
+          assert.strictEqual(blockedCatalogCreate.status, 402);
+          assert.deepStrictEqual(await blockedCatalogCreate.json(), expiredError);
+          assert.deepStrictEqual(
+            sqlite.prepare('SELECT * FROM services WHERE business_id = ? ORDER BY id').all(businessId),
+            catalogBefore
+          );
+
+          const nonMemberMutation = await sendJson(`/api/business/${businessId}/services`, {
+            name: 'Servicio de persona externa',
+            price_clp: 15000,
+            duration_minutes: 45,
+          }, customer.token);
+          assert.strictEqual(nonMemberMutation.status, 404);
+          assert.deepStrictEqual(
+            sqlite.prepare('SELECT * FROM services WHERE business_id = ? ORDER BY id').all(businessId),
+            catalogBefore
+          );
+
+          sqlite.prepare('UPDATE businesses SET booking_mode = ? WHERE id = ?')
+            .run('MANUAL', businessId);
+          const { date, slots } = await findAvailableSlots(businessId, 'srv_val_corte', 'stf_valeria');
+          const bookingResponse = await sendJson('/api/bookings', {
+            business_id: businessId,
+            service_id: 'srv_val_corte',
+            staff_id: slots[0].staffId,
+            booking_date: date,
+            start_time: slots[0].time,
+            client_name: 'Cliente con dueño vencido',
+            client_phone: '+56912345025',
+            payment_method: 'presential',
+          }, customer.token);
+          assert.strictEqual(bookingResponse.status, 201);
+          const createdBooking = (await bookingResponse.json() as { booking: { id: string } }).booking;
+          createdBookingId = createdBooking.id;
+
+          const confirmation = await sendJson(`/api/bookings/${createdBooking.id}/confirm`, {}, owner.token);
+          assert.strictEqual(confirmation.status, 200);
+          assert.strictEqual(
+            (sqlite.prepare('SELECT status FROM bookings WHERE id = ?').get(createdBooking.id) as { status: string }).status,
+            'CONFIRMED'
+          );
+        } finally {
+          sqlite.prepare('UPDATE subscriptions SET expiration_date = ? WHERE user_id = ?')
+            .run(ownerSubscription.expiration_date, owner.user.id);
+          sqlite.prepare('UPDATE businesses SET booking_mode = ? WHERE id = ?')
+            .run(businessBefore.booking_mode, businessId);
+          if (createdBookingId) {
+            sqlite.prepare('DELETE FROM payments WHERE booking_id = ?').run(createdBookingId);
+            sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(createdBookingId);
+            sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(createdBookingId);
+          }
+        }
+      } finally {
+        sqlite.prepare('DELETE FROM payments WHERE provider_payment_id = ?').run(paymentRef);
+        const business = sqlite.prepare('SELECT id FROM businesses WHERE owner_id = ?').get(userId) as { id: string } | undefined;
+        if (business) sqlite.prepare('DELETE FROM businesses WHERE id = ?').run(business.id);
+        sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+      }
+    });
+
     await integrationTest('Re-engagement: actualiza el estado y registra el contacto en SQLite', async () => {
       const loginResponse = await sendJson('/api/auth/login', {
         email: 'contacto@valeriaestudio.cl',

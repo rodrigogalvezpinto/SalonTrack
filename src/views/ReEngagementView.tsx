@@ -27,6 +27,7 @@ export const ReEngagementView: React.FC = () => {
   const [isEditingTemplate, setIsEditingTemplate] = useState(false);
   const [templateText, setTemplateText] = useState('');
   const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fetchReEngagement = async (days = thresholdDays) => {
     setLoading(true);
@@ -62,6 +63,7 @@ export const ReEngagementView: React.FC = () => {
     candidate: ReEngagementCandidate, 
     newStatus: 'recontacted' | 'reactivated' | 'dismissed' | 'none'
   ) => {
+    setErrorMessage(null);
     setUpdatingStatusId(candidate.client_id);
     try {
       await apiRequest('/api/re-engagement/status', {
@@ -74,8 +76,8 @@ export const ReEngagementView: React.FC = () => {
       });
       // Refresh local state
       await fetchReEngagement(thresholdDays);
-    } catch (err) {
-      console.error('Error updating status:', err);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'No se pudo actualizar el estado.');
     } finally {
       setUpdatingStatusId(null);
     }
@@ -83,6 +85,7 @@ export const ReEngagementView: React.FC = () => {
 
   const handleSendWhatsAppOffer = async (candidate: ReEngagementCandidate) => {
     const waUrl = buildWhatsAppLink(candidate.phone, candidate.suggested_message);
+    setErrorMessage(null);
 
     // Update status to 'recontacted' and log action
     try {
@@ -95,12 +98,10 @@ export const ReEngagementView: React.FC = () => {
         }),
       });
       await fetchReEngagement(thresholdDays);
-    } catch (err) {
-      console.error('Error recording WhatsApp contact:', err);
+      window.open(waUrl, '_blank', 'noopener,noreferrer');
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'No se pudo registrar el contacto.');
     }
-
-    // Open WhatsApp
-    window.open(waUrl, '_blank', 'noopener,noreferrer');
   };
 
   const handleSaveTemplate = async () => {
@@ -122,6 +123,12 @@ export const ReEngagementView: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {errorMessage && (
+        <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          {errorMessage}
+        </div>
+      )}
+
       {/* Header and Hero */}
       <div className="bg-gradient-to-r from-violet-900 via-purple-900 to-indigo-950 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
         <div className="relative z-10 max-w-3xl space-y-3">

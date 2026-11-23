@@ -16,7 +16,7 @@ Auditoría de la base `origin/main` (`9a75d5a`) y de los endurecimientos puntual
 | 7 — Pagos locales | Parcial | El checkout y la activación simulados se bloquean en producción salvo `ALLOW_SIMULATED_PAYMENTS=true` para demos; `/api/payments/webhook` no valida operaciones externas. |
 | 8 — Paneles y estadísticas | Parcial | `/api/dashboard/stats`, `/api/admin/dashboard` y `CustomerPortalView.tsx` entregan paneles básicos con datos consultados directamente de SQLite. |
 | 9 — Notificaciones y reputación | Parcial | Existen tablas y rutas de notificaciones/reseñas y adaptadores locales de WhatsApp/email; no hay entrega real ni procesamiento programado completo. |
-| 10 — Suscripciones y monetización | Parcial | `/api/subscriptions/plans` y `subscriptions` implementan planes; la activación simulada tiene bloqueo de producción y aún faltan límites de plan aplicados consistentemente en backend. |
+| 10 — Suscripciones y monetización | Parcial | La expiración se aplica en backend: el CRM y la gestión del negocio quedan de solo lectura con HTTP 402 (`SUBSCRIPTION_EXPIRED`), mientras lecturas, exportación y reservas siguen disponibles. Siguen pendientes un proveedor de pagos real y decidir si los negocios vencidos deben desaparecer del marketplace. |
 | 11 — Calidad y estabilización | Parcial | `.github/workflows/ci.yml` ejecuta lint, pruebas automatizadas y build en cada PR y push a `main`; `tests/run-tests.ts` incluye cobertura de autorización entre negocios, roles y CRM. Faltan pruebas E2E, concurrencia, accesibilidad y cobertura de rutas nuevas. |
 
 ## Decisión sobre las implementaciones alternativas
@@ -40,4 +40,4 @@ Los PR #1 y #2 contenían una implementación alternativa. Se decidió cerrarlos
 1. **P0 — Autorización:** mantener en GitHub Actions (`npm run lint`, `npm test` y `npm run build` por PR) la cobertura de cruces de cuentas/negocios, roles, membresías desactivadas y CRM agregada para reservas, negocio y clientes.
 2. **P1 — Reservas:** mantener cobertura de creación/reprogramación concurrentes y finalización transaccional en el CRM del dueño; queda pendiente probar concurrencia multi-proceso porque la suite se ejecuta en un solo proceso.
 3. **P2 — Servicios externos:** reemplazar la simulación de email y pagos e implementar validación de firmas de webhook.
-4. **P2 — Estabilización:** ampliar pruebas E2E, de concurrencia y accesibilidad; cubrir límites de suscripción y validación de permisos en CI.
+4. **P2 — Estabilización:** ampliar pruebas E2E, de concurrencia y accesibilidad; mejorar la cobertura de rutas nuevas y validar permisos en CI.
