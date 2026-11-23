@@ -187,16 +187,16 @@ function authorizeBusiness(
   allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']
 ): string | null {
   const member = getSqliteDb().prepare(`
-    SELECT role
+    SELECT role, is_active
     FROM business_members
-    WHERE business_id = ? AND user_id = ? AND is_active = 1
-  `).get(businessId, req.userId || '') as { role: string } | undefined;
+    WHERE business_id = ? AND user_id = ?
+  `).get(businessId, req.userId || '') as { role: string; is_active: number } | undefined;
 
   if (!member) {
     res.status(404).json({ error: 'Negocio no encontrado.' });
     return null;
   }
-  if (!allowedRoles.includes(member.role)) {
+  if (!member.is_active || !allowedRoles.includes(member.role)) {
     res.status(403).json({ error: 'No tienes permisos para esta acción en el negocio.' });
     return null;
   }
@@ -2107,11 +2107,37 @@ router.post('/business/staff', requireAuth, (req: AuthRequest, res: Response) =>
 
 router.delete('/business/staff/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
-  const staff = sqlite.prepare('SELECT business_id FROM staff WHERE id = ?').get(req.params.id) as any;
+  const staff = sqlite.prepare('SELECT business_id, user_id FROM staff WHERE id = ?').get(req.params.id) as any;
   if (!staff) return res.status(404).json({ error: 'Trabajador no encontrado.' });
   if (authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN']) === null) return;
+  const member = staff.user_id
+    ? sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ?')
+      .get(staff.business_id, staff.user_id) as { role: string } | undefined
+    : undefined;
+  if (member?.role === 'OWNER') {
+    return res.status(400).json({ error: 'No se puede desactivar al propietario del negocio.' });
+  }
   if (businessSubscriptionBlocked(res, staff.business_id)) return;
-  sqlite.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(req.params.id);
+
+  const deactivated = withTransaction(db => {
+    const currentMember = staff.user_id
+      ? db.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ?')
+        .get(staff.business_id, staff.user_id) as { role: string } | undefined
+      : undefined;
+    if (currentMember?.role === 'OWNER') return false;
+
+    db.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(req.params.id);
+    if (staff.user_id) {
+      db.prepare(`
+        UPDATE business_members SET is_active = 0
+        WHERE business_id = ? AND user_id = ? AND role != 'OWNER'
+      `).run(staff.business_id, staff.user_id);
+    }
+    return true;
+  });
+  if (!deactivated) {
+    return res.status(400).json({ error: 'No se puede desactivar al propietario del negocio.' });
+  }
   return res.json({ message: 'Trabajador desactivado correctamente.' });
 });
 

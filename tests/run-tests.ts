@@ -2708,6 +2708,82 @@ async function runIntegrationTests() {
       await requestJson(`/api/admin/businesses/${targetBusinessId}/status`, 'PUT', platformAdmin.token, { status: 'PUBLISHED' });
     });
 
+    await integrationTest('Desactivar a una trabajadora revoca su acceso al negocio', async () => {
+      const login = async (email: string, password: string) => {
+        const response = await sendJson('/api/auth/login', { email, password });
+        const body = await response.json() as { token: string; user: { id: string } };
+        assert.strictEqual(response.status, 200);
+        return body;
+      };
+      const owner = await login('contacto@valeriaestudio.cl', 'Salon1234');
+      const camila = await login('camila@valeriaestudio.cl', 'Staff1234!');
+      const customer = await login('cliente@gmail.com', 'Cliente1234!');
+      const businessId = 'biz_valeria_studio';
+      const staffActive = (sqlite.prepare('SELECT is_active FROM staff WHERE id = ?')
+        .get('stf_camila') as { is_active: number }).is_active;
+      const memberActive = (sqlite.prepare(`
+        SELECT is_active FROM business_members WHERE business_id = ? AND user_id = ?
+      `).get(businessId, camila.user.id) as { is_active: number }).is_active;
+      const bookingId = generateId('staff_access');
+      const now = new Date().toISOString();
+
+      sqlite.prepare(`
+        INSERT INTO bookings (
+          id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+          start_time, end_time, duration_minutes, amount_clp, modality, status,
+          payment_method, payment_status, client_name, client_phone, created_at, updated_at
+        ) VALUES (?, ?, ?, 'stf_camila', 'srv_val_corte', ?, '2099-01-01', '10:00', '11:00',
+          60, 25000, 'salon', 'PENDING', 'presential', 'pending', 'Cliente de Camila', ?, ?, ?)
+      `).run(
+        bookingId,
+        `STAFF-ACCESS-${bookingId}`,
+        businessId,
+        customer.user.id,
+        '+56912345679',
+        now,
+        now
+      );
+
+      try {
+        const ownerStaffRemoval = await requestJson('/api/business/staff/stf_valeria', 'DELETE', owner.token);
+        assert.strictEqual(ownerStaffRemoval.status, 400);
+        assert.strictEqual((sqlite.prepare('SELECT is_active FROM staff WHERE id = ?')
+          .get('stf_valeria') as { is_active: number }).is_active, 1);
+
+        const beforeRemoval = await requestJson(
+          `/api/bookings/${bookingId}/status`,
+          'PUT',
+          camila.token,
+          { status: 'CONFIRMED' }
+        );
+        assert.strictEqual(beforeRemoval.status, 200);
+
+        const removal = await requestJson('/api/business/staff/stf_camila', 'DELETE', owner.token);
+        assert.strictEqual(removal.status, 200);
+        assert.strictEqual((sqlite.prepare('SELECT is_active FROM staff WHERE id = ?')
+          .get('stf_camila') as { is_active: number }).is_active, 0);
+        assert.strictEqual((sqlite.prepare(`
+          SELECT is_active FROM business_members WHERE business_id = ? AND user_id = ?
+        `).get(businessId, camila.user.id) as { is_active: number }).is_active, 0);
+
+        const afterRemoval = await requestJson(
+          `/api/bookings/${bookingId}/status`,
+          'PUT',
+          camila.token,
+          { status: 'CANCELLED' }
+        );
+        assert.strictEqual(afterRemoval.status, 403);
+      } finally {
+        sqlite.prepare('UPDATE staff SET is_active = ? WHERE id = ?').run(staffActive, 'stf_camila');
+        sqlite.prepare(`
+          UPDATE business_members SET is_active = ?
+          WHERE business_id = ? AND user_id = ?
+        `).run(memberActive, businessId, camila.user.id);
+        sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(bookingId);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+      }
+    });
+
     await integrationTest('Autorización integral: aislamiento entre negocios, roles y CRM', async () => {
       const login = async (email: string, password: string) => {
         const response = await sendJson('/api/auth/login', { email, password });
