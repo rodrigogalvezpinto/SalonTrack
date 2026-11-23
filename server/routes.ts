@@ -2543,8 +2543,11 @@ router.post('/invitations/:id/accept', requireAuth, (req: AuthRequest, res: Resp
     if (ownerMembership) return { kind: 'owner' as const };
 
     if (invitation.staff_id) {
-      const staff = db.prepare('SELECT business_id, user_id FROM staff WHERE id = ?')
-        .get(invitation.staff_id) as { business_id: string; user_id: string | null } | undefined;
+      const staff = db.prepare('SELECT business_id, user_id, is_active FROM staff WHERE id = ?')
+        .get(invitation.staff_id) as { business_id: string; user_id: string | null; is_active: number } | undefined;
+      if (staff && staff.business_id === invitation.business_id && staff.is_active === 0) {
+        return { kind: 'staff_inactive' as const };
+      }
       if (staff && staff.business_id === invitation.business_id && staff.user_id && staff.user_id !== userId) {
         return { kind: 'staff_linked' as const };
       }
@@ -2588,6 +2591,9 @@ router.post('/invitations/:id/accept', requireAuth, (req: AuthRequest, res: Resp
   }
   if (outcome.kind === 'owner') return res.status(409).json({ error: 'Ya eres propietario de este negocio.' });
   if (outcome.kind === 'staff_linked') return res.status(409).json({ error: 'Este perfil de trabajador ya está vinculado a otra cuenta.' });
+  if (outcome.kind === 'staff_inactive') {
+    return res.status(409).json({ error: 'Este perfil de trabajador está inactivo. Solicita una nueva invitación.' });
+  }
 
   if (outcome.inviterId) {
     try {
@@ -2646,6 +2652,10 @@ router.delete('/business/staff/:id', requireAuth, (req: AuthRequest, res: Respon
     if (currentMember?.role === 'OWNER') return false;
 
     db.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(req.params.id);
+    db.prepare(`
+      UPDATE business_invitations SET status = 'revoked', responded_at = ?
+      WHERE staff_id = ? AND status = 'pending'
+    `).run(new Date().toISOString(), req.params.id);
     if (staff.user_id) {
       db.prepare(`
         UPDATE business_members SET is_active = 0

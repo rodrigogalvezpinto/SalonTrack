@@ -4599,6 +4599,12 @@ async function runIntegrationTests() {
       const previousMembership = sqlite.prepare(`
         SELECT id, role, is_active, created_at FROM business_members WHERE business_id = ? AND user_id = ?
       `).get(businessId, invitee.user.id) as { id: string; role: string; is_active: number; created_at: string } | undefined;
+      const previousCustomerMembership = sqlite.prepare(`
+        SELECT id, role, is_active, created_at FROM business_members WHERE business_id = ? AND user_id = ?
+      `).get(businessId, customer.user.id) as { id: string; role: string; is_active: number; created_at: string } | undefined;
+      if (previousCustomerMembership) {
+        sqlite.prepare('DELETE FROM business_members WHERE id = ?').run(previousCustomerMembership.id);
+      }
       const previousOtherMembership = sqlite.prepare(`
         SELECT id, role, is_active, created_at FROM business_members
         WHERE business_id = 'biz_route68_barber' AND user_id = ?
@@ -4634,6 +4640,15 @@ async function runIntegrationTests() {
         `).run(id, `TEAM-${id}`, businessId, staffId, customer.user.id, now, now);
         bookingIds.push(id);
         return id;
+      };
+      const latestInvitationToken = () => {
+        const lines = readFileSync(join(mailDirectory, 'outbox.jsonl'), 'utf8').trim().split('\n');
+        const email = JSON.parse(lines[lines.length - 1]) as { body: string };
+        const href = email.body.match(/href="([^"]+)"/)?.[1]?.replace(/&amp;/g, '&');
+        assert.ok(href);
+        const token = new URL(href).searchParams.get('invitation_token');
+        assert.ok(token);
+        return token;
       };
 
       try {
@@ -4786,6 +4801,56 @@ async function runIntegrationTests() {
         assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(otherBooking), unchanged);
         assert.strictEqual((await requestJson('/api/business/my', 'GET', invitee.token, undefined, activeBusinessHeader)).status, 404);
 
+        const staffToDeleteResponse = await sendJson('/api/business/staff', {
+          name: 'Invitación al eliminar profesional',
+          email: 'cliente@gmail.com',
+        }, owner.token);
+        assert.strictEqual(staffToDeleteResponse.status, 201);
+        const staffToDelete = await staffToDeleteResponse.json() as {
+          staff_id: string;
+          invitation: { id: string };
+        };
+        staffIds.push(staffToDelete.staff_id);
+        invitationIds.push(staffToDelete.invitation.id);
+        const staffToDeleteToken = latestInvitationToken();
+        assert.strictEqual((await requestJson(`/api/business/staff/${staffToDelete.staff_id}`, 'DELETE', owner.token)).status, 200);
+        const revokedOnStaffDelete = sqlite.prepare('SELECT status, responded_at FROM business_invitations WHERE id = ?')
+          .get(staffToDelete.invitation.id) as { status: string; responded_at: string };
+        assert.strictEqual(revokedOnStaffDelete.status, 'revoked');
+        assert.ok(revokedOnStaffDelete.responded_at);
+        const acceptAfterStaffDelete = await sendJson(
+          `/api/invitations/${staffToDelete.invitation.id}/accept`,
+          { token: staffToDeleteToken },
+          customer.token,
+        );
+        assert.strictEqual(acceptAfterStaffDelete.status, 409);
+        assert.strictEqual(sqlite.prepare('SELECT 1 FROM business_members WHERE business_id = ? AND user_id = ?')
+          .get(businessId, customer.user.id), undefined);
+
+        const inactiveStaffResponse = await sendJson('/api/business/staff', {
+          name: 'Invitación con perfil inactivo',
+          email: 'cliente@gmail.com',
+        }, owner.token);
+        assert.strictEqual(inactiveStaffResponse.status, 201);
+        const inactiveStaffInvite = await inactiveStaffResponse.json() as {
+          staff_id: string;
+          invitation: { id: string };
+        };
+        staffIds.push(inactiveStaffInvite.staff_id);
+        invitationIds.push(inactiveStaffInvite.invitation.id);
+        const inactiveStaffToken = latestInvitationToken();
+        sqlite.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(inactiveStaffInvite.staff_id);
+        const acceptInactiveStaff = await sendJson(
+          `/api/invitations/${inactiveStaffInvite.invitation.id}/accept`,
+          { token: inactiveStaffToken },
+          customer.token,
+        );
+        assert.strictEqual(acceptInactiveStaff.status, 409);
+        assert.strictEqual((sqlite.prepare('SELECT status FROM business_invitations WHERE id = ?')
+          .get(inactiveStaffInvite.invitation.id) as { status: string }).status, 'pending');
+        assert.strictEqual(sqlite.prepare('SELECT 1 FROM business_members WHERE business_id = ? AND user_id = ?')
+          .get(businessId, customer.user.id), undefined);
+
         const revoked = await sendJson('/api/business/staff', { name: 'Invitación revocable' }, owner.token);
         assert.strictEqual(revoked.status, 201);
         const revokedBody = await revoked.json() as { staff_id: string };
@@ -4830,6 +4895,20 @@ async function runIntegrationTests() {
             INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
           `).run(previousMembership.id, businessId, invitee.user.id, previousMembership.role, previousMembership.is_active, previousMembership.created_at);
+        }
+        sqlite.prepare('DELETE FROM business_members WHERE business_id = ? AND user_id = ?').run(businessId, customer.user.id);
+        if (previousCustomerMembership) {
+          sqlite.prepare(`
+            INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            previousCustomerMembership.id,
+            businessId,
+            customer.user.id,
+            previousCustomerMembership.role,
+            previousCustomerMembership.is_active,
+            previousCustomerMembership.created_at,
+          );
         }
         sqlite.prepare('DELETE FROM business_members WHERE business_id = ? AND user_id = ?')
           .run('biz_route68_barber', invitee.user.id);
