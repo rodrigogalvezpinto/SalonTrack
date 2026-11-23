@@ -1451,18 +1451,28 @@ async function runIntegrationTests() {
     });
 
     await integrationTest('Suscripción vencida: CRM y negocio quedan de solo lectura, reservas siguen activas', async () => {
+      const email = `subscription-expired-${generateId('user')}@example.test`;
       const registeredResponse = await sendJson('/api/auth/register', {
-        email: `subscription-expired-${generateId('user')}@example.test`,
+        email,
         password: 'SubscriptionTest123!',
         full_name: 'Profesional de prueba de suscripción',
         business_name: `Negocio prueba ${generateId('business')}`,
         phone: '+56912345021',
       });
       assert.strictEqual(registeredResponse.status, 201);
-      const registered = await registeredResponse.json() as { token: string; user: { id: string } };
+      const registered = await registeredResponse.json() as {
+        token: string;
+        user: {
+          id: string;
+          subscription: { status: string; is_active: boolean; days_remaining: number };
+        };
+      };
       const userId = registered.user.id;
       const paymentRef = `SUBSCRIPTION_TEST_${generateId('pay')}`;
       const providerPaymentId = `sim_${paymentRef}`;
+      assert.strictEqual(registered.user.subscription.status, 'trial');
+      assert.strictEqual(registered.user.subscription.is_active, true);
+      assert.ok(registered.user.subscription.days_remaining > 0);
 
       try {
         const existingClientResponse = await sendJson('/api/clients', {
@@ -1477,7 +1487,33 @@ async function runIntegrationTests() {
         ).get(existingClient.id) as { id: string };
 
         const expiredAt = new Date(Date.now() - 60_000).toISOString();
-        sqlite.prepare('UPDATE subscriptions SET expiration_date = ? WHERE user_id = ?').run(expiredAt, userId);
+        sqlite.prepare('UPDATE subscriptions SET status = ?, expiration_date = ? WHERE user_id = ?')
+          .run('active', expiredAt, userId);
+        const expiredSession = await requestJson('/api/auth/me', 'GET', registered.token);
+        assert.strictEqual(expiredSession.status, 200);
+        const expiredSessionBody = await expiredSession.json() as {
+          user: { subscription: { status: string; is_active: boolean; days_remaining: number } };
+        };
+        assert.strictEqual(expiredSessionBody.user.subscription.status, 'active');
+        assert.strictEqual(expiredSessionBody.user.subscription.is_active, false);
+        assert.strictEqual(expiredSessionBody.user.subscription.days_remaining, 0);
+
+        const expiredLogin = await sendJson('/api/auth/login', {
+          email,
+          password: 'SubscriptionTest123!',
+        });
+        assert.strictEqual(expiredLogin.status, 200);
+        assert.strictEqual(
+          (await expiredLogin.json() as { user: { subscription: { is_active: boolean } } })
+            .user.subscription.is_active,
+          false
+        );
+        const expiredCurrent = await requestJson('/api/subscriptions/current', 'GET', registered.token);
+        assert.strictEqual(expiredCurrent.status, 200);
+        assert.strictEqual(
+          (await expiredCurrent.json() as { subscription: { is_active: boolean } }).subscription.is_active,
+          false
+        );
         const expiredError = {
           error: 'Tu licencia de SalonTrack venció. Renuévala en Configuración para seguir editando.',
           code: 'SUBSCRIPTION_EXPIRED',

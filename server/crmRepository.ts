@@ -468,14 +468,14 @@ export function getSubscription(userId: string): Subscription | null {
   `).get(userId) as Subscription | undefined) || null;
 }
 
-export function getLatestSubscriptionRecord(userId: string) {
-  return getSqliteDb().prepare(`
+export function getLatestSubscriptionRecord(userId: string): Subscription | null {
+  return (getSqliteDb().prepare(`
     SELECT ${SUBSCRIPTION_COLUMNS}
     FROM subscriptions
     WHERE user_id = ?
     ORDER BY created_at DESC
     LIMIT 1
-  `).get(userId) || null;
+  `).get(userId) as Subscription | undefined) || null;
 }
 
 export function createTrialSubscription(userId: string, startDate = new Date().toISOString(), expirationDate?: string): Subscription {
