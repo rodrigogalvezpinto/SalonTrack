@@ -53,7 +53,7 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
 
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string; email: string; roles?: string[] };
+    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string; email: string };
     const sqlite = getSqliteDb();
     const userRow = sqlite.prepare('SELECT id, email, is_active FROM users WHERE id = ?').get(decoded.userId) as any;
 
@@ -63,7 +63,7 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
 
     req.userId = userRow.id;
     req.userEmail = userRow.email;
-    req.userRoles = decoded.roles || getUserRoles(userRow.id);
+    req.userRoles = getUserRoles(userRow.id);
 
     next();
   } catch (err) {
@@ -76,12 +76,12 @@ export function optionalAuth(req: AuthRequest, _res: Response, next: NextFunctio
   if (!authHeader?.startsWith('Bearer ')) return next();
 
   try {
-    const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET) as { userId: string; email: string; roles?: string[] };
+    const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET) as { userId: string; email: string };
     const userRow = getSqliteDb().prepare('SELECT id, email, is_active FROM users WHERE id = ?').get(decoded.userId) as any;
     if (userRow?.is_active) {
       req.userId = userRow.id;
       req.userEmail = userRow.email;
-      req.userRoles = decoded.roles || getUserRoles(userRow.id);
+      req.userRoles = getUserRoles(userRow.id);
     }
   } catch {
     // Invalid or expired optional credentials are treated as an anonymous request.
@@ -94,7 +94,8 @@ export function requireRole(...allowedRoles: string[]) {
     if (!req.userId) {
       return res.status(401).json({ error: 'No autenticado.' });
     }
-    const roles = req.userRoles || getUserRoles(req.userId);
+    const roles = getUserRoles(req.userId);
+    req.userRoles = roles;
     const hasRole = allowedRoles.some(r => roles.includes(r));
     if (!hasRole) {
       return res.status(403).json({ error: 'Acceso denegado. Permisos insuficientes para esta operación.' });
