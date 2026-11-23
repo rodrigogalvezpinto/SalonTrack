@@ -393,6 +393,7 @@ router.post('/auth/register', (req, res) => {
         id: userId,
         email: email.trim().toLowerCase(),
         roles,
+        subscription: withSubscriptionStatus(getLatestSubscriptionRecord(userId)),
         profile: {
           id: profileId,
           user_id: userId,
@@ -440,7 +441,7 @@ router.post('/auth/login', (req, res) => {
     }
 
     const profile = getProfile(user.id);
-    const subscription = getLatestSubscriptionRecord(user.id);
+    const subscription = withSubscriptionStatus(getLatestSubscriptionRecord(user.id));
     const roles = getUserRoles(user.id);
 
     // Also get business owned or staffed
@@ -482,7 +483,7 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
   }
 
   const profile = getProfile(req.userId || '');
-  const subscription = getLatestSubscriptionRecord(req.userId || '');
+  const subscription = withSubscriptionStatus(getLatestSubscriptionRecord(req.userId || ''));
   const roles = getUserRoles(user.id);
 
   const business = sqlite.prepare(`
@@ -2773,6 +2774,21 @@ function parseSubscriptionExternalReference(externalReference: string): { userId
   return { userId: match[1], planId: match[2] };
 }
 
+function withSubscriptionStatus(subscription: Subscription | null) {
+  if (!subscription) return null;
+
+  const expirationDate = new Date(subscription.expiration_date);
+  const now = new Date();
+  const daysRemaining = Math.max(0, Math.ceil((expirationDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
+  const isExpired = expirationDate.getTime() < now.getTime();
+
+  return {
+    ...subscription,
+    days_remaining: daysRemaining,
+    is_active: !isExpired && (subscription.status === 'active' || subscription.status === 'trial'),
+  };
+}
+
 type MercadoPagoApplicationResult =
   | { kind: 'activated'; subscription: NonNullable<ReturnType<typeof getSubscription>>; message: string }
   | { kind: 'duplicate'; subscription: NonNullable<ReturnType<typeof getSubscription>>; message: string }
@@ -2823,19 +2839,10 @@ router.get('/subscriptions/plans', (req, res) => {
 router.get('/subscriptions/current', requireAuth, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const sub = getOrCreateSubscription(userId);
-
-  const expDate = new Date(sub.expiration_date);
-  const now = new Date();
-  const daysRemaining = Math.max(0, Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
-  const isExpired = expDate.getTime() < now.getTime();
   const userPayments = listSubscriptionPayments(userId);
 
   return res.json({
-    subscription: {
-      ...sub,
-      days_remaining: daysRemaining,
-      is_active: !isExpired && (sub.status === 'active' || sub.status === 'trial'),
-    },
+    subscription: withSubscriptionStatus(sub),
     payments: userPayments,
   });
 });
@@ -2957,7 +2964,7 @@ router.post('/payments/confirm', requireAuth, async (req: AuthRequest, res: Resp
     if (result.reason === 'not_approved') return res.status(409).json({ status: payment.status });
     return paymentNotFound();
   }
-  return res.json({ message: result.message, subscription: result.subscription });
+  return res.json({ message: result.message, subscription: withSubscriptionStatus(result.subscription) });
 });
 
 router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, res: Response) => {
@@ -2987,7 +2994,7 @@ router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, r
     const baseDate = new Date(subscription.expiration_date);
     return res.json({
       message: `¡Licencia activada con éxito! Acceso habilitado hasta el ${baseDate.toLocaleDateString('es-CL')}.`,
-      subscription,
+      subscription: withSubscriptionStatus(subscription),
       payment,
     });
   } catch (err: any) {
@@ -3004,7 +3011,7 @@ router.get('/backup/export', requireAuth, (req: AuthRequest, res: Response) => {
     clients: listClients(userId),
     services: listServices(userId),
     contact_logs: listContactLogs(userId),
-    subscription: getSubscription(userId),
+    subscription: withSubscriptionStatus(getSubscription(userId)),
     payments: listPayments(userId),
     exported_at: new Date().toISOString(),
   };

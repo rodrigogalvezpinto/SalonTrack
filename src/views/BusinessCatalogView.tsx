@@ -28,7 +28,14 @@ export const BusinessCatalogView: React.FC = () => {
   const [services, setServices] = useState<CatalogService[]>([]);
   const [isServiceModalOpen, setIsServiceModalOpen] = useState<boolean>(false);
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
-  const [serviceForm, setServiceForm] = useState({
+  const [serviceForm, setServiceForm] = useState<{
+    name: string;
+    description: string;
+    duration_min: number;
+    price_clp: number;
+    buffer_min: number | '';
+    is_active: boolean;
+  }>({
     name: '',
     description: '',
     duration_min: 45,
@@ -115,16 +122,17 @@ export const BusinessCatalogView: React.FC = () => {
   // Service CRUD
   const handleSaveService = async (e: React.FormEvent) => {
     e.preventDefault();
+    const servicePayload = { ...serviceForm, buffer_min: Number(serviceForm.buffer_min) };
     try {
       if (editingServiceId) {
         await apiRequest(`/api/business/services/${editingServiceId}`, {
           method: 'PUT',
-          body: JSON.stringify(serviceForm)
+          body: JSON.stringify(servicePayload)
         });
       } else {
         await apiRequest('/api/business/services', {
           method: 'POST',
-          body: JSON.stringify(serviceForm)
+          body: JSON.stringify(servicePayload)
         });
       }
       setIsServiceModalOpen(false);
@@ -674,7 +682,7 @@ export const BusinessCatalogView: React.FC = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">Precio en CLP ($)</label>
                   <input
@@ -697,6 +705,22 @@ export const BusinessCatalogView: React.FC = () => {
                     required
                     value={serviceForm.duration_min}
                     onChange={(e) => setServiceForm({ ...serviceForm, duration_min: Number(e.target.value) })}
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-rose-600 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Margen de limpieza (min)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="5"
+                    required
+                    value={serviceForm.buffer_min}
+                    onChange={(e) => setServiceForm({
+                      ...serviceForm,
+                      buffer_min: e.target.value === '' ? '' : Number(e.target.value),
+                    })}
                     className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-rose-600 font-mono"
                   />
                 </div>
