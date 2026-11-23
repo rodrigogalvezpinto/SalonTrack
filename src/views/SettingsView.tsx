@@ -25,6 +25,19 @@ interface SettingsViewProps {
 
 export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) => {
   const { profile, subscription, user, updateProfile, reloadSession } = useAuth();
+  const [billingEnabled, setBillingEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let isCurrent = true;
+    apiRequest<{ billing_enabled: boolean }>('/api/subscriptions/plans')
+      .then((response) => {
+        if (isCurrent) setBillingEnabled(response.billing_enabled === true);
+      })
+      .catch(() => {});
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   // Salon profile fields
   const [fullName, setFullName] = useState(profile?.full_name || '');
@@ -335,19 +348,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
         </div>
 
         {/* License & Subscription Status */}
-        {subscription?.billing_enabled === false ? (
+        {billingEnabled === false ? (
           <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-xs space-y-2">
             <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
               <Crown className="w-4 h-4 text-amber-500" />
               <span>Gratis durante el lanzamiento</span>
             </h3>
             <p className="text-sm text-slate-600">
-              {subscription.expiration_date && new Date(subscription.expiration_date) > new Date()
+              {subscription?.expiration_date && new Date(subscription.expiration_date) > new Date()
                 ? `Tus 3 meses gratis terminan el ${new Intl.DateTimeFormat('es-CL').format(new Date(subscription.expiration_date))}.`
                 : 'Sigues con acceso gratis mientras no activemos los planes.'}
             </p>
           </div>
-        ) : (
+        ) : billingEnabled === true ? (
           <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-xs space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
@@ -383,7 +396,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
               </button>
             </div>
           </div>
-        )}
+        ) : null}
 
         {/* Privacy & Backup */}
         <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">
