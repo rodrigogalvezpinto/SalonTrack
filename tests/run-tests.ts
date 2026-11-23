@@ -667,6 +667,7 @@ async function runIntegrationTests() {
       });
       const other = await otherResponse.json() as { token: string };
       const paymentRef = `CRM_${generateId('pay')}`;
+      const providerPaymentId = `sim_${paymentRef}`;
 
       const activation = await sendJson('/api/subscriptions/activate-license', {
         plan_id: 'pro_quarterly',
@@ -678,7 +679,7 @@ async function runIntegrationTests() {
         SELECT user_id, type, provider, provider_payment_id, status, payment_method, metadata
         FROM payments
         WHERE provider_payment_id = ?
-      `).get(paymentRef) as any;
+      `).get(providerPaymentId) as any;
       assert.strictEqual(paymentRow.user_id, owner.user.id);
       assert.strictEqual(paymentRow.type, 'subscription_payment');
       assert.strictEqual(paymentRow.provider, 'mercadopago');
@@ -695,7 +696,7 @@ async function runIntegrationTests() {
         message: 'Este pago ya fue procesado.',
         payment: activationBody.payment,
       });
-      assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count, 1);
+      assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(providerPaymentId) as any).count, 1);
 
       const crossUser = await sendJson('/api/subscriptions/activate-license', {
         plan_id: 'pro_quarterly',
@@ -706,7 +707,7 @@ async function runIntegrationTests() {
 
       const current = await requestJson('/api/subscriptions/current', 'GET', owner.token);
       const currentBody = await current.json() as any;
-      assert.ok(currentBody.payments.some((payment: any) => payment.provider_payment_id === paymentRef));
+      assert.ok(currentBody.payments.some((payment: any) => payment.provider_payment_id === providerPaymentId));
     });
 
     await integrationTest('Pagos simulados: bloqueo en producción y activación explícita para demos', async () => {
@@ -723,6 +724,7 @@ async function runIntegrationTests() {
       const userId = registered.user.id;
       const bookingId = generateId('payment_gate_booking');
       const paymentRef = `PRODUCTION_GATE_${generateId('pay')}`;
+      const providerPaymentId = `sim_${paymentRef}`;
       const now = new Date().toISOString();
       const originalNodeEnv = process.env.NODE_ENV;
       const originalAllowSimulatedPayments = process.env.ALLOW_SIMULATED_PAYMENTS;
@@ -767,7 +769,7 @@ async function runIntegrationTests() {
           subscriptionBefore
         );
         assert.strictEqual(
-          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count,
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(providerPaymentId) as any).count,
           0
         );
 
@@ -792,7 +794,7 @@ async function runIntegrationTests() {
         }, registered.token);
         assert.strictEqual(allowedActivation.status, 200);
         assert.strictEqual(
-          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count,
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(providerPaymentId) as any).count,
           1
         );
       } finally {
@@ -1048,13 +1050,37 @@ async function runIntegrationTests() {
         assert.ok(new Date(afterConfirm.expiration_date) > new Date(beforeConfirm.expiration_date));
         assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 2);
 
+        const simulatedCollision = await sendJson('/api/subscriptions/activate-license', {
+          plan_id: 'pro_quarterly',
+          payment_ref: 'mp_123',
+        }, other.token);
+        assert.strictEqual(simulatedCollision.status, 200);
+        const simulatedPayment = sqlite.prepare(
+          'SELECT user_id, payment_method FROM payments WHERE provider_payment_id = ?'
+        ).get('sim_mp_123') as { user_id: string; payment_method: string };
+        assert.strictEqual(simulatedPayment.user_id, other.user.id);
+        assert.strictEqual(simulatedPayment.payment_method, 'simulated_online');
+
+        fakePayments.set('123', makePayment('123'));
+        const realPaymentAfterSimulation = await sendJson('/api/payments/confirm', {
+          payment_id: '123',
+        }, owner.token);
+        assert.strictEqual(realPaymentAfterSimulation.status, 200);
+        const realPayment = sqlite.prepare(
+          'SELECT user_id FROM payments WHERE provider_payment_id = ?'
+        ).get('mp_123') as { user_id: string };
+        assert.strictEqual(realPayment.user_id, owner.user.id);
+        const afterCollisionPayment = getSubscriptionState(owner.user.id);
+        assert.ok(new Date(afterCollisionPayment.expiration_date) > new Date(afterConfirm.expiration_date));
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 3);
+
         const repeatedConfirmation = await sendJson('/api/payments/confirm', {
           payment_id: confirmPaymentId,
         }, owner.token);
         assert.strictEqual(repeatedConfirmation.status, 200);
         assert.strictEqual((await repeatedConfirmation.json() as any).message, 'Este pago ya fue procesado.');
-        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterConfirm);
-        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 2);
+        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterCollisionPayment);
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 3);
 
         const pendingConfirmationId = 'CONFIRMPENDING123';
         fakePayments.set(pendingConfirmationId, makePayment(pendingConfirmationId, 'pending'));
@@ -1063,7 +1089,7 @@ async function runIntegrationTests() {
         }, owner.token);
         assert.strictEqual(pendingConfirmation.status, 409);
         assert.deepStrictEqual(await pendingConfirmation.json(), { status: 'pending' });
-        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterConfirm);
+        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterCollisionPayment);
 
         const originalWebhookSecret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
         const originalNodeEnv = process.env.NODE_ENV;
@@ -1168,6 +1194,7 @@ async function runIntegrationTests() {
       const registered = await registeredResponse.json() as { token: string; user: { id: string } };
       const userId = registered.user.id;
       const paymentRef = `SUBSCRIPTION_TEST_${generateId('pay')}`;
+      const providerPaymentId = `sim_${paymentRef}`;
 
       try {
         const existingClientResponse = await sendJson('/api/clients', {
@@ -1436,7 +1463,7 @@ async function runIntegrationTests() {
           }
         }
       } finally {
-        sqlite.prepare('DELETE FROM payments WHERE provider_payment_id = ?').run(paymentRef);
+        sqlite.prepare('DELETE FROM payments WHERE provider_payment_id = ?').run(providerPaymentId);
         const business = sqlite.prepare('SELECT id FROM businesses WHERE owner_id = ?').get(userId) as { id: string } | undefined;
         if (business) sqlite.prepare('DELETE FROM businesses WHERE id = ?').run(business.id);
         sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);

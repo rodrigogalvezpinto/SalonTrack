@@ -2787,7 +2787,7 @@ router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, r
     const plan = PLANS[plan_id];
     if (!plan) return res.status(400).json({ error: 'Plan seleccionado no existe.' });
 
-    const providerPaymentId = payment_ref || `MP_${Date.now()}`;
+    const providerPaymentId = `sim_${payment_ref || Date.now()}`;
     const result = activateLicense(
       userId,
       plan_id as Subscription['plan'],
