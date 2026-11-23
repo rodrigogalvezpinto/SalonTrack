@@ -99,15 +99,26 @@ test('Rate limiter: aplica ventanas fijas y permite reiniciar todos los contador
   Date.now = () => now;
   resetRateLimits();
   try {
-    const limiter = createRateLimiter({ windowMs: 60_000, max: 2 });
+    const limiter = createRateLimiter({ windowMs: 100, max: 2 });
     assert.deepStrictEqual(limiter.hit('ip'), { limited: false, retryAfterSec: 0 });
     assert.deepStrictEqual(limiter.hit('ip'), { limited: false, retryAfterSec: 0 });
     const blocked = limiter.hit('ip');
     assert.strictEqual(blocked.limited, true);
     assert.ok(blocked.retryAfterSec > 0);
 
-    now += 60_000;
+    now += 100;
     assert.deepStrictEqual(limiter.hit('ip'), { limited: false, retryAfterSec: 0 });
+
+    const boundedLimiter = createRateLimiter({ windowMs: 100, max: 20, maxEntries: 3 });
+    for (let index = 0; index < 10; index++) {
+      boundedLimiter.hit(`ip-${index}`);
+      assert.ok(boundedLimiter.size() <= 3);
+    }
+    assert.strictEqual(boundedLimiter.size(), 3);
+    now += 100;
+    boundedLimiter.check('missing');
+    assert.strictEqual(boundedLimiter.size(), 0);
+
     resetRateLimits();
     assert.deepStrictEqual(limiter.hit('ip'), { limited: false, retryAfterSec: 0 });
   } finally {

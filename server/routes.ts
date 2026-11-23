@@ -402,7 +402,7 @@ router.post('/auth/login', (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
     const ip = getClientIp(req);
-    const loginKey = `${ip}|${normalizedEmail}`;
+    const loginKey = `${ip}|${normalizedEmail.slice(0, 254)}`;
     const emailLimit = loginEmailRateLimiter.check(loginKey);
     const ipLimit = loginIpRateLimiter.check(ip);
     if (emailLimit.limited || ipLimit.limited) {

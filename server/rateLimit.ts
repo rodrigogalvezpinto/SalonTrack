@@ -6,6 +6,7 @@ export interface RateLimitResult {
 interface RateLimitOptions {
   windowMs: number;
   max: number;
+  maxEntries?: number;
 }
 
 interface WindowEntry {
@@ -17,24 +18,42 @@ export interface RateLimiter {
   hit(key: string): RateLimitResult;
   check(key: string): RateLimitResult;
   reset(key: string): void;
+  size(): number;
 }
 
 const limitStates = new Set<Map<string, WindowEntry>>();
 
-export function createRateLimiter({ windowMs, max }: RateLimitOptions): RateLimiter {
-  if (!Number.isFinite(windowMs) || windowMs <= 0 || !Number.isInteger(max) || max <= 0) {
-    throw new RangeError('Rate limiter requires a positive window and a positive integer maximum.');
+export function createRateLimiter({ windowMs, max, maxEntries = 10_000 }: RateLimitOptions): RateLimiter {
+  if (
+    !Number.isFinite(windowMs) ||
+    windowMs <= 0 ||
+    !Number.isInteger(max) ||
+    max <= 0 ||
+    !Number.isInteger(maxEntries) ||
+    maxEntries <= 0
+  ) {
+    throw new RangeError('Rate limiter requires positive window, request, and entry limits.');
   }
 
   const entries = new Map<string, WindowEntry>();
   limitStates.add(entries);
+  let lastSweepAt = Date.now();
+
+  const isExpired = (entry: WindowEntry, now: number) => now - entry.startedAt >= windowMs;
+
+  const sweepExpiredEntries = (now: number) => {
+    if (now - lastSweepAt < windowMs) return;
+
+    for (const [entryKey, entry] of entries) {
+      if (isExpired(entry, now)) entries.delete(entryKey);
+    }
+    lastSweepAt = now;
+  };
 
   const checkAt = (key: string, now: number): RateLimitResult => {
-    for (const [entryKey, entry] of entries) {
-      if (now - entry.startedAt >= windowMs) {
-        entries.delete(entryKey);
-      }
-    }
+    const requestedEntry = entries.get(key);
+    if (requestedEntry && isExpired(requestedEntry, now)) entries.delete(key);
+    sweepExpiredEntries(now);
 
     const entry = entries.get(key);
     if (!entry || entry.count < max) {
@@ -55,7 +74,17 @@ export function createRateLimiter({ windowMs, max }: RateLimitOptions): RateLimi
 
       const entry = entries.get(key);
       if (entry) entry.count += 1;
-      else entries.set(key, { startedAt: now, count: 1 });
+      else {
+        if (entries.size >= maxEntries) {
+          sweepExpiredEntries(now);
+          while (entries.size >= maxEntries) {
+            const oldestKey = entries.keys().next().value as string | undefined;
+            if (oldestKey === undefined) break;
+            entries.delete(oldestKey);
+          }
+        }
+        entries.set(key, { startedAt: now, count: 1 });
+      }
       return result;
     },
     check(key) {
@@ -63,6 +92,9 @@ export function createRateLimiter({ windowMs, max }: RateLimitOptions): RateLimi
     },
     reset(key) {
       entries.delete(key);
+    },
+    size() {
+      return entries.size;
     },
   };
 }
