@@ -6,6 +6,7 @@ import apiRouter from './server/routes.js';
 import { seedDemoDataIfEmpty } from './server/auth.js';
 import { emailConfigured } from './server/adapters/email.js';
 import { mercadoPagoConfigured } from './server/adapters/mercadoPago.js';
+import { securityHeadersMiddleware } from './server/securityHeaders.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,18 +29,33 @@ async function startServer() {
   }
 
   const app = express();
+  app.disable('x-powered-by');
+  const trustProxy = process.env.TRUST_PROXY;
+  if (trustProxy !== undefined) {
+    const trimmedTrustProxy = trustProxy.trim();
+    const numericTrustProxy = Number(trimmedTrustProxy);
+    if (trustProxy === 'true') {
+      app.set('trust proxy', true);
+    } else if (trimmedTrustProxy !== '' && Number.isFinite(numericTrustProxy)) {
+      app.set('trust proxy', numericTrustProxy);
+    } else {
+      app.set('trust proxy', trustProxy);
+    }
+  }
+  app.use(securityHeadersMiddleware);
   
   // Parse command line arguments if provided (e.g. --port 3000 --host 0.0.0.0)
   const portIndex = process.argv.indexOf('--port');
   const portArg = portIndex !== -1 ? process.argv[portIndex + 1] : undefined;
-  // Always prioritize command line --port argument and enforce port 3000 over system 8080
-  const PORT = parseInt(portArg || (process.env.PORT && process.env.PORT !== '8080' ? process.env.PORT : '3000'), 10);
+  const isProd = process.env.NODE_ENV === 'production';
+  const defaultPort = isProd
+    ? process.env.PORT || '3000'
+    : process.env.PORT && process.env.PORT !== '8080' ? process.env.PORT : '3000';
+  const PORT = parseInt(portArg || defaultPort, 10);
 
   const hostIndex = process.argv.indexOf('--host');
   const hostArg = hostIndex !== -1 ? process.argv[hostIndex + 1] : undefined;
   const HOST = hostArg || process.env.HOST || '0.0.0.0';
-
-  const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));

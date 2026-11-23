@@ -45,8 +45,52 @@ import {
   verifyWebhookSignature,
   type MercadoPagoPayment,
 } from './adapters/mercadoPago.js';
+import { createRateLimiter } from './rateLimit.js';
 
 const router = Router();
+
+const AUTH_LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_LOGIN_EMAIL_MAX_FAILURES = 10;
+const AUTH_LOGIN_IP_MAX_FAILURES = 50;
+const AUTH_REGISTER_WINDOW_MS = 60 * 60 * 1000;
+const AUTH_REGISTER_MAX_REQUESTS_PER_IP = 10;
+const AUTH_FORGOT_PASSWORD_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_FORGOT_PASSWORD_MAX_REQUESTS_PER_IP = 10;
+const AUTH_RESET_PASSWORD_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_RESET_PASSWORD_MAX_REQUESTS_PER_IP = 20;
+
+const loginEmailRateLimiter = createRateLimiter({
+  windowMs: AUTH_LOGIN_WINDOW_MS,
+  max: AUTH_LOGIN_EMAIL_MAX_FAILURES,
+});
+const loginIpRateLimiter = createRateLimiter({
+  windowMs: AUTH_LOGIN_WINDOW_MS,
+  max: AUTH_LOGIN_IP_MAX_FAILURES,
+});
+const registerRateLimiter = createRateLimiter({
+  windowMs: AUTH_REGISTER_WINDOW_MS,
+  max: AUTH_REGISTER_MAX_REQUESTS_PER_IP,
+});
+const forgotPasswordRateLimiter = createRateLimiter({
+  windowMs: AUTH_FORGOT_PASSWORD_WINDOW_MS,
+  max: AUTH_FORGOT_PASSWORD_MAX_REQUESTS_PER_IP,
+});
+const resetPasswordRateLimiter = createRateLimiter({
+  windowMs: AUTH_RESET_PASSWORD_WINDOW_MS,
+  max: AUTH_RESET_PASSWORD_MAX_REQUESTS_PER_IP,
+});
+
+function sendRateLimitedResponse(res: Response, retryAfterSec: number) {
+  res.setHeader('Retry-After', String(retryAfterSec));
+  return res.status(429).json({
+    error: 'Demasiados intentos. Intenta de nuevo en unos minutos.',
+    code: 'RATE_LIMITED',
+  });
+}
+
+function getClientIp(req: Request): string {
+  return req.ip || 'unknown';
+}
 
 function subscriptionExpiredResponse(res: Response): void {
   res.status(402).json({
@@ -231,6 +275,11 @@ router.get('/demo/accounts', (req, res) => {
 // Authentication Endpoints
 // -------------------------------------------------------------
 router.post('/auth/register', (req, res) => {
+  const rateLimit = registerRateLimiter.hit(getClientIp(req));
+  if (rateLimit.limited) {
+    return sendRateLimitedResponse(res, rateLimit.retryAfterSec);
+  }
+
   try {
     const { email, password, full_name, business_name, phone, role } = req.body;
 
@@ -351,12 +400,25 @@ router.post('/auth/login', (req, res) => {
       return res.status(400).json({ error: 'Por favor ingresa tu correo y contraseña.' });
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+    const ip = getClientIp(req);
+    const loginKey = `${ip}|${normalizedEmail}`;
+    const emailLimit = loginEmailRateLimiter.check(loginKey);
+    const ipLimit = loginIpRateLimiter.check(ip);
+    if (emailLimit.limited || ipLimit.limited) {
+      return sendRateLimitedResponse(res, Math.max(emailLimit.retryAfterSec, ipLimit.retryAfterSec));
+    }
+
     const sqlite = getSqliteDb();
-    const user = sqlite.prepare('SELECT id, email, password_hash, is_active FROM users WHERE LOWER(email) = ?').get(email.trim().toLowerCase()) as any;
+    const user = sqlite.prepare('SELECT id, email, password_hash, is_active FROM users WHERE LOWER(email) = ?').get(normalizedEmail) as any;
 
     if (!user || !verifyPassword(password, user.password_hash)) {
+      loginEmailRateLimiter.hit(loginKey);
+      loginIpRateLimiter.hit(ip);
       return res.status(401).json({ error: 'Credenciales incorrectas. Verifica tu correo y contraseña.' });
     }
+
+    loginEmailRateLimiter.reset(loginKey);
 
     if (!user.is_active) {
       return res.status(403).json({ error: 'Tu cuenta ha sido suspendida. Contacta a soporte.' });
@@ -445,6 +507,11 @@ function escapeHtml(value: string): string {
 }
 
 router.post('/auth/forgot-password', (req, res) => {
+  const rateLimit = forgotPasswordRateLimiter.hit(getClientIp(req));
+  if (rateLimit.limited) {
+    return sendRateLimitedResponse(res, rateLimit.retryAfterSec);
+  }
+
   const { email } = req.body;
   const sqlite = getSqliteDb();
   const user = typeof email === 'string'
@@ -491,6 +558,11 @@ router.post('/auth/forgot-password', (req, res) => {
 });
 
 router.post('/auth/reset-password', (req, res) => {
+  const rateLimit = resetPasswordRateLimiter.hit(getClientIp(req));
+  if (rateLimit.limited) {
+    return sendRateLimitedResponse(res, rateLimit.retryAfterSec);
+  }
+
   const { token, new_password } = req.body;
   const genericError = { error: 'El enlace de recuperación no es válido o expiró.' };
   if (typeof token !== 'string' || !token) {
