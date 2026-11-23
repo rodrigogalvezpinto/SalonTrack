@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { apiRequest, getStoredToken } from '../utils/api';
 import { formatCLP, formatChileanPhone } from '../utils/formatters';
 import { requestNotificationPermission, showPushNotification, playNotificationChime } from '../utils/notifications';
+import { TeamInvitationsCard } from '../components/TeamInvitationsCard';
 import { 
   Settings, 
   Crown, 
@@ -166,6 +167,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
           Personaliza tus datos, mensajes de WhatsApp, notificaciones push y estado de licencia.
         </p>
       </div>
+
+      <TeamInvitationsCard />
 
       <form onSubmit={handleSaveAll} className="space-y-6">
         {/* Salon & Stylist Profile */}

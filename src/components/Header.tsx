@@ -20,13 +20,32 @@ interface HeaderProps {
   onNavigate: (view: string) => void;
 }
 
+const membershipRoleLabels: Record<string, string> = {
+  OWNER: 'Dueña/o',
+  ADMIN: 'Administración',
+  RECEPTION: 'Recepción',
+  STAFF: 'Profesional',
+  PROFESSIONAL: 'Profesional',
+};
+
 export const Header: React.FC<HeaderProps> = ({
   onNewClientClick,
   onOpenCheckout,
   onOpenDemoAccounts,
   onNavigate
 }) => {
-  const { profile, roles, isPlatformAdmin, isBusinessOwner, isStaff, isCustomer, business, logout } = useAuth();
+  const {
+    profile,
+    isPlatformAdmin,
+    isBusinessOwner,
+    isStaff,
+    isCustomer,
+    business,
+    memberships,
+    activeBusinessId,
+    switchBusiness,
+    logout,
+  } = useAuth();
 
   const getRoleLabel = () => {
     if (isPlatformAdmin) return 'Admin Plataforma';
@@ -113,6 +132,24 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Actions */}
         <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+          {memberships.length > 1 && (
+            <label className="inline-flex items-center">
+              <span className="sr-only">Negocio activo</span>
+              <select
+                aria-label="Negocio activo"
+                value={activeBusinessId || business?.id || ''}
+                onChange={(event) => void switchBusiness(event.target.value)}
+                className="max-w-36 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700"
+              >
+                {memberships.map((membership) => (
+                  <option key={membership.business_id} value={membership.business_id}>
+                    {membership.name} · {membershipRoleLabels[membership.role] || membership.role}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
           {/* Demo Accounts Switcher Button */}
           <button
             onClick={onOpenDemoAccounts}

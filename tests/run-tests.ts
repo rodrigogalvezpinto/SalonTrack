@@ -259,7 +259,7 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
     runMigrations(db);
     const recorded = db.prepare('SELECT version, checksum FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number; checksum: string }>;
-    assert.strictEqual(recorded.length, 4);
+    assert.strictEqual(recorded.length, 5);
     assert.deepStrictEqual(
       recorded.map(row => row.checksum),
       MIGRATIONS.map(migrationChecksum)
@@ -286,7 +286,7 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
 
     const brokenMigrations = [
       ...MIGRATIONS,
-      { version: 5, name: 'rota', sql: 'CREATE TABLE tmp_rota (id TEXT); SELECT * FROM tabla_inexistente;' },
+      { version: 6, name: 'rota', sql: 'CREATE TABLE tmp_rota (id TEXT); SELECT * FROM tabla_inexistente;' },
     ];
     assert.throws(() => runMigrations(db, brokenMigrations), /tabla_inexistente/);
     assert.strictEqual(
@@ -295,7 +295,7 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
       0
     );
     assert.strictEqual(
-      (db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5').get() as { count: number }).count,
+      (db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 6').get() as { count: number }).count,
       0
     );
   } finally {
@@ -615,9 +615,16 @@ async function runIntegrationTests() {
   assert.ok(address && typeof address !== 'string');
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const sqlite = getSqliteDb();
-  const requestJson = (path: string, method: string, token?: string, body?: unknown) => {
+  const requestJson = (
+    path: string,
+    method: string,
+    token?: string,
+    body?: unknown,
+    extraHeaders: Record<string, string> = {},
+  ) => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
+    Object.assign(headers, extraHeaders);
     return fetch(`${baseUrl}${path}`, {
       method,
       headers,
@@ -1731,6 +1738,12 @@ async function runIntegrationTests() {
           error: 'Tu licencia de SalonTrack venció. Renuévala en Configuración para seguir editando.',
           code: 'SUBSCRIPTION_EXPIRED',
         };
+        const expiredInvitation = await sendJson('/api/business/staff', {
+          name: 'Invitación bloqueada por licencia',
+          email: 'blocked-invitation@example.test',
+        }, registered.token);
+        assert.strictEqual(expiredInvitation.status, 402);
+        assert.deepStrictEqual(await expiredInvitation.json(), expiredError);
         const clientCount = () => (sqlite.prepare(
           'SELECT COUNT(*) AS count FROM clients WHERE user_id = ?'
         ).get(userId) as { count: number }).count;
@@ -2124,19 +2137,21 @@ async function runIntegrationTests() {
         id: string,
         status: string,
         bookingDate: string,
-        slot: { time: string; endTime: string; durationMinutes: number }
+        slot: { time: string; endTime: string; durationMinutes: number },
+        staffId = 'stf_valeria'
       ) => {
         sqlite.prepare(`
           INSERT INTO bookings (
             id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
             start_time, end_time, duration_minutes, amount_clp, modality, status,
             payment_method, payment_status, client_name, client_phone, created_at, updated_at
-          ) VALUES (?, ?, ?, 'stf_valeria', ?, ?, ?, ?, ?, ?, 25000, 'salon', ?,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 25000, 'salon', ?,
             'presential', 'pending', 'Cliente de reprogramación', '+56912345670', ?, ?)
         `).run(
           id,
           `RESCHEDULE-${id}`,
           businessId,
+          staffId,
           serviceId,
           customer.user.id,
           bookingDate,
@@ -2288,13 +2303,13 @@ async function runIntegrationTests() {
           start_time: slots[3].time,
         }, 400);
 
+        const beforeStaffReschedule = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookingIds[0]);
         const staffResponse = await sendJson(`/api/bookings/${bookingIds[0]}/reschedule`, {
           booking_date: date,
           start_time: slots[3].time,
         }, staff.token);
-        assert.strictEqual(staffResponse.status, 200);
-        assert.strictEqual((sqlite.prepare('SELECT status FROM bookings WHERE id = ?')
-          .get(bookingIds[0]) as { status: string }).status, 'PENDING');
+        assert.strictEqual(staffResponse.status, 403);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookingIds[0]), beforeStaffReschedule);
       } finally {
         for (const id of bookingIds) {
           sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(id);
@@ -2336,7 +2351,7 @@ async function runIntegrationTests() {
             start_time, end_time, duration_minutes, amount_clp, modality, status,
             payment_method, payment_status, client_name, client_phone, client_email,
             created_at, updated_at
-          ) VALUES (?, ?, ?, 'stf_valeria', 'srv_val_corte', ?, '2099-01-01',
+          ) VALUES (?, ?, ?, 'stf_camila', 'srv_val_corte', ?, '2099-01-01',
             '10:00', '11:00', 60, 25000, 'salon', ?, 'presential', 'pending', ?, ?, ?, ?, ?)
         `).run(
           id,
@@ -2691,7 +2706,7 @@ async function runIntegrationTests() {
         SELECT COUNT(*) as count FROM business_members WHERE user_id = ? AND is_active = 1
       `).get(outsider.user.id)?.count, 0);
 
-      const createBooking = (status: string) => {
+      const createBooking = (status: string, staffId = 'stf_valeria') => {
         const id = generateId('authz_booking');
         const now = new Date().toISOString();
         sqlite.prepare(`
@@ -2706,7 +2721,7 @@ async function runIntegrationTests() {
           id,
           `AUTHZ-${id}`,
           targetBusinessId,
-          'stf_valeria',
+          staffId,
           'srv_val_tintura_raiz',
           bookingCustomer.user.id,
           status,
@@ -2717,13 +2732,14 @@ async function runIntegrationTests() {
       };
 
       const bookings = {
-        confirm: createBooking('PENDING'),
+        confirm: createBooking('PENDING', 'stf_camila'),
         ownerConfirm: createBooking('PENDING'),
+        receptionConfirm: createBooking('PENDING'),
         reject: createBooking('PENDING'),
-        complete: createBooking('CONFIRMED'),
+        complete: createBooking('CONFIRMED', 'stf_camila'),
         ownerCancel: createBooking('PENDING'),
         customerCancel: createBooking('PENDING'),
-        staffCancel: createBooking('PENDING'),
+        staffCancel: createBooking('PENDING', 'stf_camila'),
       };
       const outsiders = [unrelatedOwner.token, outsider.token];
       const assertNotFound = async (response: Response) => assert.strictEqual(response.status, 404);
@@ -2753,11 +2769,51 @@ async function runIntegrationTests() {
       const staffConfirm = await postAs(`/api/bookings/${bookings.confirm}/confirm`, staff.token);
       assert.strictEqual(staffConfirm.status, 200);
       assert.strictEqual((await postAs(`/api/bookings/${bookings.confirm}/complete`, staff.token)).status, 200);
+      const otherStaffBookingBefore = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookings.ownerConfirm);
+      const ownBookings = await getAs('/api/bookings/business', staff.token);
+      const ownBookingIds = ((await ownBookings.json() as { bookings: Array<{ id: string }> }).bookings)
+        .filter(booking => Object.values(bookings).includes(booking.id))
+        .map(booking => booking.id);
+      assert.ok(ownBookingIds.includes(bookings.staffCancel));
+      assert.ok(!ownBookingIds.includes(bookings.ownerConfirm));
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.ownerConfirm}/confirm`, staff.token)).status, 403);
+      assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookings.ownerConfirm), otherStaffBookingBefore);
+      const ownerBookingBeforeCancel = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookings.ownerCancel);
+      assert.strictEqual((await postAs(`/api/bookings/${bookings.ownerCancel}/cancel`, staff.token)).status, 403);
+      assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookings.ownerCancel), ownerBookingBeforeCancel);
+      const ownerBookingBeforeComplete = sqlite.prepare('SELECT * FROM bookings WHERE id = ?')
+        .get(bookings.ownerConfirm) as { status: string };
+      sqlite.prepare("UPDATE bookings SET status = 'CONFIRMED' WHERE id = ?").run(bookings.ownerConfirm);
+      const confirmedOtherBookingBeforeComplete = sqlite.prepare('SELECT * FROM bookings WHERE id = ?')
+        .get(bookings.ownerConfirm);
+      try {
+        assert.strictEqual((await postAs(`/api/bookings/${bookings.ownerConfirm}/complete`, staff.token)).status, 403);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(bookings.ownerConfirm),
+          confirmedOtherBookingBeforeComplete,
+        );
+      } finally {
+        sqlite.prepare('UPDATE bookings SET status = ? WHERE id = ?')
+          .run(ownerBookingBeforeComplete.status, bookings.ownerConfirm);
+      }
 
       const staffMembership = sqlite.prepare(`
-        SELECT id, business_id FROM business_members
+        SELECT id, business_id, role FROM business_members
         WHERE user_id = ? AND business_id = ? AND is_active = 1 AND role = 'STAFF'
-      `).get(staff.user.id, targetBusinessId) as { id: string; business_id: string };
+      `).get(staff.user.id, targetBusinessId) as { id: string; business_id: string; role: string };
+      sqlite.prepare('UPDATE business_members SET role = ? WHERE id = ?').run('RECEPTION', staffMembership.id);
+      try {
+        const receptionList = await getAs('/api/bookings/business', staff.token);
+        const receptionIds = ((await receptionList.json() as { bookings: Array<{ id: string }> }).bookings)
+          .filter(booking => Object.values(bookings).includes(booking.id))
+          .map(booking => booking.id);
+        assert.ok(receptionIds.includes(bookings.ownerConfirm));
+        assert.strictEqual((await postAs(`/api/bookings/${bookings.receptionConfirm}/confirm`, staff.token)).status, 200);
+      } finally {
+        sqlite.prepare('UPDATE business_members SET role = ? WHERE id = ?')
+          .run(staffMembership.role, staffMembership.id);
+      }
+
       sqlite.prepare('UPDATE business_members SET business_id = ? WHERE id = ?')
         .run('biz_route68_barber', staffMembership.id);
       let crossBusinessStaffConfirm: Response;
@@ -2838,11 +2894,11 @@ async function runIntegrationTests() {
       }
 
       sqlite.prepare("UPDATE businesses SET booking_mode = 'MANUAL' WHERE id = ?").run(targetBusinessId);
-      const customerBookingSlot = await findAvailableSlots(targetBusinessId, 'srv_val_corte', 'stf_valeria');
+      const customerBookingSlot = await findAvailableSlots(targetBusinessId, 'srv_val_corte', 'stf_camila');
       const customerBookingResponse = await postAs('/api/bookings', bookingCustomer.token, {
         business_id: targetBusinessId,
         service_id: 'srv_val_corte',
-        staff_id: 'stf_valeria',
+        staff_id: 'stf_camila',
         booking_date: customerBookingSlot.date,
         start_time: customerBookingSlot.slots[0].time,
         client_name: 'Cliente autenticada',
@@ -4515,6 +4571,250 @@ async function runIntegrationTests() {
           sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(id);
           sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(id);
         }
+      }
+    });
+
+    await integrationTest('Equipo: invita, acepta, cambia de negocio y limita las citas a la profesional', async () => {
+      const sqlite = getSqliteDb();
+      const previousEnvironment = {
+        NODE_ENV: process.env.NODE_ENV,
+        BILLING_ENABLED: process.env.BILLING_ENABLED,
+        DEV_MAIL_DIR: process.env.DEV_MAIL_DIR,
+        RESEND_API_KEY: process.env.RESEND_API_KEY,
+        RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL,
+      };
+      const mailDirectory = mkdtempSync(join(tmpdir(), 'salontrack-team-invitations-'));
+      const login = async (email: string, password: string) => {
+        const response = await sendJson('/api/auth/login', { email, password });
+        assert.strictEqual(response.status, 200, `Login de ${email}: HTTP ${response.status}`);
+        return await response.json() as { token: string; user: { id: string } };
+      };
+      const owner = await login('contacto@valeriaestudio.cl', 'NuevaClaveSegura123!');
+      const invitee = await login('ignacio@barberiaroute.cl', 'Barber1234!');
+      const customer = await login('cliente@gmail.com', 'Cliente1234!');
+      const businessId = 'biz_valeria_studio';
+      const invitationIds: string[] = [];
+      const staffIds: string[] = [];
+      const bookingIds: string[] = [];
+      const previousMembership = sqlite.prepare(`
+        SELECT id, role, is_active, created_at FROM business_members WHERE business_id = ? AND user_id = ?
+      `).get(businessId, invitee.user.id) as { id: string; role: string; is_active: number; created_at: string } | undefined;
+      const previousOtherMembership = sqlite.prepare(`
+        SELECT id, role, is_active, created_at FROM business_members
+        WHERE business_id = 'biz_route68_barber' AND user_id = ?
+      `).get(invitee.user.id) as { id: string; role: string; is_active: number; created_at: string } | undefined;
+      if (previousMembership) sqlite.prepare('UPDATE business_members SET is_active = 0 WHERE id = ?').run(previousMembership.id);
+      else sqlite.prepare(`
+        INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+        VALUES (?, ?, ?, 'STAFF', 0, ?)
+      `).run(generateId('bm'), businessId, invitee.user.id, new Date().toISOString());
+      if (previousOtherMembership) {
+        sqlite.prepare('UPDATE business_members SET role = ?, is_active = 1 WHERE id = ?')
+          .run('OWNER', previousOtherMembership.id);
+      } else {
+        sqlite.prepare(`
+          INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+          VALUES (?, 'biz_route68_barber', ?, 'OWNER', 1, ?)
+        `).run(generateId('bm'), invitee.user.id, new Date().toISOString());
+      }
+      const hadStaffRole = Boolean(sqlite.prepare(`
+        SELECT 1 FROM user_roles WHERE user_id = ? AND role = 'BUSINESS_STAFF'
+      `).get(invitee.user.id));
+      const createBooking = (staffId: string) => {
+        const id = generateId('team_booking');
+        const now = new Date().toISOString();
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'srv_val_corte', ?, '2099-01-02', '10:00', '11:00', 60,
+            25000, 'salon', 'PENDING', 'presential', 'pending', 'Cita de equipo',
+            '+56912345099', ?, ?)
+        `).run(id, `TEAM-${id}`, businessId, staffId, customer.user.id, now, now);
+        bookingIds.push(id);
+        return id;
+      };
+
+      try {
+        process.env.NODE_ENV = 'test';
+        process.env.BILLING_ENABLED = 'false';
+        process.env.DEV_MAIL_DIR = mailDirectory;
+        delete process.env.RESEND_API_KEY;
+        delete process.env.RESEND_FROM_EMAIL;
+
+        const created = await sendJson('/api/business/staff', {
+          name: 'Profesional invitada',
+          email: ' Ignacio@BarberiaRoute.cl ',
+          member_role: 'STAFF',
+        }, owner.token);
+        assert.strictEqual(created.status, 201);
+        const createdBody = await created.json() as {
+          staff_id: string;
+          invitation: { id: string; email: string; role: string; status: string };
+        };
+        staffIds.push(createdBody.staff_id);
+        invitationIds.push(createdBody.invitation.id);
+        assert.deepStrictEqual(
+          { email: createdBody.invitation.email, role: createdBody.invitation.role, status: createdBody.invitation.status },
+          { email: 'ignacio@barberiaroute.cl', role: 'STAFF', status: 'pending' },
+        );
+        assert.ok(sqlite.prepare(`
+          SELECT 1 FROM notifications WHERE user_id = ? AND type = 'team_invitation' AND entity_id = ?
+        `).get(invitee.user.id, createdBody.invitation.id));
+        assert.ok(readFileSync(join(mailDirectory, 'outbox.jsonl'), 'utf8').includes('ignacio@barberiaroute.cl'));
+        const pendingStaffResponse = await requestJson('/api/business/staff', 'GET', owner.token);
+        const pendingStaff = ((await pendingStaffResponse.json() as { staff: Array<any> }).staff)
+          .find(staff => staff.id === createdBody.staff_id);
+        assert.deepStrictEqual(
+          { account_status: pendingStaff.account_status, invitation_id: pendingStaff.invitation_id },
+          { account_status: 'pending', invitation_id: createdBody.invitation.id },
+        );
+        const invitationListResponse = await requestJson('/api/business/invitations', 'GET', owner.token);
+        assert.ok(((await invitationListResponse.json() as { invitations: Array<{ id: string }> }).invitations)
+          .some(item => item.id === createdBody.invitation.id));
+        assert.strictEqual((await sendJson('/api/business/staff', {
+          name: 'Invitación duplicada',
+          email: 'IGNACIO@BARBERIAROUTE.CL',
+        }, owner.token)).status, 409);
+        assert.strictEqual((await sendJson('/api/business/staff', {
+          name: 'Rol inválido',
+          member_role: 'OWNER',
+        }, owner.token)).status, 400);
+
+        const wrongUserAccept = await sendJson(`/api/invitations/${createdBody.invitation.id}/accept`, {}, owner.token);
+        assert.strictEqual(wrongUserAccept.status, 404);
+        const inviteeInvitations = await requestJson('/api/invitations/mine', 'GET', invitee.token);
+        assert.ok(((await inviteeInvitations.json() as { invitations: Array<{ id: string }> }).invitations)
+          .some(item => item.id === createdBody.invitation.id));
+        const acceptResponse = await sendJson(`/api/invitations/${createdBody.invitation.id}/accept`, {}, invitee.token);
+        assert.strictEqual(acceptResponse.status, 200, `Aceptación de invitación: HTTP ${acceptResponse.status}`);
+        const membership = sqlite.prepare(`
+          SELECT role, is_active FROM business_members WHERE business_id = ? AND user_id = ?
+        `).get(businessId, invitee.user.id) as { role: string; is_active: number };
+        assert.deepStrictEqual({ ...membership }, { role: 'STAFF', is_active: 1 });
+        assert.strictEqual((sqlite.prepare('SELECT user_id FROM staff WHERE id = ?')
+          .get(createdBody.staff_id) as { user_id: string }).user_id, invitee.user.id);
+        assert.ok(sqlite.prepare(`
+          SELECT 1 FROM user_roles WHERE user_id = ? AND role = 'BUSINESS_STAFF'
+        `).get(invitee.user.id));
+        const meResponse = await requestJson('/api/auth/me', 'GET', invitee.token);
+        const memberships = ((await meResponse.json() as {
+          user: { memberships: Array<{ business_id: string }> };
+        }).user.memberships);
+        assert.ok(memberships.some(item => item.business_id === businessId));
+        assert.ok(memberships.some(item => item.business_id === 'biz_route68_barber'));
+        const switchedSession = await requestJson('/api/auth/me', 'GET', invitee.token, undefined, {
+          'X-Business-Id': businessId,
+        });
+        assert.strictEqual(
+          ((await switchedSession.json() as { user: { business: { id: string } } }).user.business.id),
+          businessId,
+        );
+        const otherBusiness = await requestJson('/api/business/my', 'GET', invitee.token, undefined, {
+          'X-Business-Id': 'biz_route68_barber',
+        });
+        assert.strictEqual(
+          ((await otherBusiness.json() as { business: { id: string } }).business.id),
+          'biz_route68_barber',
+        );
+        const nonMemberBusiness = await requestJson('/api/business/my', 'GET', invitee.token, undefined, {
+          'X-Business-Id': 'biz_not_a_member',
+        });
+        assert.strictEqual(nonMemberBusiness.status, 404);
+        const selectedLogin = await requestJson('/api/auth/login', 'POST', undefined, {
+          email: 'ignacio@barberiaroute.cl',
+          password: 'Barber1234!',
+        }, { 'X-Business-Id': businessId });
+        assert.strictEqual(selectedLogin.status, 200, `Login con negocio activo: HTTP ${selectedLogin.status}`);
+        assert.strictEqual(
+          ((await selectedLogin.json() as { user: { business: { id: string } } }).user.business.id),
+          businessId,
+        );
+        assert.ok(sqlite.prepare(`
+          SELECT 1 FROM notifications
+          WHERE user_id = ? AND type = 'team_invitation_accepted' AND entity_id = ?
+        `).get(owner.user.id, createdBody.invitation.id));
+        assert.strictEqual((await sendJson(`/api/invitations/${createdBody.invitation.id}/accept`, {}, invitee.token)).status, 409);
+
+        const ownBooking = createBooking(createdBody.staff_id);
+        const otherBooking = createBooking('stf_valeria');
+        const activeBusinessHeader = { 'X-Business-Id': businessId };
+        const ownListResponse = await requestJson('/api/bookings/business', 'GET', invitee.token, undefined, activeBusinessHeader);
+        const ownList = (await ownListResponse.json() as { bookings: Array<{ id: string }> }).bookings;
+        assert.ok(ownList.some(item => item.id === ownBooking));
+        assert.ok(!ownList.some(item => item.id === otherBooking));
+        const unchanged = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(otherBooking);
+        assert.strictEqual((await sendJson(`/api/bookings/${otherBooking}/confirm`, {}, invitee.token)).status, 403);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(otherBooking), unchanged);
+        assert.strictEqual((await requestJson('/api/business/my', 'GET', invitee.token, undefined, activeBusinessHeader)).status, 404);
+
+        const revoked = await sendJson('/api/business/staff', { name: 'Invitación revocable' }, owner.token);
+        assert.strictEqual(revoked.status, 201);
+        const revokedBody = await revoked.json() as { staff_id: string };
+        staffIds.push(revokedBody.staff_id);
+        const existingStaffInvite = await sendJson(`/api/business/staff/${revokedBody.staff_id}/invite`, {
+          email: 'cliente@gmail.com',
+          member_role: 'RECEPTION',
+        }, owner.token);
+        assert.strictEqual(existingStaffInvite.status, 201);
+        const revokedInvitation = (await existingStaffInvite.json() as { invitation: { id: string } }).invitation;
+        invitationIds.push(revokedInvitation.id);
+        assert.strictEqual((await requestJson(`/api/business/invitations/${revokedInvitation.id}`, 'DELETE', owner.token)).status, 200);
+        assert.strictEqual((await sendJson(`/api/invitations/${revokedInvitation.id}/accept`, {}, customer.token)).status, 409);
+
+        const declined = await sendJson('/api/business/staff', {
+          name: 'Invitación rechazable',
+          email: 'cliente@gmail.com',
+        }, owner.token);
+        assert.strictEqual(declined.status, 201);
+        const declinedBody = await declined.json() as { staff_id: string; invitation: { id: string } };
+        staffIds.push(declinedBody.staff_id);
+        const declinedInvitation = declinedBody.invitation;
+        invitationIds.push(declinedInvitation.id);
+        const declineResponse = await sendJson(`/api/invitations/${declinedInvitation.id}/decline`, {}, customer.token);
+        assert.strictEqual(declineResponse.status, 200, `Rechazo de invitación: HTTP ${declineResponse.status}`);
+        assert.strictEqual((sqlite.prepare('SELECT status FROM business_invitations WHERE id = ?')
+          .get(declinedInvitation.id) as { status: string }).status, 'declined');
+      } finally {
+        for (const id of bookingIds) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(id);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(id);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(id);
+        }
+        for (const id of invitationIds) {
+          sqlite.prepare('DELETE FROM notifications WHERE entity_id = ?').run(id);
+          sqlite.prepare('DELETE FROM business_invitations WHERE id = ?').run(id);
+        }
+        for (const id of staffIds) sqlite.prepare('DELETE FROM staff WHERE id = ?').run(id);
+        sqlite.prepare('DELETE FROM business_members WHERE business_id = ? AND user_id = ?').run(businessId, invitee.user.id);
+        if (previousMembership) {
+          sqlite.prepare(`
+            INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(previousMembership.id, businessId, invitee.user.id, previousMembership.role, previousMembership.is_active, previousMembership.created_at);
+        }
+        sqlite.prepare('DELETE FROM business_members WHERE business_id = ? AND user_id = ?')
+          .run('biz_route68_barber', invitee.user.id);
+        if (previousOtherMembership) {
+          sqlite.prepare(`
+            INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            previousOtherMembership.id,
+            'biz_route68_barber',
+            invitee.user.id,
+            previousOtherMembership.role,
+            previousOtherMembership.is_active,
+            previousOtherMembership.created_at,
+          );
+        }
+        if (!hadStaffRole) sqlite.prepare("DELETE FROM user_roles WHERE user_id = ? AND role = 'BUSINESS_STAFF'").run(invitee.user.id);
+        for (const [key, value] of Object.entries(previousEnvironment)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        rmSync(mailDirectory, { recursive: true, force: true });
       }
     });
 

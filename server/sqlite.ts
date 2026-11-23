@@ -565,6 +565,24 @@ const MIGRATION_V2_SQL = `
       ON password_reset_tokens(user_id);
   `;
 
+const MIGRATION_V5_SQL = `
+  CREATE TABLE business_invitations (
+    id TEXT PRIMARY KEY,
+    business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    staff_id TEXT REFERENCES staff(id) ON DELETE SET NULL,
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'STAFF',
+    status TEXT NOT NULL DEFAULT 'pending',
+    invited_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    responded_at TEXT
+  );
+  CREATE UNIQUE INDEX idx_business_invitations_pending
+    ON business_invitations(business_id, email) WHERE status = 'pending';
+  CREATE INDEX idx_business_invitations_email
+    ON business_invitations(email, status);
+`;
+
 
 export interface Migration {
   version: number;
@@ -595,4 +613,5 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  { version: 5, name: 'business_invitations', sql: MIGRATION_V5_SQL },
 ];
