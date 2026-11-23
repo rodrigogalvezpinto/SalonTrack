@@ -184,7 +184,8 @@ function authorizeBusiness(
   req: AuthRequest,
   res: Response,
   businessId: string,
-  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']
+  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF'],
+  inactiveStatus: 403 | 404 = 404
 ): string | null {
   const member = getSqliteDb().prepare(`
     SELECT role, is_active
@@ -196,7 +197,15 @@ function authorizeBusiness(
     res.status(404).json({ error: 'Negocio no encontrado.' });
     return null;
   }
-  if (!member.is_active || !allowedRoles.includes(member.role)) {
+  if (!member.is_active) {
+    res.status(inactiveStatus).json({
+      error: inactiveStatus === 403
+        ? 'No tienes permisos para esta acción en el negocio.'
+        : 'Negocio no encontrado.',
+    });
+    return null;
+  }
+  if (!allowedRoles.includes(member.role)) {
     res.status(403).json({ error: 'No tienes permisos para esta acción en el negocio.' });
     return null;
   }
@@ -1553,7 +1562,7 @@ router.put('/bookings/:id/status', requireAuth, (req: AuthRequest, res: Response
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION']) === null) return;
+  if (authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION'], 403) === null) return;
 
   const { status } = req.body;
   const transitions: Record<string, string[]> = {

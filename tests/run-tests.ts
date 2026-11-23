@@ -2118,38 +2118,12 @@ async function runIntegrationTests() {
         assert.strictEqual(staffCompletion.status, 200);
         const presentialPayment = sqlite.prepare(`
           SELECT status, payment_method, provider_payment_id FROM payments
-          WHERE booking_id = ? AND type = 'booking_payment'
+        WHERE booking_id = ? AND type = 'booking_payment'
         `).all(staffClientBooking);
-        assert.deepStrictEqual(presentialPayment, [{
-          status: 'approved',
-          payment_method: 'presential',
-          provider_payment_id: `PRES_PAY_${staffClientBooking}`,
-        }]);
-
-        const onlinePaymentBooking = insertBooking(
-          'CONFIRMED',
-          'Reserva con pago online aprobado',
-          '+56911122336'
-        );
-        const simulatedPayment = await sendJson('/api/payments/checkout/simulate', {
-          booking_id: onlinePaymentBooking,
-          action: 'approve',
-        }, customer.token);
-        assert.strictEqual(simulatedPayment.status, 200);
-        const onlineCompletion = await completeAsStaff(onlinePaymentBooking);
-        assert.strictEqual(onlineCompletion.status, 200);
-        const approvedPayments = sqlite.prepare(`
-          SELECT status, payment_method FROM payments
-          WHERE booking_id = ? AND type = 'booking_payment' AND status = 'approved'
-        `).all(onlinePaymentBooking);
-        assert.deepStrictEqual(approvedPayments, [{
-          status: 'approved',
-          payment_method: 'simulated_online',
-        }]);
-        const onlineService = sqlite.prepare(`
-          SELECT client_id FROM client_service_history WHERE booking_id = ?
-        `).get(onlinePaymentBooking) as { client_id: string };
-        createdClientIds.add(onlineService.client_id);
+        assert.strictEqual(presentialPayment.length, 1);
+        assert.strictEqual(presentialPayment[0].status, 'approved');
+        assert.strictEqual(presentialPayment[0].payment_method, 'presential');
+        assert.strictEqual(presentialPayment[0].provider_payment_id, `PRES_PAY_${staffClientBooking}`);
 
         const staffService = sqlite.prepare(`
           SELECT id, user_id, client_id FROM client_service_history WHERE booking_id = ?
@@ -2271,6 +2245,30 @@ async function runIntegrationTests() {
           (sqlite.prepare('SELECT COUNT(*) AS count FROM services').get() as { count: number }).count,
           catalogServicesBefore
         );
+
+        const onlinePaymentBooking = insertBooking(
+          'CONFIRMED',
+          'Reserva con pago online aprobado',
+          '+56911122336'
+        );
+        const simulatedPayment = await sendJson('/api/payments/checkout/simulate', {
+          booking_id: onlinePaymentBooking,
+          action: 'approve',
+        }, customer.token);
+        assert.strictEqual(simulatedPayment.status, 200);
+        const onlineCompletion = await completeAsStaff(onlinePaymentBooking);
+        assert.strictEqual(onlineCompletion.status, 200);
+        const approvedPayments = sqlite.prepare(`
+          SELECT status, payment_method FROM payments
+          WHERE booking_id = ? AND type = 'booking_payment' AND status = 'approved'
+        `).all(onlinePaymentBooking);
+        assert.strictEqual(approvedPayments.length, 1);
+        assert.strictEqual(approvedPayments[0].status, 'approved');
+        assert.strictEqual(approvedPayments[0].payment_method, 'simulated_online');
+        const onlineService = sqlite.prepare(`
+          SELECT client_id FROM client_service_history WHERE booking_id = ?
+        `).get(onlinePaymentBooking) as { client_id: string };
+        createdClientIds.add(onlineService.client_id);
       } finally {
         for (const bookingId of bookingIds) {
           sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(bookingId);
