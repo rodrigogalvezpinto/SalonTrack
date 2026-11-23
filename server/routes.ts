@@ -23,6 +23,7 @@ import {
   getSubscription,
   getUser,
   hasBookingServiceRecord,
+  isSubscriptionActive,
   listClients,
   listContactLogs,
   listPayments,
@@ -38,6 +39,29 @@ import { getAvailableSlots, isSlotAvailable } from './availability.js';
 import { localGeolocationProvider, localWhatsAppProvider, localEmailProvider, localPaymentProvider } from './adapters/index.js';
 
 const router = Router();
+
+function subscriptionExpiredResponse(res: Response): void {
+  res.status(402).json({
+    error: 'Tu licencia de SalonTrack venció. Renuévala en Configuración para seguir editando.',
+    code: 'SUBSCRIPTION_EXPIRED',
+  });
+}
+
+function requireActiveSubscription(req: AuthRequest, res: Response, next: NextFunction) {
+  if (!req.userId || !isSubscriptionActive(req.userId)) {
+    subscriptionExpiredResponse(res);
+    return;
+  }
+  next();
+}
+
+function businessSubscriptionBlocked(res: Response, businessId: string): boolean {
+  const business = getSqliteDb().prepare('SELECT owner_id FROM businesses WHERE id = ?')
+    .get(businessId) as { owner_id: string } | undefined;
+  if (!business || isSubscriptionActive(business.owner_id)) return false;
+  subscriptionExpiredResponse(res);
+  return true;
+}
 
 // -------------------------------------------------------------
 // Helper: Chile Santiago Date Calculations & Retouch Statuses
@@ -1738,6 +1762,7 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
   const bizId = req.params.id;
 
   if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
+  if (businessSubscriptionBlocked(res, bizId)) return;
 
   const {
     name, description, phone, whatsapp, email, website, instagram,
@@ -1797,6 +1822,7 @@ const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
   const bizId = req.params.id;
 
   if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
+  if (businessSubscriptionBlocked(res, bizId)) return;
 
   const { name, category_id, description, price_clp, price_type, duration_minutes, duration_min, buffer_min, is_featured, is_active, modality } = req.body;
   if (!name || !price_clp) {
@@ -1853,6 +1879,7 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
   if (!srv) return res.status(404).json({ error: 'Servicio no encontrado.' });
 
   if (authorizeBusiness(req, res, srv.business_id, ['OWNER', 'ADMIN']) === null) return;
+  if (businessSubscriptionBlocked(res, srv.business_id)) return;
 
   const { name, price_clp, price_type, duration_minutes, duration_min, buffer_min, description, is_featured, status, is_active } = req.body;
   const now = new Date().toISOString();
@@ -1891,6 +1918,7 @@ router.delete('/business/services/:id', requireAuth, (req: AuthRequest, res: Res
   const srv = sqlite.prepare('SELECT business_id FROM services WHERE id = ?').get(srvId) as any;
   if (!srv) return res.status(404).json({ error: 'Servicio no encontrado.' });
   if (authorizeBusiness(req, res, srv.business_id, ['OWNER', 'ADMIN']) === null) return;
+  if (businessSubscriptionBlocked(res, srv.business_id)) return;
 
   // Safe soft delete to preserve completed booking history!
   sqlite.prepare("UPDATE services SET status = 'INACTIVE', updated_at = ? WHERE id = ?").run(new Date().toISOString(), srvId);
@@ -1903,6 +1931,7 @@ const createBusinessStaffHandler = (req: AuthRequest, res: Response) => {
   const bizId = req.params.id;
 
   if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
+  if (businessSubscriptionBlocked(res, bizId)) return;
 
   const { name, specialty, role_title, phone, email, bio } = req.body;
   if (!name) return res.status(400).json({ error: 'El nombre del trabajador es obligatorio.' });
@@ -1945,10 +1974,9 @@ router.post('/business/staff', requireAuth, (req: AuthRequest, res: Response) =>
 router.delete('/business/staff/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const staff = sqlite.prepare('SELECT business_id FROM staff WHERE id = ?').get(req.params.id) as any;
-  if (!staff || authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN']) === null) {
-    if (!staff) return res.status(404).json({ error: 'Trabajador no encontrado.' });
-    return;
-  }
+  if (!staff) return res.status(404).json({ error: 'Trabajador no encontrado.' });
+  if (authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN']) === null) return;
+  if (businessSubscriptionBlocked(res, staff.business_id)) return;
   sqlite.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(req.params.id);
   return res.json({ message: 'Trabajador desactivado correctamente.' });
 });
@@ -1958,6 +1986,7 @@ const updateBusinessHoursHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
   if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
+  if (businessSubscriptionBlocked(res, bizId)) return;
 
   const { hours } = req.body; // Array of { day_of_week, open_time, close_time, is_closed }
 
@@ -2204,7 +2233,7 @@ router.get('/clients', requireAuth, (req: AuthRequest, res: Response) => {
   return res.json({ clients: filtered, total: filtered.length, santiago_date: todayStr });
 });
 
-router.post('/clients', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/clients', requireAuth, requireActiveSubscription, (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId!;
     const { full_name, phone, notes, initial_service } = req.body;
@@ -2292,7 +2321,7 @@ router.get('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
   });
 });
 
-router.put('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
+router.put('/clients/:id', requireAuth, requireActiveSubscription, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { full_name, phone, notes } = req.body;
   if (!full_name || !phone) return res.status(400).json({ error: 'Nombre y teléfono son obligatorios.' });
@@ -2302,13 +2331,13 @@ router.put('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
   return res.json({ message: 'Clienta actualizada con éxito.', client });
 });
 
-router.delete('/clients/:id', requireAuth, (req: AuthRequest, res: Response) => {
+router.delete('/clients/:id', requireAuth, requireActiveSubscription, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   if (!deleteClient(userId, req.params.id)) return res.status(404).json({ error: 'Clienta no encontrada.' });
   return res.json({ message: 'Clienta y su historial han sido eliminados correctamente.' });
 });
 
-router.post('/services', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/services', requireAuth, requireActiveSubscription, (req: AuthRequest, res: Response) => {
   try {
     const userId = req.userId!;
     const { client_id, service_type, color_formula, tint_brand, service_date, amount_clp, recommended_interval_days, notes } = req.body;
@@ -2347,13 +2376,13 @@ router.post('/services', requireAuth, (req: AuthRequest, res: Response) => {
   }
 });
 
-router.delete('/services/:id', requireAuth, (req: AuthRequest, res: Response) => {
+router.delete('/services/:id', requireAuth, requireActiveSubscription, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   if (!deleteServiceRecord(userId, req.params.id)) return res.status(404).json({ error: 'Servicio no encontrado.' });
   return res.json({ message: 'Servicio eliminado del historial.' });
 });
 
-router.post('/contact-logs', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/contact-logs', requireAuth, requireActiveSubscription, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { client_id, status, notes } = req.body;
 
@@ -2721,7 +2750,7 @@ router.get('/re-engagement', requireAuth, (req: AuthRequest, res: Response) => {
   });
 });
 
-router.post('/re-engagement/status', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/re-engagement/status', requireAuth, requireActiveSubscription, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { client_id, status, notes } = req.body;
 
@@ -2733,7 +2762,7 @@ router.post('/re-engagement/status', requireAuth, (req: AuthRequest, res: Respon
   return res.json({ message: `Clienta ${client.full_name} actualizada a estado '${status}'.`, client, log });
 });
 
-router.put('/re-engagement/template', requireAuth, (req: AuthRequest, res: Response) => {
+router.put('/re-engagement/template', requireAuth, requireActiveSubscription, (req: AuthRequest, res: Response) => {
   const userId = req.userId!;
   const { template, threshold_days } = req.body;
   const profile = updateProfileTemplate(userId, template, threshold_days);
