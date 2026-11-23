@@ -23,6 +23,10 @@ export function getStoredActiveBusinessId(): string | null {
   return fallback;
 }
 
+export function pinActiveBusinessIdForTab(id: string | null) {
+  if (id) sessionStorage.setItem(ACTIVE_BUSINESS_KEY, id);
+}
+
 export function setStoredActiveBusinessId(id: string | null) {
   if (id) {
     sessionStorage.setItem(ACTIVE_BUSINESS_KEY, id);

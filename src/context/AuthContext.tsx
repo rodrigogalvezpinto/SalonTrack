@@ -4,6 +4,7 @@ import {
   apiRequest,
   getStoredActiveBusinessId,
   getStoredToken,
+  pinActiveBusinessIdForTab,
   setStoredActiveBusinessId,
   setStoredToken,
 } from '../utils/api';
@@ -82,12 +83,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const storedMembership = userMemberships.find(membership => membership.business_id === storedBusinessId);
         if (storedBusinessId && !storedMembership) setStoredActiveBusinessId(null);
         setMemberships(userMemberships);
-        setActiveBusinessId(
+        const resolvedBusinessId =
           storedMembership?.business_id ||
           res.user.business?.id ||
           userMemberships[0]?.business_id ||
-          null
-        );
+          null;
+        pinActiveBusinessIdForTab(resolvedBusinessId);
+        setActiveBusinessId(resolvedBusinessId);
         setRoles(userRoles);
       }
     } catch (err) {
@@ -140,12 +142,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const storedMembership = userMemberships.find(membership => membership.business_id === storedBusinessId);
     if (storedBusinessId && !storedMembership) setStoredActiveBusinessId(null);
     setMemberships(userMemberships);
-    setActiveBusinessId(
+    const resolvedBusinessId =
       storedMembership?.business_id ||
       res.user.business?.id ||
       userMemberships[0]?.business_id ||
-      null
-    );
+      null;
+    pinActiveBusinessIdForTab(resolvedBusinessId);
+    setActiveBusinessId(resolvedBusinessId);
     setRoles(userRoles);
   };
 
