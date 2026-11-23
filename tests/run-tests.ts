@@ -1005,10 +1005,37 @@ async function runIntegrationTests() {
         const confirmPaymentId = 'CONFIRM123';
         fakePayments.set(confirmPaymentId, makePayment(confirmPaymentId));
         const beforeConfirm = getSubscriptionState(owner.user.id);
+        const missingConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: 'missing-payment',
+        }, owner.token);
+        assert.strictEqual(missingConfirmation.status, 404);
+        const paymentNotFound = { error: 'No se encontró el pago.' };
+        assert.deepStrictEqual(await missingConfirmation.json(), paymentNotFound);
+
+        const unrelatedPaymentId = 'UNRELATED123';
+        fakePayments.set(unrelatedPaymentId, {
+          ...makePayment(unrelatedPaymentId),
+          external_reference: 'unrelated-payment',
+        });
+        const unrelatedConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: unrelatedPaymentId,
+        }, owner.token);
+        assert.strictEqual(unrelatedConfirmation.status, 404);
+        assert.deepStrictEqual(await unrelatedConfirmation.json(), paymentNotFound);
+
+        const invalidAmountId = 'INVALIDAMOUNT123';
+        fakePayments.set(invalidAmountId, makePayment(invalidAmountId, 'approved', 1000));
+        const invalidAmountConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: invalidAmountId,
+        }, owner.token);
+        assert.strictEqual(invalidAmountConfirmation.status, 404);
+        assert.deepStrictEqual(await invalidAmountConfirmation.json(), paymentNotFound);
+
         const forbiddenConfirmation = await sendJson('/api/payments/confirm', {
           payment_id: confirmPaymentId,
         }, other.token);
-        assert.strictEqual(forbiddenConfirmation.status, 403);
+        assert.strictEqual(forbiddenConfirmation.status, 404);
+        assert.deepStrictEqual(await forbiddenConfirmation.json(), paymentNotFound);
         assert.deepStrictEqual(getSubscriptionState(owner.user.id), beforeConfirm);
 
         const confirmed = await sendJson('/api/payments/confirm', {

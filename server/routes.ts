@@ -2766,13 +2766,15 @@ router.post('/payments/confirm', requireAuth, async (req: AuthRequest, res: Resp
   } catch {
     return res.status(502).json({ error: 'No se pudo consultar el pago en Mercado Pago.' });
   }
-  if (!payment) return res.status(404).json({ error: 'No se encontró el pago en Mercado Pago.' });
+  const paymentNotFound = () => res.status(404).json({ error: 'No se encontró el pago.' });
+  if (!payment) return paymentNotFound();
 
   const result = applyMercadoPagoPayment(payment, req.userId);
-  if (result.kind === 'forbidden') return res.status(403).json({ error: 'El pago no pertenece a esta cuenta.' });
+  if (result.kind === 'forbidden') return paymentNotFound();
   if (result.kind === 'ignored') {
+    if (result.reason === 'invalid_reference') return paymentNotFound();
     if (result.reason === 'not_approved') return res.status(409).json({ status: payment.status });
-    return res.status(409).json({ error: 'No se pudo validar el pago.', status: payment.status });
+    return paymentNotFound();
   }
   return res.json({ message: result.message, subscription: result.subscription });
 });
