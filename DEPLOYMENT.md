@@ -2,18 +2,22 @@
 
 ## 1. Entorno de Ejecución
 
-- **Plataforma:** Google Cloud Run / Docker / Node.js 22 LTS
-- **Puerto:** definido por `PORT` de la plataforma; en desarrollo se usa `3000` por defecto
+- **Plataforma:** imagen Docker en Railway, Fly.io o una VM/host con disco persistente
+- **Puerto:** `PORT` de la plataforma; la imagen expone `3000`
+- **Persistencia:** montar un volumen persistente en `/data`; SQLite usa `/data/salontrack.sqlite`
+- **Instancias:** una sola instancia/máquina, ya que SQLite y los límites de solicitudes son locales
 - **Modo:** `NODE_ENV=production`
+
+Cloud Run no es compatible con SQLite en esta configuración: su disco local es efímero y no conserva los datos al reemplazar la instancia.
 
 ---
 
-## 2. Variables de Entorno Requeridas (`.env`)
+## 2. Variables de Entorno (`.env`)
 
 Configure las siguientes variables en el panel de secretos de su proveedor:
 
 ```ini
-# Puerto del servidor
+# Puerto (lo inyecta la plataforma; 3000 es el valor local por defecto)
 PORT=3000
 
 # Configure el número exacto de saltos de proxy confiables.
@@ -24,8 +28,8 @@ PORT=3000
 # URL canónica del servicio; debe ser pública y usar HTTPS en producción.
 APP_URL="https://salontrack.cl"
 
-# Clave secreta para firma de JSON Web Tokens (mínimo 32 caracteres)
-JWT_SECRET="salontrack_prod_jwt_secret_chile_2026_super_secure"
+# Genere un secreto aleatorio con: openssl rand -hex 32
+JWT_SECRET="<secreto-generado-con-openssl-rand-hex-32>"
 
 # Mercado Pago Chile (Credenciales de producción)
 MERCADO_PAGO_ACCESS_TOKEN="APP_USR-..."
@@ -39,8 +43,8 @@ ALLOW_SIMULATED_PAYMENTS=false
 RESEND_API_KEY="re_..."
 RESEND_FROM_EMAIL="SalonTrack Chile <notificaciones@salontrack.cl>"
 
-# Ruta persistente de la base SQLite (por defecto: ./data/salontrack.sqlite)
-DATABASE_FILE="./data/salontrack.sqlite"
+# Ruta de la base SQLite dentro del volumen persistente
+DATABASE_FILE="/data/salontrack.sqlite"
 ```
 
 Los pagos simulados están bloqueados en producción por defecto; no establezca `ALLOW_SIMULATED_PAYMENTS=true` en producción.
@@ -55,39 +59,74 @@ En el panel de Resend, verifique el dominio remitente con sus registros SPF y DK
 
 ---
 
-## 3. Pasos de Compilación y Lanzamiento
+## 3. Construcción y despliegue
+
+Construya la imagen desde la raíz del repositorio:
 
 ```bash
-# 1. Compilar los assets frontend de Vite
-npm run build
-
-# 2. Iniciar el servidor Express en producción
-npm run start
+docker build -t salontrack .
 ```
 
----
+La imagen incluye una comprobación automática en `/api/health`. En cualquier host, monte el disco persistente en `/data`, configure las variables de entorno anteriores y mantenga una sola instancia.
 
-## 4. Respaldo y restauración de la base SQLite
+### Railway
 
-Crea y verifica un respaldo con:
+1. Despliegue el repositorio usando el `Dockerfile`.
+2. Cree o adjunte un volumen al servicio y defina su ruta de montaje como `/data`.
+3. Configure las variables y secretos de producción.
+4. Mantenga una sola réplica para evitar escrituras concurrentes sobre SQLite.
+
+### Fly.io
+
+1. Cree un volumen en la misma región de la máquina, por ejemplo:
+
+   ```bash
+   fly volumes create salontrack_data --region <region> --size 1
+   ```
+
+2. Añada el montaje a `fly.toml`:
+
+   ```toml
+   [[mounts]]
+   source = "salontrack_data"
+   destination = "/data"
+   ```
+
+3. Configure los secretos y mantenga una sola máquina con ese volumen.
+
+## 4. Lista previa al lanzamiento
+
+- [ ] `JWT_SECRET` generado con `openssl rand -hex 32`.
+- [ ] `MERCADO_PAGO_ACCESS_TOKEN` y `MERCADO_PAGO_WEBHOOK_SECRET` de producción configurados.
+- [ ] `RESEND_API_KEY` configurada y dominio remitente verificado; `RESEND_FROM_EMAIL` pertenece a ese dominio.
+- [ ] `APP_URL` configurada con la URL pública HTTPS.
+- [ ] `TRUST_PROXY` configurada con el número exacto de saltos confiables; nunca usar `true`.
+- [ ] URL `${APP_URL}/api/payments/webhook` registrada en Webhooks de Mercado Pago.
+- [ ] Volumen persistente montado en `/data`.
+- [ ] Respaldo periódico programado y copiado fuera del volumen.
+- [ ] `ALLOW_SIMULATED_PAYMENTS=false`.
+
+## 5. Respaldo y restauración de SQLite
+
+Ejecute el respaldo dentro del contenedor:
 
 ```bash
-npm run db:backup
+docker exec -it <contenedor> npm run db:backup
 ```
 
-Antes de restaurar, detén el servidor para evitar escrituras concurrentes. La restauración verifica integridad y migraciones, crea un respaldo `pre_restore_` de la base actual y luego reemplaza el archivo configurado por `DATABASE_FILE`:
+El archivo verificado queda en `/data/backups/`. Copie los respaldos fuera del volumen y almacene una copia remota o en otro sistema; un disco persistente no sustituye una copia externa. Por ejemplo, con Docker:
 
 ```bash
-npm run db:restore -- ./data/backups/salontrack_backup_<fecha>.sqlite
+docker cp <contenedor>:/data/backups ./backups
 ```
 
-En producción, agrega `--force` para confirmar la operación:
+Antes de restaurar, detenga el servidor para evitar escrituras concurrentes. La restauración verifica integridad y migraciones, crea un respaldo `pre_restore_` de la base actual y luego reemplaza el archivo configurado por `DATABASE_FILE`:
 
 ```bash
-npm run db:restore -- ./data/backups/salontrack_backup_<fecha>.sqlite --force
+docker exec -it <contenedor> npm run db:restore -- /data/backups/salontrack_backup_<fecha>.sqlite --force
 ```
 
-## 5. Configuración del Webhook en Mercado Pago
+## 6. Configuración del Webhook en Mercado Pago
 
 1. Ingrese a su consola de desarrolladores en [Mercado Pago Developers](https://www.mercadopago.cl/developers).
 2. Configure `APP_URL` con la URL pública HTTPS del servicio.

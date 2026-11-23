@@ -17,7 +17,7 @@ Auditoría de la base `origin/main` (`9a75d5a`) y de los endurecimientos puntual
 | 8 — Paneles y estadísticas | Parcial | `/api/dashboard/stats`, `/api/admin/dashboard` y `CustomerPortalView.tsx` entregan paneles básicos con datos consultados directamente de SQLite. |
 | 9 — Notificaciones y reputación | Parcial | La recuperación de contraseña envía correo por Resend cuando está configurado; quedan pendientes las credenciales reales y un dominio remitente verificado. WhatsApp sigue usando el adaptador local y falta completar el procesamiento programado. |
 | 10 — Suscripciones y monetización | Parcial | La expiración se aplica en backend y Mercado Pago Checkout Pro activa suscripciones tras validar pagos y firmas de webhook; falta validar credenciales de producción y decidir si los negocios vencidos deben desaparecer del marketplace. |
-| 11 — Calidad y estabilización | Parcial | `.github/workflows/ci.yml` ejecuta lint, pruebas automatizadas y build en cada PR y push a `main`; la autenticación tiene límites de solicitudes en memoria y el servidor aplica cabeceras de seguridad. `tests/run-tests.ts` cubre autorización entre negocios, roles y CRM. Faltan pruebas E2E, concurrencia, accesibilidad y cobertura de rutas nuevas. |
+| 11 — Calidad y estabilización | Parcial | `.github/workflows/ci.yml` ejecuta lint, pruebas automatizadas, build y construcción de la imagen Docker en cada PR; el contenedor incluye health check de SQLite y cierre ordenado. La autenticación tiene límites en memoria y el servidor aplica cabeceras de seguridad. La elección del host y el despliegue con volumen persistente siguen pendientes. |
 
 ## Decisión sobre las implementaciones alternativas
 
