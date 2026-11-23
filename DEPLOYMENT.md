@@ -16,7 +16,7 @@ Configure las siguientes variables en el panel de secretos de su proveedor:
 # Puerto del servidor
 PORT=3000
 
-# URL canónica del servicio (usada en webhooks y enlaces PWA)
+# URL canónica del servicio; debe ser pública y usar HTTPS en producción.
 APP_URL="https://salontrack.cl"
 
 # Clave secreta para firma de JSON Web Tokens (mínimo 32 caracteres)
@@ -25,7 +25,7 @@ JWT_SECRET="salontrack_prod_jwt_secret_chile_2026_super_secure"
 # Mercado Pago Chile (Credenciales de producción)
 MERCADO_PAGO_ACCESS_TOKEN="APP_USR-..."
 MERCADO_PAGO_PUBLIC_KEY="APP_USR-..."
-MERCADO_PAGO_WEBHOOK_SECRET="whsec_..."
+MERCADO_PAGO_WEBHOOK_SECRET=""
 
 # Mantenga desactivados los pagos simulados; solo habilítelos en entornos de demostración.
 ALLOW_SIMULATED_PAYMENTS=false
@@ -77,9 +77,10 @@ npm run db:restore -- ./data/backups/salontrack_backup_<fecha>.sqlite --force
 ## 5. Configuración del Webhook en Mercado Pago
 
 1. Ingrese a su consola de desarrolladores en [Mercado Pago Developers](https://www.mercadopago.cl/developers).
-2. En la sección **Webhooks / Notificaciones IPN**, agregue la URL:
-   `https://su-dominio.cl/api/payments/webhook`
-3. Seleccione los eventos:
+2. Configure `APP_URL` con la URL pública HTTPS del servicio.
+3. En la sección **Webhooks**, agregue esta URL:
+   `${APP_URL}/api/payments/webhook`
+4. Seleccione los eventos:
    - `payment.created`
    - `payment.updated`
-4. Copie el Secreto de Firma y configúrelo en la variable `MERCADO_PAGO_WEBHOOK_SECRET`.
+5. Copie el secreto de firma que muestra el panel **Webhooks** y configúrelo en `MERCADO_PAGO_WEBHOOK_SECRET`. No use un valor de ejemplo con formato `whsec_...`.
