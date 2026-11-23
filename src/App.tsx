@@ -10,6 +10,7 @@ import { NewServiceModal } from './components/NewServiceModal';
 import { CheckoutModal } from './components/CheckoutModal';
 import { DemoAccountsModal } from './components/DemoAccountsModal';
 import { AuthModal } from './views/AuthModal';
+import { InvitationAcceptanceModal } from './components/InvitationAcceptanceModal';
 
 import { LandingPage } from './views/LandingPage';
 import { DashboardView } from './views/DashboardView';
@@ -33,9 +34,34 @@ import { Client, Service } from './types';
 import { apiRequest } from './utils/api';
 import { showPushNotification, playNotificationChime } from './utils/notifications';
 
+interface InvitationLink {
+  id: string;
+  token: string;
+}
+
+function readInvitationLink(): InvitationLink | null {
+  const params = new URLSearchParams(window.location.search);
+  const invitationId = params.get('invitation');
+  const token = params.get('invitation_token');
+  if (params.has('invitation') || params.has('invitation_token')) {
+    if (!invitationId || !token) {
+      sessionStorage.removeItem('invitation');
+      sessionStorage.removeItem('invitation_token');
+      return null;
+    }
+    sessionStorage.setItem('invitation', invitationId);
+    sessionStorage.setItem('invitation_token', token);
+    return { id: invitationId, token };
+  }
+  const storedId = sessionStorage.getItem('invitation');
+  const storedToken = sessionStorage.getItem('invitation_token');
+  return storedId && storedToken ? { id: storedId, token: storedToken } : null;
+}
+
 function MainApp() {
-  const { user, profile, isCustomer, isPlatformAdmin, isBusinessOwner, isStaff, business, isLoading, reloadSession } = useAuth();
+  const { user, profile, isCustomer, isPlatformAdmin, isBusinessOwner, isStaff, business, isLoading, reloadSession, logout } = useAuth();
   const resetToken = new URLSearchParams(window.location.search).get('reset_token');
+  const [invitationLink, setInvitationLink] = useState<InvitationLink | null>(readInvitationLink);
   const paymentReturnProcessed = useRef(false);
   const [paymentNotice, setPaymentNotice] = useState<{
     type: 'success' | 'info' | 'error';
@@ -69,6 +95,12 @@ function MainApp() {
   const [whatsAppModalOpen, setWhatsAppModalOpen] = useState(false);
   const [whatsAppTargetClient, setWhatsAppTargetClient] = useState<Client | null>(null);
   const [whatsAppTargetService, setWhatsAppTargetService] = useState<Service | null>(null);
+
+  useEffect(() => {
+    if (isLoading || user || !invitationLink) return;
+    setAuthModalMode('login');
+    setAuthModalOpen(true);
+  }, [isLoading, user?.id, invitationLink?.id]);
 
   useEffect(() => {
     if (isLoading || paymentReturnProcessed.current) return;
@@ -223,6 +255,7 @@ function MainApp() {
         <AuthModal
           isOpen={authModalOpen}
           initialMode={authModalMode}
+          hint={invitationLink ? 'Inicia sesión o regístrate con el correo invitado para aceptar la invitación.' : undefined}
           onClose={handleCloseAuthModal}
         />
 
@@ -442,6 +475,19 @@ function MainApp() {
         initialMode={authModalMode}
         onClose={handleCloseAuthModal}
       />
+
+      {invitationLink && (
+        <InvitationAcceptanceModal
+          invitationId={invitationLink.id}
+          token={invitationLink.token}
+          onClose={() => setInvitationLink(null)}
+          onSwitchAccount={() => {
+            logout();
+            setAuthModalMode('login');
+            setAuthModalOpen(true);
+          }}
+        />
+      )}
 
       <OfflineBanner />
     </div>

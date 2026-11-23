@@ -472,6 +472,10 @@ export function seedDemoDataIfEmpty() {
     now
   );
 
+  db.prepare('INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)').run(
+    'bm_ignacio', businessBarberId, ignacioId, 'OWNER', now
+  );
+
   const staffIgnacioId = 'stf_ignacio';
   db.prepare(`
     INSERT INTO staff (id, business_id, user_id, name, specialty, bio, phone, is_active, display_order, created_at)
@@ -555,6 +559,10 @@ export function seedDemoDataIfEmpty() {
     now
   );
 
+  db.prepare('INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)').run(
+    'bm_natalia', businessNailsId, nataliaId, 'OWNER', now
+  );
+
   const staffNataliaId = 'stf_natalia';
   db.prepare(`
     INSERT INTO staff (id, business_id, user_id, name, specialty, bio, phone, is_active, display_order, created_at)
@@ -633,6 +641,10 @@ export function seedDemoDataIfEmpty() {
     'Avisar con 4 horas de anticipación.',
     now,
     now
+  );
+
+  db.prepare('INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at) VALUES (?, ?, ?, ?, 1, ?)').run(
+    'bm_matias', businessMassageId, kineId, 'OWNER', now
   );
 
   const staffMatiasId = 'stf_matias';

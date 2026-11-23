@@ -4,6 +4,7 @@ import { apiRequest } from '../utils/api';
 import { formatCLP, formatDuration } from '../utils/formatters';
 import { Booking, Business, Review, TimeSlotItem } from '../types';
 import { LocalCheckoutModal } from '../components/LocalCheckoutModal';
+import { TeamInvitationsCard } from '../components/TeamInvitationsCard';
 import {
   Calendar,
   Clock,
@@ -261,6 +262,8 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
           Explorar Salones y Barberías
         </button>
       </div>
+
+      <TeamInvitationsCard />
 
       {/* Tabs Bar */}
       <div className="border-b border-slate-200">

@@ -47,12 +47,15 @@ export const BusinessCatalogView: React.FC = () => {
   // Staff State
   const [staffList, setStaffList] = useState<Staff[]>([]);
   const [isStaffModalOpen, setIsStaffModalOpen] = useState<boolean>(false);
+  const [invitingStaffId, setInvitingStaffId] = useState<string | null>(null);
+  const [staffInviteEmails, setStaffInviteEmails] = useState<Record<string, string>>({});
   const [staffForm, setStaffForm] = useState({
     name: '',
     email: '',
     phone: '+56 9 ',
     role_title: 'Estilista Profesional',
-    bio: ''
+    bio: '',
+    member_role: 'STAFF',
   });
 
   // Hours State
@@ -167,7 +170,7 @@ export const BusinessCatalogView: React.FC = () => {
     try {
       await apiRequest('/api/business/staff', {
         method: 'POST',
-        body: JSON.stringify(staffForm)
+        body: JSON.stringify({ ...staffForm, email: staffForm.email.trim() || undefined })
       });
       setIsStaffModalOpen(false);
       setStaffForm({
@@ -175,11 +178,35 @@ export const BusinessCatalogView: React.FC = () => {
         email: '',
         phone: '+56 9 ',
         role_title: 'Estilista Profesional',
-        bio: ''
+        bio: '',
+        member_role: 'STAFF',
       });
       loadData();
     } catch (err: any) {
       alert(`Error al guardar miembro del equipo: ${err.message}`);
+    }
+  };
+
+  const handleInviteStaff = async (id: string) => {
+    try {
+      await apiRequest(`/api/business/staff/${id}/invite`, {
+        method: 'POST',
+        body: JSON.stringify({ email: staffInviteEmails[id], member_role: 'STAFF' }),
+      });
+      setInvitingStaffId(null);
+      setStaffInviteEmails(current => ({ ...current, [id]: '' }));
+      loadData();
+    } catch (err: any) {
+      alert(`Error al invitar al miembro del equipo: ${err.message}`);
+    }
+  };
+
+  const handleRevokeInvitation = async (invitationId: string) => {
+    try {
+      await apiRequest(`/api/business/invitations/${invitationId}`, { method: 'DELETE' });
+      loadData();
+    } catch (err: any) {
+      alert(`Error al revocar la invitación: ${err.message}`);
     }
   };
 
@@ -440,6 +467,48 @@ export const BusinessCatalogView: React.FC = () => {
                 <div className="text-xs text-slate-500 font-mono space-y-0.5 pt-1">
                   <div>{member.email}</div>
                   <div>{member.phone}</div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {member.account_status === 'linked' || (!member.account_status && member.user_id) ? (
+                    <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">
+                      Cuenta vinculada{member.member_role ? ` · ${{ OWNER: 'Dueña/o', ADMIN: 'Administración', RECEPTION: 'Recepción', STAFF: 'Profesional', PROFESSIONAL: 'Profesional' }[member.member_role] || member.member_role}` : ''}
+                    </span>
+                  ) : member.account_status === 'pending' ? (
+                    <>
+                      <span className="rounded-full bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700">Invitación pendiente</span>
+                      {member.invitation_id && (
+                        <button type="button" onClick={() => void handleRevokeInvitation(member.invitation_id!)} className="text-[10px] font-semibold text-rose-600 hover:text-rose-800">
+                          Revocar
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-600">Sin cuenta</span>
+                      {invitingStaffId === member.id ? (
+                        <form
+                          className="flex w-full gap-2"
+                          onSubmit={(event) => { event.preventDefault(); void handleInviteStaff(member.id); }}
+                        >
+                          <input
+                            type="email"
+                            required
+                            aria-label={`Correo para invitar a ${member.name}`}
+                            value={staffInviteEmails[member.id] || ''}
+                            onChange={(event) => setStaffInviteEmails(current => ({ ...current, [member.id]: event.target.value }))}
+                            placeholder="correo@ejemplo.cl"
+                            className="min-w-0 flex-1 rounded-lg border border-slate-200 px-2 py-1 text-xs"
+                          />
+                          <button type="submit" className="text-xs font-semibold text-indigo-600">Enviar</button>
+                        </form>
+                      ) : (
+                        <button type="button" onClick={() => setInvitingStaffId(member.id)} className="text-[10px] font-semibold text-indigo-600 hover:text-indigo-800">
+                          Invitar
+                        </button>
+                      )}
+                    </>
+                  )}
                 </div>
 
                 <div className="pt-2 border-t border-slate-100 flex justify-end">
@@ -779,15 +848,27 @@ export const BusinessCatalogView: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Email</label>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Correo para invitar a su cuenta (opcional)</label>
                   <input
                     type="email"
-                    required
                     placeholder="pro@salon.cl"
                     value={staffForm.email}
                     onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })}
                     className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-rose-600 font-mono"
                   />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Rol de la cuenta</label>
+                  <select
+                    value={staffForm.member_role}
+                    onChange={(e) => setStaffForm({ ...staffForm, member_role: e.target.value })}
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg bg-white"
+                  >
+                    <option value="STAFF">Profesional</option>
+                    <option value="RECEPTION">Recepción</option>
+                    <option value="ADMIN">Administración</option>
+                  </select>
                 </div>
 
                 <div>

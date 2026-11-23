@@ -1,5 +1,5 @@
 import { NextFunction, Request, Router, Response } from 'express';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { generateId, Subscription, Client, Service, ContactLog } from './db.js';
 import { hashPassword, verifyPassword, generateToken, optionalAuth, requireAuth, requireRole, getUserRoles, AuthRequest } from './auth.js';
 import { getSqliteDb, withTransaction } from './sqlite.js';
@@ -211,6 +211,120 @@ function authorizeBusiness(
     return null;
   }
   return member.role;
+}
+
+const BUSINESS_MEMBER_ROLES = ['OWNER', 'ADMIN', 'RECEPTION', 'PROFESSIONAL', 'STAFF'];
+
+function authorizeBookingActor(
+  req: AuthRequest,
+  res: Response,
+  booking: { id: string; business_id: string; staff_id: string | null; customer_user_id?: string | null },
+  inactiveStatus: 403 | 404 = 404,
+  allowedRoles: string[] = BUSINESS_MEMBER_ROLES,
+  allowCustomer = false,
+  allowPlatformAdmin = false,
+): string | null {
+  if (allowCustomer && booking.customer_user_id === req.userId) return 'CUSTOMER';
+  if (allowPlatformAdmin && req.userId && getUserRoles(req.userId).includes('PLATFORM_ADMIN')) {
+    return 'PLATFORM_ADMIN';
+  }
+
+  const role = authorizeBusiness(req, res, booking.business_id, allowedRoles, inactiveStatus);
+  if (!role) return null;
+  if (role === 'STAFF' || role === 'PROFESSIONAL') {
+    const assignedStaff = getSqliteDb().prepare(`
+      SELECT 1 FROM staff
+      WHERE id = ? AND business_id = ? AND user_id = ?
+      LIMIT 1
+    `).get(booking.staff_id || '', booking.business_id, req.userId || '');
+    if (!assignedStaff) {
+      res.status(403).json({ error: 'Solo puedes gestionar tus propias citas.' });
+      return null;
+    }
+  }
+  return role;
+}
+
+function resolveActiveBusinessId(
+  req: AuthRequest,
+  res: Response,
+  allowedRoles: string[],
+): string | null {
+  const requestedBusinessId = req.get('x-business-id');
+  if (requestedBusinessId) {
+    const role = authorizeBusiness(req, res, requestedBusinessId, BUSINESS_MEMBER_ROLES);
+    if (!role) return null;
+    if (!allowedRoles.includes(role)) {
+      res.status(404).json({ error: 'Negocio no encontrado.' });
+      return null;
+    }
+    return requestedBusinessId;
+  }
+
+  if (!req.userId || allowedRoles.length === 0) return null;
+  const placeholders = allowedRoles.map(() => '?').join(', ');
+  const member = getSqliteDb().prepare(`
+    SELECT business_id
+    FROM business_members
+    WHERE user_id = ? AND is_active = 1 AND role IN (${placeholders})
+    ORDER BY
+      CASE role
+        WHEN 'OWNER' THEN 0
+        WHEN 'ADMIN' THEN 1
+        WHEN 'RECEPTION' THEN 2
+        ELSE 3
+      END,
+      created_at ASC,
+      business_id ASC
+    LIMIT 1
+  `).get(req.userId, ...allowedRoles) as { business_id: string } | undefined;
+  return member?.business_id || null;
+}
+
+interface BusinessMembershipSummary {
+  business_id: string;
+  name: string;
+  slug: string;
+  role: string;
+}
+
+function getBusinessMemberships(userId: string): BusinessMembershipSummary[] {
+  return getSqliteDb().prepare(`
+    SELECT b.id AS business_id, b.name, b.slug, bm.role
+    FROM business_members bm
+    INNER JOIN businesses b ON b.id = bm.business_id
+    WHERE bm.user_id = ? AND bm.is_active = 1
+    ORDER BY
+      CASE bm.role
+        WHEN 'OWNER' THEN 0
+        WHEN 'ADMIN' THEN 1
+        WHEN 'RECEPTION' THEN 2
+        ELSE 3
+      END,
+      bm.created_at ASC,
+      bm.business_id ASC
+  `).all(userId) as unknown as BusinessMembershipSummary[];
+}
+
+function getUserBusiness(req: Request, userId: string): {
+  business: any | null;
+  memberships: BusinessMembershipSummary[];
+} {
+  const sqlite = getSqliteDb();
+  const memberships = getBusinessMemberships(userId);
+  const requestedBusinessId = req.get('x-business-id');
+  const selectedMembership = memberships.find(membership => membership.business_id === requestedBusinessId)
+    || memberships[0];
+  if (!selectedMembership) return { business: null, memberships };
+
+  const business = sqlite.prepare(`
+    SELECT b.*, bm.role AS member_role
+    FROM businesses b
+    INNER JOIN business_members bm ON bm.business_id = b.id
+    WHERE b.id = ? AND bm.user_id = ? AND bm.is_active = 1
+  `).get(selectedMembership.business_id, userId) as any;
+  if (business) business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
+  return { business: business || null, memberships };
 }
 
 // -------------------------------------------------------------
@@ -445,15 +559,7 @@ router.post('/auth/login', (req, res) => {
     const subscription = withSubscriptionStatus(getLatestSubscriptionRecord(user.id));
     const roles = getUserRoles(user.id);
 
-    // Also get business owned or staffed
-    const business = sqlite.prepare(`
-      SELECT b.id, b.name, b.slug, b.booking_mode, bm.role as member_role
-      FROM businesses b
-      INNER JOIN business_members bm ON bm.business_id = b.id
-      WHERE bm.user_id = ? AND bm.is_active = 1
-      LIMIT 1
-    `).get(user.id) as any;
-    if (business) business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
+    const { business, memberships } = getUserBusiness(req, user.id);
 
     const token = generateToken({ id: user.id, email: user.email, password_hash: user.password_hash, created_at: '' }, roles);
     logAudit(user.id, business?.id || null, 'USER_LOGIN', 'user', user.id);
@@ -468,6 +574,7 @@ router.post('/auth/login', (req, res) => {
         profile,
         subscription,
         business,
+        memberships,
       },
     });
   } catch (error: any) {
@@ -487,14 +594,7 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
   const subscription = withSubscriptionStatus(getLatestSubscriptionRecord(req.userId || ''));
   const roles = getUserRoles(user.id);
 
-  const business = sqlite.prepare(`
-    SELECT b.*, bm.role as member_role
-    FROM businesses b
-    INNER JOIN business_members bm ON bm.business_id = b.id
-    WHERE bm.user_id = ? AND bm.is_active = 1
-    LIMIT 1
-  `).get(user.id) as any;
-  if (business) business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
+  const { business, memberships } = getUserBusiness(req, user.id);
 
   return res.json({
     user: {
@@ -504,6 +604,7 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
       profile,
       subscription,
       business,
+      memberships,
     },
   });
 });
@@ -1162,22 +1263,16 @@ function listBookings(req: AuthRequest, res: Response, forcedView?: 'customer' |
     return res.json({ bookings, total: bookings.length });
   }
 
-  const memberBusinessIds = sqlite.prepare(`
-    SELECT business_id FROM business_members WHERE user_id = ? AND is_active = 1
-  `).all(userId) as Array<{ business_id: string }>;
-  if (forcedView === 'business') {
-    if (business_id) {
-      if (authorizeBusiness(req, res, String(business_id), ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']) === null) return;
-    } else {
-      if (!memberBusinessIds.length) {
-        res.status(404).json({ error: 'Negocio no encontrado.' });
-        return;
-      }
-      if (authorizeBusiness(req, res, memberBusinessIds[0].business_id, ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']) === null) return;
-    }
+  const businessId = typeof business_id === 'string'
+    ? business_id
+    : resolveActiveBusinessId(req, res, BUSINESS_MEMBER_ROLES);
+  if (!businessId) {
+    if (!res.headersSent) res.status(404).json({ error: 'Negocio no encontrado.' });
+    return;
   }
+  const memberRole = authorizeBusiness(req, res, businessId, BUSINESS_MEMBER_ROLES);
+  if (memberRole === null) return;
 
-  // Viewing as Business Owner or Staff
   let sql = `
     SELECT b.*,
            biz.name as business_name,
@@ -1188,13 +1283,13 @@ function listBookings(req: AuthRequest, res: Response, forcedView?: 'customer' |
     INNER JOIN business_members bm ON bm.business_id = biz.id
     LEFT JOIN staff st ON st.id = b.staff_id
     LEFT JOIN services srv ON srv.id = b.service_id
-    WHERE bm.user_id = ? AND bm.is_active = 1
+    WHERE bm.user_id = ? AND bm.business_id = ? AND bm.is_active = 1
   `;
-  const params: any[] = [userId];
+  const params: any[] = [userId, businessId];
 
-  if (business_id) {
-    sql += ' AND b.business_id = ?';
-    params.push(business_id);
+  if (memberRole === 'STAFF' || memberRole === 'PROFESSIONAL') {
+    sql += ' AND b.staff_id IN (SELECT id FROM staff WHERE business_id = ? AND user_id = ?)';
+    params.push(businessId, userId);
   }
 
   if (status && typeof status === 'string' && status !== 'all') {
@@ -1216,7 +1311,7 @@ router.get('/bookings/:id/reschedule-slots', requireAuth, (req: AuthRequest, res
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (booking.customer_user_id !== req.userId && authorizeBusiness(req, res, booking.business_id) === null) return;
+  if (authorizeBookingActor(req, res, booking, 404, BUSINESS_MEMBER_ROLES, true) === null) return;
 
   const date = typeof req.query.date === 'string' ? req.query.date : '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -1258,16 +1353,7 @@ router.get('/bookings/:id', requireAuth, (req: AuthRequest, res: Response) => {
     return res.status(404).json({ error: 'Reserva no encontrada.' });
   }
 
-  const isCustomer = booking.customer_user_id === req.userId;
-  const isPlatformAdmin = getUserRoles(req.userId!).includes('PLATFORM_ADMIN');
-  const isActiveMember = sqlite.prepare(`
-    SELECT 1
-    FROM business_members
-    WHERE business_id = ? AND user_id = ? AND is_active = 1
-  `).get(booking.business_id, req.userId || '');
-  if (!isCustomer && !isPlatformAdmin && !isActiveMember) {
-    return res.status(404).json({ error: 'Reserva no encontrada.' });
-  }
+  if (authorizeBookingActor(req, res, booking, 404, BUSINESS_MEMBER_ROLES, true, true) === null) return;
 
   return res.json({ booking });
 });
@@ -1276,7 +1362,7 @@ const confirmBookingHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (authorizeBusiness(req, res, booking.business_id) === null) return;
+  if (authorizeBookingActor(req, res, booking) === null) return;
 
   if (booking.status !== 'PENDING') {
     return res.status(400).json({ error: `No se puede confirmar una reserva en estado ${booking.status}.` });
@@ -1307,7 +1393,7 @@ const rejectBookingHandler = (req: AuthRequest, res: Response) => {
   const { reason } = req.body;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (authorizeBusiness(req, res, booking.business_id) === null) return;
+  if (authorizeBookingActor(req, res, booking) === null) return;
 
   const now = new Date().toISOString();
   sqlite.prepare(`
@@ -1334,10 +1420,14 @@ const cancelBookingHandler = (req: AuthRequest, res: Response) => {
   const { reason } = req.body;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (
-    booking.customer_user_id !== req.userId &&
-    authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION']) === null
-  ) return;
+  if (authorizeBookingActor(
+    req,
+    res,
+    booking,
+    404,
+    ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION'],
+    true,
+  ) === null) return;
 
   if (booking.status === 'COMPLETED' || booking.status === 'CANCELLED') {
     return res.status(400).json({ error: `No se puede cancelar una reserva en estado ${booking.status}.` });
@@ -1371,7 +1461,7 @@ router.post('/bookings/:id/reschedule', requireAuth, (req: AuthRequest, res: Res
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (booking.customer_user_id !== req.userId && authorizeBusiness(req, res, booking.business_id) === null) return;
+  if (authorizeBookingActor(req, res, booking, 404, BUSINESS_MEMBER_ROLES, true) === null) return;
 
   const { booking_date, start_time, staff_id } = req.body;
   if (
@@ -1480,7 +1570,7 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
   const intervalDays = Number.isInteger(parsedDays) && parsedDays > 0 && parsedDays <= 365 ? parsedDays : 30;
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (authorizeBusiness(req, res, booking.business_id) === null) return;
+  if (authorizeBookingActor(req, res, booking) === null) return;
 
   if (booking.status !== 'CONFIRMED' && booking.status !== 'IN_PROGRESS') {
     return res.status(400).json({ error: `No se puede completar una reserva en estado ${booking.status}.` });
@@ -1564,7 +1654,13 @@ router.put('/bookings/:id/status', requireAuth, (req: AuthRequest, res: Response
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION'], 403) === null) return;
+  if (authorizeBookingActor(
+    req,
+    res,
+    booking,
+    403,
+    ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION'],
+  ) === null) return;
 
   const { status } = req.body;
   const transitions: Record<string, string[]> = {
@@ -1836,20 +1932,24 @@ router.post('/notifications/read-all', requireAuth, (req: AuthRequest, res: Resp
 // MY BUSINESS MANAGEMENT (Portal Profesional - Section 6 & 15)
 // -------------------------------------------------------------
 router.get('/business/my', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = resolveActiveBusinessId(req, res, ['OWNER', 'ADMIN']);
+  if (!businessId) {
+    if (!res.headersSent) return res.json({ business: null, has_business: false });
+    return;
+  }
   const sqlite = getSqliteDb();
   const business = sqlite.prepare(`
     SELECT b.*, bm.role as member_role
     FROM businesses b
     INNER JOIN business_members bm ON bm.business_id = b.id
-    WHERE bm.user_id = ? AND bm.is_active = 1 AND bm.role IN ('OWNER', 'ADMIN')
+    WHERE b.id = ? AND bm.user_id = ? AND bm.is_active = 1
     LIMIT 1
-  `).get(req.userId || '') as any;
+  `).get(businessId, req.userId || '') as any;
 
   if (!business) {
     return res.json({ business: null, has_business: false });
   }
   business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
-  if (authorizeBusiness(req, res, business.id, ['OWNER', 'ADMIN']) === null) return;
 
   // Get staff
   const staff = sqlite.prepare('SELECT * FROM staff WHERE business_id = ? AND is_active = 1 ORDER BY display_order ASC').all(business.id);
@@ -1868,17 +1968,12 @@ router.get('/business/my', requireAuth, (req: AuthRequest, res: Response) => {
 });
 
 function getManagedBusinessId(req: AuthRequest, res: Response): string | null {
-  const member = getSqliteDb().prepare(`
-    SELECT business_id FROM business_members
-    WHERE user_id = ? AND is_active = 1 AND role IN ('OWNER', 'ADMIN')
-    ORDER BY CASE role WHEN 'OWNER' THEN 0 ELSE 1 END
-    LIMIT 1
-  `).get(req.userId || '') as { business_id: string } | undefined;
-  if (!member) {
+  const businessId = resolveActiveBusinessId(req, res, ['OWNER', 'ADMIN']);
+  if (!businessId && !res.headersSent) {
     res.status(404).json({ error: 'Negocio no encontrado.' });
     return null;
   }
-  return authorizeBusiness(req, res, member.business_id, ['OWNER', 'ADMIN']) ? member.business_id : null;
+  return businessId;
 }
 
 router.get('/business/services', requireAuth, (req: AuthRequest, res: Response) => {
@@ -1891,7 +1986,26 @@ router.get('/business/services', requireAuth, (req: AuthRequest, res: Response) 
 router.get('/business/staff', requireAuth, (req: AuthRequest, res: Response) => {
   const businessId = getManagedBusinessId(req, res);
   if (!businessId) return;
-  const staff = getSqliteDb().prepare('SELECT * FROM staff WHERE business_id = ? AND is_active = 1 ORDER BY display_order ASC').all(businessId);
+  const staff = getSqliteDb().prepare(`
+    SELECT s.*,
+           CASE
+             WHEN s.user_id IS NOT NULL THEN 'linked'
+             WHEN invitation.id IS NOT NULL THEN 'pending'
+             ELSE 'none'
+           END AS account_status,
+           invitation.id AS invitation_id,
+           CASE WHEN s.user_id IS NOT NULL THEN bm.role ELSE NULL END AS member_role
+    FROM staff s
+    LEFT JOIN business_members bm ON bm.business_id = s.business_id AND bm.user_id = s.user_id
+    LEFT JOIN business_invitations invitation ON invitation.id = (
+      SELECT bi.id FROM business_invitations bi
+      WHERE bi.staff_id = s.id AND bi.status = 'pending'
+      ORDER BY bi.created_at DESC
+      LIMIT 1
+    )
+    WHERE s.business_id = ? AND s.is_active = 1
+    ORDER BY s.display_order ASC
+  `).all(businessId);
   return res.json({ staff });
 });
 
@@ -2099,49 +2213,421 @@ router.delete('/business/services/:id', requireAuth, (req: AuthRequest, res: Res
 });
 
 // Business Team Staff
-const createBusinessStaffHandler = (req: AuthRequest, res: Response) => {
+const BUSINESS_INVITATION_ROLES = ['STAFF', 'RECEPTION', 'ADMIN'] as const;
+
+function normalizeInvitationEmail(value: unknown, optional = false): string | null | undefined {
+  if (value === undefined || value === null || value === '') return optional ? null : undefined;
+  if (typeof value !== 'string') return undefined;
+  const email = value.trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : undefined;
+}
+
+function normalizeInvitationRole(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return 'STAFF';
+  return typeof value === 'string' && BUSINESS_INVITATION_ROLES.includes(value as typeof BUSINESS_INVITATION_ROLES[number])
+    ? value
+    : null;
+}
+
+function hasActiveBusinessMember(db: ReturnType<typeof getSqliteDb>, businessId: string, email: string): boolean {
+  return Boolean(db.prepare(`
+    SELECT 1
+    FROM users u
+    INNER JOIN business_members bm ON bm.user_id = u.id
+    WHERE bm.business_id = ? AND bm.is_active = 1 AND LOWER(u.email) = ?
+    LIMIT 1
+  `).get(businessId, email));
+}
+
+function hasPendingBusinessInvitation(db: ReturnType<typeof getSqliteDb>, businessId: string, email: string): boolean {
+  return Boolean(db.prepare(`
+    SELECT 1 FROM business_invitations
+    WHERE business_id = ? AND LOWER(email) = ? AND status = 'pending'
+    LIMIT 1
+  `).get(businessId, email));
+}
+
+function createBusinessInvitationToken(): { token: string; tokenHash: string } {
+  const token = randomBytes(32).toString('base64url');
+  return {
+    token,
+    tokenHash: createHash('sha256').update(token).digest('hex'),
+  };
+}
+
+function notifyAndEmailInvitation(
+  email: string,
+  businessName: string,
+  invitationId: string,
+  token: string,
+): Promise<void> {
+  const sqlite = getSqliteDb();
+  const invitee = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?').get(email) as { id: string } | undefined;
+  if (invitee) {
+    createNotification(
+      invitee.id,
+      'team_invitation',
+      'Invitación a un equipo',
+      `Te invitaron a formar parte de ${businessName}. Acepta o rechaza la invitación desde tu cuenta.`,
+      'business_invitation',
+      invitationId,
+    );
+  }
+
+  const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
+  const invitationLink = `${appUrl}/?invitation=${encodeURIComponent(invitationId)}&invitation_token=${encodeURIComponent(token)}`;
+  const subject = `Invitación para unirte a ${businessName} en SalonTrack`;
+  const html = `<p>Te invitaron a formar parte de ${escapeHtml(businessName)} en SalonTrack.</p><p><a href="${escapeHtml(invitationLink)}">Revisar invitación</a></p>`;
+  const text = `Te invitaron a formar parte de ${businessName} en SalonTrack. Revisa la invitación desde tu cuenta: ${invitationLink}`;
+  return emailProvider.send(email, subject, html, text)
+    .then(result => {
+      if (!result.success) console.error('[Team invitation] El adaptador no confirmó el envío del correo:', invitationId);
+    })
+    .catch(error => console.error(
+      '[Team invitation] No se pudo enviar el correo:',
+      error instanceof Error ? error.message : error,
+    ));
+}
+
+const createBusinessStaffHandler = async (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
 
   if (authorizeBusiness(req, res, bizId, ['OWNER', 'ADMIN']) === null) return;
   if (businessSubscriptionBlocked(res, bizId)) return;
 
-  const { name, specialty, role_title, phone, email, bio } = req.body;
+  const { name, specialty, role_title, phone, bio } = req.body;
   if (!name) return res.status(400).json({ error: 'El nombre del trabajador es obligatorio.' });
+  const email = normalizeInvitationEmail(req.body.email, true);
+  if (email === undefined) return res.status(400).json({ error: 'El correo electrónico no es válido.' });
+  const memberRole = normalizeInvitationRole(req.body.member_role);
+  if (!memberRole) return res.status(400).json({ error: 'member_role debe ser STAFF, RECEPTION o ADMIN.' });
+  if (email && hasActiveBusinessMember(sqlite, bizId, email)) {
+    return res.status(409).json({ error: 'Esta persona ya pertenece al equipo del negocio.' });
+  }
+  if (email && hasPendingBusinessInvitation(sqlite, bizId, email)) {
+    return res.status(409).json({ error: 'Ya existe una invitación pendiente para este correo.' });
+  }
 
   const staffId = generateId('stf');
+  const invitationId = email ? generateId('inv') : null;
+  const invitationToken = email ? createBusinessInvitationToken() : null;
   const now = new Date().toISOString();
 
-  sqlite.prepare(`
-    INSERT INTO staff (id, business_id, name, specialty, bio, phone, email, is_active, display_order, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1, 2, ?)
-  `).run(staffId, bizId, name.trim(), (specialty || role_title)?.trim() || 'Estilista', bio?.trim() || '', phone?.trim() || '', email?.trim() || '', now);
+  try {
+    withTransaction(db => {
+      if (email && hasActiveBusinessMember(db, bizId, email)) {
+        throw new Error('BUSINESS_MEMBER_EXISTS');
+      }
+      if (email && hasPendingBusinessInvitation(db, bizId, email)) {
+        throw new Error('PENDING_INVITATION_EXISTS');
+      }
 
-  // Default hours (Mon-Sat 09:30-19:30)
-  for (let d = 1; d <= 6; d++) {
-    sqlite.prepare(`
-      INSERT INTO staff_availability (id, staff_id, day_of_week, start_time, end_time, break_start, break_end, is_active, created_at)
-      VALUES (?, ?, ?, '09:30', '19:30', '14:00', '15:00', 1, ?)
-    `).run(generateId('sa'), staffId, d, now);
+      db.prepare(`
+        INSERT INTO staff (id, business_id, name, specialty, bio, phone, email, is_active, display_order, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 2, ?)
+      `).run(staffId, bizId, name.trim(), (specialty || role_title)?.trim() || 'Estilista', bio?.trim() || '', phone?.trim() || '', email || '', now);
+
+      for (let d = 1; d <= 6; d++) {
+        db.prepare(`
+          INSERT INTO staff_availability (id, staff_id, day_of_week, start_time, end_time, break_start, break_end, is_active, created_at)
+          VALUES (?, ?, ?, '09:30', '19:30', '14:00', '15:00', 1, ?)
+        `).run(generateId('sa'), staffId, d, now);
+      }
+
+      const services = db.prepare("SELECT id FROM services WHERE business_id = ? AND status = 'PUBLISHED'").all(bizId) as any[];
+      for (const service of services) {
+        db.prepare('INSERT OR IGNORE INTO staff_services (id, staff_id, service_id, created_at) VALUES (?, ?, ?, ?)').run(
+          generateId('ss'), staffId, service.id, now
+        );
+      }
+
+      if (invitationId && email) {
+        db.prepare(`
+          INSERT INTO business_invitations (
+            id, business_id, staff_id, email, token_hash, role, status, invited_by_user_id, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        `).run(invitationId, bizId, staffId, email, invitationToken!.tokenHash, memberRole, req.userId || null, now);
+      }
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'BUSINESS_MEMBER_EXISTS') {
+      return res.status(409).json({ error: 'Esta persona ya pertenece al equipo del negocio.' });
+    }
+    if (error instanceof Error && error.message === 'PENDING_INVITATION_EXISTS') {
+      return res.status(409).json({ error: 'Ya existe una invitación pendiente para este correo.' });
+    }
+    console.error('[Team invitation] No se pudo crear el miembro del equipo:', error);
+    return res.status(500).json({ error: 'No se pudo agregar al miembro del equipo.' });
   }
 
-  // Assign existing services to new staff
-  const services = sqlite.prepare("SELECT id FROM services WHERE business_id = ? AND status = 'PUBLISHED'").all(bizId) as any[];
-  for (const s of services) {
-    sqlite.prepare('INSERT OR IGNORE INTO staff_services (id, staff_id, service_id, created_at) VALUES (?, ?, ?, ?)').run(
-      generateId('ss'), staffId, s.id, now
-    );
+  const business = sqlite.prepare('SELECT name FROM businesses WHERE id = ?').get(bizId) as { name: string };
+  const invitation = invitationId
+    ? sqlite.prepare(`
+      SELECT id, business_id, staff_id, email, role, status, invited_by_user_id, created_at, responded_at
+      FROM business_invitations WHERE id = ?
+    `).get(invitationId)
+    : null;
+  if (email && invitationId && invitationToken) {
+    await notifyAndEmailInvitation(email, business.name, invitationId, invitationToken.token);
   }
-
-  return res.status(201).json({ message: 'Trabajador agregado exitosamente al equipo.', staff_id: staffId });
+  return res.status(201).json({
+    message: 'Trabajador agregado exitosamente al equipo.',
+    staff_id: staffId,
+    invitation,
+  });
 };
 router.post('/business/:id/staff', requireAuth, createBusinessStaffHandler);
-router.post('/business/staff', requireAuth, (req: AuthRequest, res: Response) => {
+router.post('/business/staff', requireAuth, async (req: AuthRequest, res: Response) => {
   const businessId = getManagedBusinessId(req, res);
   if (!businessId) return;
   req.params.id = businessId;
   if (req.body.role_title && !req.body.specialty) req.body.specialty = req.body.role_title;
   return createBusinessStaffHandler(req, res);
+});
+
+router.post('/business/staff/:id/invite', requireAuth, async (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  const staff = sqlite.prepare(`
+    SELECT id, business_id, user_id FROM staff
+    WHERE id = ? AND business_id = ?
+  `).get(req.params.id, businessId) as { id: string; business_id: string; user_id: string | null } | undefined;
+  if (!staff) return res.status(404).json({ error: 'Trabajador no encontrado.' });
+  if (staff.user_id) return res.status(409).json({ error: 'Este trabajador ya tiene una cuenta vinculada.' });
+  if (businessSubscriptionBlocked(res, businessId)) return;
+
+  const email = normalizeInvitationEmail(req.body.email);
+  if (!email) return res.status(400).json({ error: 'El correo electrónico no es válido.' });
+  const memberRole = normalizeInvitationRole(req.body.member_role);
+  if (!memberRole) return res.status(400).json({ error: 'member_role debe ser STAFF, RECEPTION o ADMIN.' });
+  if (hasActiveBusinessMember(sqlite, businessId, email)) {
+    return res.status(409).json({ error: 'Esta persona ya pertenece al equipo del negocio.' });
+  }
+  if (hasPendingBusinessInvitation(sqlite, businessId, email)) {
+    return res.status(409).json({ error: 'Ya existe una invitación pendiente para este correo.' });
+  }
+  const existingStaffInvite = sqlite.prepare(`
+    SELECT id FROM business_invitations
+    WHERE staff_id = ? AND status = 'pending'
+    LIMIT 1
+  `).get(staff.id);
+  if (existingStaffInvite) {
+    return res.status(409).json({ error: 'Este trabajador ya tiene una invitación pendiente.' });
+  }
+
+  const invitationId = generateId('inv');
+  const invitationToken = createBusinessInvitationToken();
+  const now = new Date().toISOString();
+  try {
+    withTransaction(db => {
+      if (hasActiveBusinessMember(db, businessId, email) || hasPendingBusinessInvitation(db, businessId, email)) {
+        throw new Error('INVITATION_CONFLICT');
+      }
+      db.prepare('UPDATE staff SET email = ? WHERE id = ? AND user_id IS NULL').run(email, staff.id);
+      db.prepare(`
+        INSERT INTO business_invitations (
+          id, business_id, staff_id, email, token_hash, role, status, invited_by_user_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+      `).run(invitationId, businessId, staff.id, email, invitationToken.tokenHash, memberRole, req.userId || null, now);
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'INVITATION_CONFLICT') {
+      return res.status(409).json({ error: 'Ya existe un miembro o una invitación pendiente para este correo.' });
+    }
+    console.error('[Team invitation] No se pudo crear la invitación:', error);
+    return res.status(500).json({ error: 'No se pudo enviar la invitación.' });
+  }
+
+  const business = sqlite.prepare('SELECT name FROM businesses WHERE id = ?').get(businessId) as { name: string };
+  const invitation = sqlite.prepare(`
+    SELECT id, business_id, staff_id, email, role, status, invited_by_user_id, created_at, responded_at
+    FROM business_invitations WHERE id = ?
+  `).get(invitationId);
+  await notifyAndEmailInvitation(email, business.name, invitationId, invitationToken.token);
+  return res.status(201).json({ invitation });
+});
+
+router.get('/business/invitations', requireAuth, (req: AuthRequest, res: Response) => {
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  const invitations = getSqliteDb().prepare(`
+    SELECT bi.id, bi.business_id, bi.staff_id, bi.email, bi.role, bi.status,
+           bi.invited_by_user_id, bi.created_at, bi.responded_at, s.name AS staff_name
+    FROM business_invitations bi
+    LEFT JOIN staff s ON s.id = bi.staff_id
+    WHERE bi.business_id = ?
+    ORDER BY bi.created_at DESC
+  `).all(businessId);
+  return res.json({ invitations });
+});
+
+router.delete('/business/invitations/:id', requireAuth, (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const businessId = getManagedBusinessId(req, res);
+  if (!businessId) return;
+  if (businessSubscriptionBlocked(res, businessId)) return;
+  const invitation = sqlite.prepare(`
+    SELECT id, status FROM business_invitations
+    WHERE id = ? AND business_id = ?
+  `).get(req.params.id, businessId) as { id: string; status: string } | undefined;
+  if (!invitation) return res.status(404).json({ error: 'Invitación no encontrada.' });
+  if (invitation.status !== 'pending') {
+    return res.status(409).json({ error: 'La invitación ya no está pendiente.' });
+  }
+  sqlite.prepare(`
+    UPDATE business_invitations SET status = 'revoked', responded_at = ?
+    WHERE id = ? AND status = 'pending'
+  `).run(new Date().toISOString(), invitation.id);
+  return res.json({ message: 'Invitación revocada.' });
+});
+
+router.get('/invitations/mine', requireAuth, (req: AuthRequest, res: Response) => {
+  const invitations = getSqliteDb().prepare(`
+    SELECT bi.id, bi.business_id, bi.staff_id, bi.email, bi.role, bi.created_at,
+           b.name AS business_name, b.slug AS business_slug, b.logo_url AS business_logo
+    FROM business_invitations bi
+    INNER JOIN businesses b ON b.id = bi.business_id
+    WHERE LOWER(bi.email) = LOWER(?) AND bi.status = 'pending'
+    ORDER BY bi.created_at DESC
+  `).all(req.userEmail || '') as Array<{
+    id: string;
+    business_id: string;
+    staff_id: string | null;
+    email: string;
+    role: string;
+    created_at: string;
+    business_name: string;
+    business_slug: string;
+    business_logo: string | null;
+  }>;
+  return res.json({ invitations });
+});
+
+router.post('/invitations/:id/accept', requireAuth, (req: AuthRequest, res: Response) => {
+  const sqlite = getSqliteDb();
+  const userId = req.userId!;
+  const userEmail = (req.userEmail || '').trim().toLowerCase();
+  const now = new Date().toISOString();
+  const outcome = withTransaction(db => {
+    const invitation = db.prepare(`
+      SELECT id, business_id, staff_id, email, token_hash, role, status, invited_by_user_id
+      FROM business_invitations WHERE id = ?
+    `).get(req.params.id) as {
+      id: string;
+      business_id: string;
+      staff_id: string | null;
+      email: string;
+      token_hash: string;
+      role: string;
+      status: string;
+      invited_by_user_id: string | null;
+    } | undefined;
+    if (!invitation || invitation.email.toLowerCase() !== userEmail) return { kind: 'not_found' as const };
+    if (invitation.status !== 'pending') return { kind: 'conflict' as const };
+    const suppliedToken = typeof req.body?.token === 'string' ? req.body.token : '';
+    const suppliedTokenHash = createHash('sha256').update(suppliedToken).digest();
+    const expectedTokenHash = Buffer.from(invitation.token_hash, 'hex');
+    if (
+      suppliedTokenHash.length !== expectedTokenHash.length ||
+      !timingSafeEqual(suppliedTokenHash, expectedTokenHash)
+    ) {
+      return { kind: 'invalid_token' as const };
+    }
+
+    const ownerMembership = db.prepare(`
+      SELECT 1 FROM business_members
+      WHERE business_id = ? AND user_id = ? AND role = 'OWNER'
+    `).get(invitation.business_id, userId);
+    if (ownerMembership) return { kind: 'owner' as const };
+
+    if (invitation.staff_id) {
+      const staff = db.prepare('SELECT business_id, user_id, is_active FROM staff WHERE id = ?')
+        .get(invitation.staff_id) as { business_id: string; user_id: string | null; is_active: number } | undefined;
+      if (staff && staff.business_id === invitation.business_id && staff.is_active === 0) {
+        return { kind: 'staff_inactive' as const };
+      }
+      if (staff && staff.business_id === invitation.business_id && staff.user_id && staff.user_id !== userId) {
+        return { kind: 'staff_linked' as const };
+      }
+    }
+
+    db.prepare(`
+      INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+      VALUES (?, ?, ?, ?, 1, ?)
+      ON CONFLICT(business_id, user_id) DO UPDATE SET
+        role = excluded.role,
+        is_active = 1
+    `).run(generateId('bm'), invitation.business_id, userId, invitation.role, now);
+
+    if (invitation.staff_id) {
+      db.prepare(`
+        UPDATE staff SET user_id = ?, is_active = 1
+        WHERE id = ? AND business_id = ? AND (user_id IS NULL OR user_id = ?)
+      `).run(userId, invitation.staff_id, invitation.business_id, userId);
+    }
+    db.prepare(`
+      INSERT OR IGNORE INTO user_roles (id, user_id, role, created_at)
+      VALUES (?, ?, 'BUSINESS_STAFF', ?)
+    `).run(generateId('role'), userId, now);
+    const updated = db.prepare(`
+      UPDATE business_invitations SET status = 'accepted', responded_at = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(now, invitation.id);
+    if (updated.changes !== 1) throw new Error('INVITATION_ALREADY_RESPONDED');
+    return {
+      kind: 'accepted' as const,
+      businessId: invitation.business_id,
+      businessName: String((db.prepare('SELECT name FROM businesses WHERE id = ?').get(invitation.business_id) as { name: string }).name),
+      inviterId: invitation.invited_by_user_id,
+    };
+  });
+
+  if (outcome.kind === 'not_found') return res.status(404).json({ error: 'Invitación no encontrada.' });
+  if (outcome.kind === 'conflict') return res.status(409).json({ error: 'La invitación ya no está pendiente.' });
+  if (outcome.kind === 'invalid_token') {
+    return res.status(403).json({ error: 'Abre el enlace de invitación que te enviamos por correo para aceptarla.' });
+  }
+  if (outcome.kind === 'owner') return res.status(409).json({ error: 'Ya eres propietario de este negocio.' });
+  if (outcome.kind === 'staff_linked') return res.status(409).json({ error: 'Este perfil de trabajador ya está vinculado a otra cuenta.' });
+  if (outcome.kind === 'staff_inactive') {
+    return res.status(409).json({ error: 'Este perfil de trabajador está inactivo. Solicita una nueva invitación.' });
+  }
+
+  if (outcome.inviterId) {
+    try {
+      createNotification(
+        outcome.inviterId,
+        'team_invitation_accepted',
+        'Invitación aceptada',
+        `Tu invitación para ${outcome.businessName} fue aceptada.`,
+        'business_invitation',
+        req.params.id,
+      );
+    } catch (error) {
+      console.error('[Team invitation] No se pudo notificar al administrador:', error);
+    }
+  }
+  return res.json({
+    message: `Ahora eres parte de ${outcome.businessName}.`,
+    memberships: getBusinessMemberships(userId),
+  });
+});
+
+router.post('/invitations/:id/decline', requireAuth, (req: AuthRequest, res: Response) => {
+  const userEmail = (req.userEmail || '').trim().toLowerCase();
+  const invitation = getSqliteDb().prepare(`
+    SELECT id, status FROM business_invitations
+    WHERE id = ? AND LOWER(email) = LOWER(?)
+  `).get(req.params.id, userEmail) as { id: string; status: string } | undefined;
+  if (!invitation) return res.status(404).json({ error: 'Invitación no encontrada.' });
+  if (invitation.status !== 'pending') return res.status(409).json({ error: 'La invitación ya no está pendiente.' });
+  getSqliteDb().prepare(`
+    UPDATE business_invitations SET status = 'declined', responded_at = ?
+    WHERE id = ? AND status = 'pending'
+  `).run(new Date().toISOString(), invitation.id);
+  return res.json({ message: 'Invitación rechazada.' });
 });
 
 router.delete('/business/staff/:id', requireAuth, (req: AuthRequest, res: Response) => {
@@ -2166,6 +2652,10 @@ router.delete('/business/staff/:id', requireAuth, (req: AuthRequest, res: Respon
     if (currentMember?.role === 'OWNER') return false;
 
     db.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(req.params.id);
+    db.prepare(`
+      UPDATE business_invitations SET status = 'revoked', responded_at = ?
+      WHERE staff_id = ? AND status = 'pending'
+    `).run(new Date().toISOString(), req.params.id);
     if (staff.user_id) {
       db.prepare(`
         UPDATE business_members SET is_active = 0

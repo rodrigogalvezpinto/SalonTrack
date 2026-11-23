@@ -210,6 +210,13 @@ export interface Subcategory {
   display_order: number;
 }
 
+export interface BusinessMembership {
+  business_id: string;
+  name: string;
+  slug: string;
+  role: string;
+}
+
 export interface Business {
   id: string;
   owner_id: string;
@@ -263,6 +270,9 @@ export interface Staff {
   email?: string;
   is_active: number | boolean;
   display_order: number;
+  account_status?: 'linked' | 'pending' | 'none';
+  invitation_id?: string | null;
+  member_role?: string | null;
 }
 
 export interface CatalogService {
