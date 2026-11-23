@@ -101,7 +101,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     },
   ];
 
-  const faqs = [
+  const faqs: Array<{ q: string; a: string; billingOnly?: boolean }> = [
     {
       q: '¿Cómo funciona el envío de mensajes por WhatsApp?',
       a: 'SalonTrack prepara un mensaje personalizado con el nombre de tu clienta, el salón y el servicio correspondiente. Al presionar "Avisar por WhatsApp", la aplicación abre WhatsApp directamente con el texto listo para enviar. Tú siempre mantienes el control total y puedes editar el texto antes de mandarlo.',
@@ -113,6 +113,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     {
       q: '¿Qué medios de pago aceptan en Chile?',
       a: 'Procesamos pagos en Pesos Chilenos (CLP) a través de Mercado Pago Chile: tarjetas de Débito (Redcompra / CuentaRUT), Webpay Plus y Crédito en cuotas.',
+      billingOnly: true,
     },
     {
       q: '¿Mis datos y fórmulas de tinte están seguros?',
@@ -185,15 +186,24 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <span>Comenzar Prueba Gratuita</span>
             <ArrowRight className="w-5 h-5" />
           </button>
-          <button
-            onClick={() => {
-              const el = document.getElementById('pricing');
-              el?.scrollIntoView({ behavior: 'smooth' });
-            }}
-            className="w-full sm:w-auto px-6 py-4 rounded-2xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-sm transition"
-          >
-            Ver Planes desde $9.990 CLP
-          </button>
+          {billingEnabled ? (
+            <button
+              onClick={() => {
+                const el = document.getElementById('pricing');
+                el?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="w-full sm:w-auto px-6 py-4 rounded-2xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-sm transition"
+            >
+              Ver Planes desde $9.990 CLP
+            </button>
+          ) : (
+            <button
+              onClick={() => onOpenAuth('register')}
+              className="w-full sm:w-auto px-6 py-4 rounded-2xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-sm transition"
+            >
+              Empieza gratis: 3 meses
+            </button>
+          )}
         </div>
 
         {/* Chile Trust Badge */}
@@ -204,9 +214,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <span className="flex items-center gap-1.5">
             <Check className="w-4 h-4 text-emerald-600" /> Moneda Chilena (CLP)
           </span>
-          <span className="flex items-center gap-1.5">
-            <Check className="w-4 h-4 text-emerald-600" /> Pagos seguros con Mercado Pago
-          </span>
+          {billingEnabled && (
+            <span className="flex items-center gap-1.5">
+              <Check className="w-4 h-4 text-emerald-600" /> Pagos seguros con Mercado Pago
+            </span>
+          )}
         </div>
       </section>
 
@@ -424,6 +436,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
         <div className="space-y-3">
           {faqs.map((faq, index) => {
+            if (!billingEnabled && faq.billingOnly) return null;
             const isOpen = openFaq === index;
             return (
               <div
@@ -458,8 +471,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
           <div className="flex items-center gap-4 text-slate-600">
             <span>Santiago, Chile 🇨🇱</span>
-            <span>CLP ($)</span>
-            <span>Mercado Pago Oficial</span>
+            {billingEnabled && (
+              <>
+                <span>CLP ($)</span>
+                <span>Mercado Pago Oficial</span>
+              </>
+            )}
           </div>
         </div>
       </footer>
