@@ -674,7 +674,7 @@ export const BusinessCatalogView: React.FC = () => {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">Precio en CLP ($)</label>
                   <input
@@ -697,6 +697,19 @@ export const BusinessCatalogView: React.FC = () => {
                     required
                     value={serviceForm.duration_min}
                     onChange={(e) => setServiceForm({ ...serviceForm, duration_min: Number(e.target.value) })}
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-rose-600 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Margen de limpieza (min)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="5"
+                    required
+                    value={serviceForm.buffer_min}
+                    onChange={(e) => setServiceForm({ ...serviceForm, buffer_min: Number(e.target.value) })}
                     className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-rose-600 font-mono"
                   />
                 </div>
