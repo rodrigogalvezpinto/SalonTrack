@@ -46,6 +46,8 @@ import {
   type MercadoPagoPayment,
 } from './adapters/mercadoPago.js';
 import { createRateLimiter } from './rateLimit.js';
+import { isBillingEnabled, TRIAL_DAYS } from './billing.js';
+import { createNotification } from './notifications.js';
 
 const router = Router();
 
@@ -96,6 +98,13 @@ function subscriptionExpiredResponse(res: Response): void {
   res.status(402).json({
     error: 'Tu licencia de SalonTrack venció. Renuévala en Configuración para seguir editando.',
     code: 'SUBSCRIPTION_EXPIRED',
+  });
+}
+
+function billingDisabledResponse(res: Response): void {
+  res.status(409).json({
+    error: 'Los planes de pago aún no están habilitados. Tu cuenta es gratis durante el lanzamiento.',
+    code: 'BILLING_DISABLED',
   });
 }
 
@@ -162,14 +171,6 @@ function logAudit(userId: string | null, businessId: string | null, action: stri
   } catch (err) {
     console.error('Audit log error:', err);
   }
-}
-
-function createNotification(userId: string, type: string, title: string, message: string, entityType?: string, entityId?: string, urgency: 'high' | 'medium' | 'low' = 'medium') {
-  const db = getSqliteDb();
-  db.prepare(`
-    INSERT INTO notifications (id, user_id, type, title, message, is_read, entity_type, entity_id, urgency, created_at)
-    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-  `).run(generateId('notif'), userId, type, title, message, entityType || null, entityId || null, urgency, new Date().toISOString());
 }
 
 function simulatedPaymentsDisabled(res: Response): boolean {
@@ -376,8 +377,8 @@ router.post('/auth/register', (req, res) => {
         }
       }
 
-      const trialExpire = new Date();
-      trialExpire.setDate(trialExpire.getDate() + 14);
+      const trialExpire = new Date(now);
+      trialExpire.setDate(trialExpire.getDate() + TRIAL_DAYS);
       createTrialSubscription(userId, now, trialExpire.toISOString());
     });
 
@@ -2777,6 +2778,7 @@ function parseSubscriptionExternalReference(externalReference: string): { userId
 function withSubscriptionStatus(subscription: Subscription | null) {
   if (!subscription) return null;
 
+  const billingEnabled = isBillingEnabled();
   const expirationDate = new Date(subscription.expiration_date);
   const now = new Date();
   const daysRemaining = Math.max(0, Math.ceil((expirationDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
@@ -2785,7 +2787,8 @@ function withSubscriptionStatus(subscription: Subscription | null) {
   return {
     ...subscription,
     days_remaining: daysRemaining,
-    is_active: !isExpired && (subscription.status === 'active' || subscription.status === 'trial'),
+    is_active: !billingEnabled || (!isExpired && (subscription.status === 'active' || subscription.status === 'trial')),
+    billing_enabled: billingEnabled,
   };
 }
 
@@ -2831,6 +2834,7 @@ function applyMercadoPagoPayment(
 router.get('/subscriptions/plans', (req, res) => {
   res.json({
     plans: PLANS,
+    billing_enabled: isBillingEnabled(),
     currency: 'CLP',
     tax_info: 'Precios expresados en Pesos Chilenos (CLP). Sujeto a comprobante digital.',
   });
@@ -2848,6 +2852,11 @@ router.get('/subscriptions/current', requireAuth, (req: AuthRequest, res: Respon
 });
 
 router.post('/payments/create-preference', requireAuth, async (req: AuthRequest, res: Response) => {
+  if (!isBillingEnabled()) {
+    billingDisabledResponse(res);
+    return;
+  }
+
   const { plan_id } = req.body;
   const plan = PLANS[plan_id];
   if (!plan) return res.status(400).json({ error: 'Plan seleccionado inválido.' });
@@ -2968,6 +2977,11 @@ router.post('/payments/confirm', requireAuth, async (req: AuthRequest, res: Resp
 });
 
 router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, res: Response) => {
+  if (!isBillingEnabled()) {
+    billingDisabledResponse(res);
+    return;
+  }
+
   if (simulatedPaymentsDisabled(res)) return;
   try {
     const userId = req.userId!;

@@ -1,6 +1,6 @@
 # Estado del proyecto — SalonTrack 2.0
 
-Auditoría de la base `origin/main` (`9a75d5a`) y de los endurecimientos puntuales de esta rama. Los estados reflejan el código disponible, no solo las pantallas.
+Auditoría de la base `origin/main` (`e141025`) y de los cambios de lanzamiento gratuito. Los estados reflejan el código disponible, no solo las pantallas.
 
 ## Avance por fase
 
@@ -16,7 +16,7 @@ Auditoría de la base `origin/main` (`9a75d5a`) y de los endurecimientos puntual
 | 7 — Pagos | Parcial | Mercado Pago Checkout Pro y el webhook firmado están implementados y fusionados en el PR #12; faltan credenciales reales y el manejo de reembolsos/contracargos. Los depósitos de reservas siguen fuera de esta integración. |
 | 8 — Paneles y estadísticas | Parcial | `/api/dashboard/stats`, `/api/admin/dashboard` y `CustomerPortalView.tsx` entregan paneles básicos con datos consultados directamente de SQLite. |
 | 9 — Notificaciones y reputación | Parcial | La recuperación de contraseña envía correo por Resend cuando está configurado; quedan pendientes las credenciales reales y un dominio remitente verificado. WhatsApp sigue usando el adaptador local y falta completar el procesamiento programado. |
-| 10 — Suscripciones y monetización | Parcial | La expiración se aplica en backend y Mercado Pago Checkout Pro activa suscripciones tras validar pagos y firmas de webhook; falta validar credenciales de producción y decidir si los negocios vencidos deben desaparecer del marketplace. |
+| 10 — Suscripciones y monetización | Lanzamiento gratuito | Cada cuenta recibe 90 días de prueba. Con `BILLING_ENABLED=false` (predeterminado), la expiración no restringe el acceso y planes/checkout se ocultan. Para activar cobros, ejecutar `npm run billing:start` antes de configurar `BILLING_ENABLED=true`; después se envían avisos a 7 días y al vencimiento, y aplica el bloqueo de solo lectura. |
 | 11 — Calidad y estabilización | Parcial | `.github/workflows/ci.yml` ejecuta lint, pruebas automatizadas, build y construcción de la imagen Docker en cada PR; el contenedor incluye health check de SQLite y cierre ordenado. En producción se omiten las cuentas demo y el primer `PLATFORM_ADMIN` se concede con `npm run admin:grant` tras registrar una cuenta. La elección del host y el despliegue con volumen persistente siguen pendientes. |
 
 ## Decisión sobre las implementaciones alternativas
@@ -33,6 +33,7 @@ Los PR #1 y #2 contenían una implementación alternativa. Se decidió cerrarlos
 - Los pagos simulados de activación y checkout se bloquean en producción por defecto; `ALLOW_SIMULATED_PAYMENTS=true` solo debe usarse para demostraciones.
 - Resend está integrado para la recuperación de contraseña; fuera de producción, si no hay credenciales, los correos se guardan en `data/dev-mail/outbox.jsonl`, ignorado por git. En producción se requiere `RESEND_API_KEY`, `RESEND_FROM_EMAIL` y un dominio verificado.
 - Mercado Pago real está integrado y fusionado en el PR #12; quedan pendientes credenciales reales y soporte para reembolsos/contracargos. Los depósitos de reservas siguen usando el flujo simulado.
+- La facturación de suscripciones permanece desactivada durante el lanzamiento gratuito. Antes de habilitarla, ejecutar `npm run billing:start`; no activar `BILLING_ENABLED=true` sin conceder primero el margen de gracia.
 - La disponibilidad consulta reservas antes de insertar, sin una garantía atómica contra dos reservas concurrentes.
 
 ## Próximos pasos prioritarios

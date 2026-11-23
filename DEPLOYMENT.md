@@ -20,6 +20,11 @@ Configure las siguientes variables en el panel de secretos de su proveedor:
 # Puerto (lo inyecta la plataforma; 3000 es el valor local por defecto)
 PORT=3000
 
+# La facturación permanece desactivada durante el lanzamiento gratuito.
+BILLING_ENABLED=false
+# Días de gracia al habilitar la facturación (entero >= 1; predeterminado 7).
+BILLING_GRACE_DAYS=7
+
 # Configure el número exacto de saltos de proxy confiables.
 # Por ejemplo, use 1 detrás de un único proxy de Railway, Fly o un balanceador.
 # Nunca use true: confiaría cualquier X-Forwarded-For y permitiría evadir los límites por IP.
@@ -48,6 +53,18 @@ DATABASE_FILE="/data/salontrack.sqlite"
 ```
 
 Los pagos simulados están bloqueados en producción por defecto; no establezca `ALLOW_SIMULATED_PAYMENTS=true` en producción.
+
+## Lanzamiento gratuito y activación posterior de cobros
+
+La facturación está desactivada por defecto (`BILLING_ENABLED=false`). Cada cuenta nueva recibe 3 meses gratis. Mientras siga desactivada, una suscripción vencida no bloquea las herramientas profesionales, y la aplicación oculta los planes y el checkout.
+
+Antes de activar cobros, amplíe los períodos de prueba que ya vencieron o están próximos a vencer para conceder el margen configurado. Ejecute el comando en el contenedor o en la consola de Railway/Fly:
+
+```bash
+docker exec <contenedor> npm run billing:start
+```
+
+Después configure `BILLING_ENABLED=true` y reinicie la aplicación. `BILLING_GRACE_DAYS` debe ser un entero de al menos 1 y su valor predeterminado es 7. Al habilitarse la facturación, se envían avisos por correo y dentro de la aplicación 7 días antes del vencimiento y al vencer; la protección de solo lectura existente se aplica a las suscripciones vencidas.
 
 ## Proxy confiable y límites de autenticación
 

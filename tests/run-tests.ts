@@ -13,9 +13,12 @@ import { hashPassword, verifyPassword, seedDemoDataIfEmpty } from '../server/aut
 import { grantPlatformAdmin } from '../server/admin.js';
 import { createBackup, restoreBackup, verifyBackup } from '../server/backup.js';
 import { expireStalePendingBookings } from '../server/bookingExpiration.js';
+import { BILLING_GRACE_DAYS, isBillingEnabled, TRIAL_DAYS } from '../server/billing.js';
 import { generateId } from '../server/db.js';
 import { listClients, listContactLogs, listServices } from '../server/crmRepository.js';
 import { checkMigrations, closeSqliteDb, getDatabasePath, getSqliteDb, MIGRATIONS, migrationChecksum, runMigrations, withTransaction } from '../server/sqlite.js';
+import { processTrialNotices } from '../server/trialNotices.js';
+import { extendTrialsForBillingStart } from '../scripts/billing-start.js';
 import { formatMinutesToTime, getAvailableSlots, isSlotAvailable } from '../server/availability.js';
 import { emailConfigured, emailProvider } from '../server/adapters/email.js';
 import { localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
@@ -256,7 +259,7 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
     runMigrations(db);
     const recorded = db.prepare('SELECT version, checksum FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number; checksum: string }>;
-    assert.strictEqual(recorded.length, 3);
+    assert.strictEqual(recorded.length, 4);
     assert.deepStrictEqual(
       recorded.map(row => row.checksum),
       MIGRATIONS.map(migrationChecksum)
@@ -283,7 +286,7 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
 
     const brokenMigrations = [
       ...MIGRATIONS,
-      { version: 4, name: 'rota', sql: 'CREATE TABLE tmp_rota (id TEXT); SELECT * FROM tabla_inexistente;' },
+      { version: 5, name: 'rota', sql: 'CREATE TABLE tmp_rota (id TEXT); SELECT * FROM tabla_inexistente;' },
     ];
     assert.throws(() => runMigrations(db, brokenMigrations), /tabla_inexistente/);
     assert.strictEqual(
@@ -292,7 +295,7 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
       0
     );
     assert.strictEqual(
-      (db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 4').get() as { count: number }).count,
+      (db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 5').get() as { count: number }).count,
       0
     );
   } finally {
@@ -317,6 +320,91 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
   } finally {
     legacyDb.close();
     rmSync(legacyDirectory, { recursive: true, force: true });
+  }
+});
+
+test('Migración de lanzamiento extiende las pruebas antiguas a 90 días', () => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'salontrack-free-launch-migration-'));
+  const db = new DatabaseSync(join(temporaryDirectory, 'migration.sqlite'));
+  const userId = generateId('usr');
+  const startDate = '2025-01-01T12:00:00.000Z';
+
+  try {
+    db.exec('PRAGMA foreign_keys = ON;');
+    runMigrations(db, MIGRATIONS.slice(0, 3));
+    db.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
+      .run(userId, `${userId}@example.test`, 'test-hash', startDate);
+    db.prepare(`
+      INSERT INTO subscriptions (
+        id, user_id, plan, status, start_date, expiration_date, payment_provider, created_at
+      ) VALUES (?, ?, 'pro_quarterly', 'trial', ?, ?, 'mercadopago', ?)
+    `).run(generateId('sub'), userId, startDate, '2025-01-15T12:00:00.000Z', startDate);
+    const expectedExpiration = (db.prepare(
+      "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+90 days') AS expiration_date"
+    ).get(startDate) as { expiration_date: string }).expiration_date;
+
+    runMigrations(db);
+
+    assert.strictEqual(
+      (db.prepare('SELECT expiration_date FROM subscriptions WHERE user_id = ?').get(userId) as { expiration_date: string }).expiration_date,
+      expectedExpiration
+    );
+    assert.strictEqual(
+      (db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'subscription_notices'")
+        .get() as { count: number }).count,
+      1
+    );
+  } finally {
+    db.close();
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('Facturación y gracia: configuración predeterminada y extensión sin acortar períodos', () => {
+  const previousBillingEnabled = process.env.BILLING_ENABLED;
+  const sqlite = getSqliteDb();
+  const firstUserId = generateId('usr');
+  const secondUserId = generateId('usr');
+  const now = new Date('2000-01-01T12:00:00.000Z');
+  const expectedGrace = new Date(now);
+  expectedGrace.setDate(expectedGrace.getDate() + BILLING_GRACE_DAYS);
+
+  const insertUser = (userId: string) => sqlite.prepare(
+    'INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)'
+  ).run(userId, `${userId}@example.test`, 'test-hash', now.toISOString());
+  const insertTrial = (userId: string, id: string, expirationDate: string) => sqlite.prepare(`
+    INSERT INTO subscriptions (
+      id, user_id, plan, status, start_date, expiration_date, payment_provider, created_at
+    ) VALUES (?, ?, 'pro_quarterly', 'trial', ?, ?, 'mercadopago', ?)
+  `).run(id, userId, now.toISOString(), expirationDate, now.toISOString());
+
+  try {
+    assert.strictEqual(TRIAL_DAYS, 90);
+    assert.strictEqual(BILLING_GRACE_DAYS, 7);
+    delete process.env.BILLING_ENABLED;
+    assert.strictEqual(isBillingEnabled(), false);
+    process.env.BILLING_ENABLED = 'true';
+    assert.strictEqual(isBillingEnabled(), true);
+
+    insertUser(firstUserId);
+    insertUser(secondUserId);
+    insertTrial(firstUserId, generateId('sub'), '1999-12-15T12:00:00.000Z');
+    insertTrial(secondUserId, generateId('sub'), '2000-02-01T12:00:00.000Z');
+
+    assert.strictEqual(extendTrialsForBillingStart(now), 1);
+    assert.strictEqual(
+      (sqlite.prepare('SELECT expiration_date FROM subscriptions WHERE user_id = ?').get(firstUserId) as { expiration_date: string }).expiration_date,
+      expectedGrace.toISOString()
+    );
+    assert.strictEqual(
+      (sqlite.prepare('SELECT expiration_date FROM subscriptions WHERE user_id = ?').get(secondUserId) as { expiration_date: string }).expiration_date,
+      '2000-02-01T12:00:00.000Z'
+    );
+    assert.strictEqual(extendTrialsForBillingStart(now), 0);
+  } finally {
+    if (previousBillingEnabled === undefined) delete process.env.BILLING_ENABLED;
+    else process.env.BILLING_ENABLED = previousBillingEnabled;
+    sqlite.prepare('DELETE FROM users WHERE id IN (?, ?)').run(firstUserId, secondUserId);
   }
 });
 
@@ -1450,6 +1538,126 @@ async function runIntegrationTests() {
       }
     });
 
+    await integrationTest('Lanzamiento gratuito: el registro entrega 90 días y publica el estado de facturación', async () => {
+      const originalBillingEnabled = process.env.BILLING_ENABLED;
+      const email = `free-launch-${generateId('user')}@example.test`;
+      let userId: string | undefined;
+
+      try {
+        process.env.BILLING_ENABLED = 'true';
+        const response = await sendJson('/api/auth/register', {
+          email,
+          password: 'FreeLaunch123!',
+          full_name: 'Profesional de lanzamiento',
+          phone: '+56912345051',
+        });
+        assert.strictEqual(response.status, 201);
+        const registered = await response.json() as {
+          token: string;
+          user: {
+            id: string;
+            subscription: {
+              status: string;
+              start_date: string;
+              expiration_date: string;
+              billing_enabled: boolean;
+            };
+          };
+        };
+        userId = registered.user.id;
+        assert.strictEqual(registered.user.subscription.status, 'trial');
+        assert.strictEqual(registered.user.subscription.billing_enabled, true);
+        const expectedExpiration = new Date(registered.user.subscription.start_date);
+        expectedExpiration.setDate(expectedExpiration.getDate() + TRIAL_DAYS);
+        assert.strictEqual(
+          registered.user.subscription.expiration_date,
+          expectedExpiration.toISOString()
+        );
+
+        const plansResponse = await requestJson('/api/subscriptions/plans', 'GET');
+        assert.strictEqual((await plansResponse.json() as { billing_enabled: boolean }).billing_enabled, true);
+      } finally {
+        if (originalBillingEnabled === undefined) delete process.env.BILLING_ENABLED;
+        else process.env.BILLING_ENABLED = originalBillingEnabled;
+        if (userId) {
+          const business = sqlite.prepare('SELECT id FROM businesses WHERE owner_id = ?').get(userId) as { id: string } | undefined;
+          if (business) sqlite.prepare('DELETE FROM businesses WHERE id = ?').run(business.id);
+          sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+        }
+      }
+    });
+
+    await integrationTest('Lanzamiento gratuito: una cuenta vencida conserva edición y checkout responde 409', async () => {
+      const originalBillingEnabled = process.env.BILLING_ENABLED;
+      const email = `free-access-${generateId('user')}@example.test`;
+      let userId: string | undefined;
+
+      try {
+        process.env.BILLING_ENABLED = 'true';
+        const registration = await sendJson('/api/auth/register', {
+          email,
+          password: 'FreeAccess123!',
+          full_name: 'Profesional con acceso gratuito',
+          phone: '+56912345052',
+        });
+        assert.strictEqual(registration.status, 201);
+        const registered = await registration.json() as { token: string; user: { id: string } };
+        userId = registered.user.id;
+
+        const createdClientResponse = await sendJson('/api/clients', {
+          full_name: 'Clienta para el lanzamiento',
+          phone: '+56912345053',
+        }, registered.token);
+        assert.strictEqual(createdClientResponse.status, 201);
+        const clientId = (await createdClientResponse.json() as { client: { id: string } }).client.id;
+        sqlite.prepare('UPDATE subscriptions SET status = ?, expiration_date = ? WHERE user_id = ?')
+          .run('active', new Date(Date.now() - 60_000).toISOString(), userId);
+
+        process.env.BILLING_ENABLED = 'false';
+        const currentSession = await requestJson('/api/auth/me', 'GET', registered.token);
+        assert.strictEqual(currentSession.status, 200);
+        const sessionSubscription = (await currentSession.json() as {
+          user: { subscription: { is_active: boolean; billing_enabled: boolean } };
+        }).user.subscription;
+        assert.strictEqual(sessionSubscription.is_active, true);
+        assert.strictEqual(sessionSubscription.billing_enabled, false);
+
+        const updateClientResponse = await requestJson(`/api/clients/${clientId}`, 'PUT', registered.token, {
+          full_name: 'Clienta editada durante el lanzamiento',
+          phone: '+56912345053',
+        });
+        assert.strictEqual(updateClientResponse.status, 200);
+
+        const expectedBillingDisabled = {
+          error: 'Los planes de pago aún no están habilitados. Tu cuenta es gratis durante el lanzamiento.',
+          code: 'BILLING_DISABLED',
+        };
+        const preferenceResponse = await sendJson('/api/payments/create-preference', {
+          plan_id: 'pro_quarterly',
+        }, registered.token);
+        assert.strictEqual(preferenceResponse.status, 409);
+        assert.deepStrictEqual(await preferenceResponse.json(), expectedBillingDisabled);
+
+        const activationResponse = await sendJson('/api/subscriptions/activate-license', {
+          plan_id: 'pro_quarterly',
+          payment_ref: generateId('disabled_billing'),
+        }, registered.token);
+        assert.strictEqual(activationResponse.status, 409);
+        assert.deepStrictEqual(await activationResponse.json(), expectedBillingDisabled);
+
+        const plansResponse = await requestJson('/api/subscriptions/plans', 'GET');
+        assert.strictEqual((await plansResponse.json() as { billing_enabled: boolean }).billing_enabled, false);
+      } finally {
+        if (originalBillingEnabled === undefined) delete process.env.BILLING_ENABLED;
+        else process.env.BILLING_ENABLED = originalBillingEnabled;
+        if (userId) {
+          const business = sqlite.prepare('SELECT id FROM businesses WHERE owner_id = ?').get(userId) as { id: string } | undefined;
+          if (business) sqlite.prepare('DELETE FROM businesses WHERE id = ?').run(business.id);
+          sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+        }
+      }
+    });
+
     await integrationTest('Suscripción vencida: CRM y negocio quedan de solo lectura, reservas siguen activas', async () => {
       const email = `subscription-expired-${generateId('user')}@example.test`;
       const registeredResponse = await sendJson('/api/auth/register', {
@@ -1492,11 +1700,12 @@ async function runIntegrationTests() {
         const expiredSession = await requestJson('/api/auth/me', 'GET', registered.token);
         assert.strictEqual(expiredSession.status, 200);
         const expiredSessionBody = await expiredSession.json() as {
-          user: { subscription: { status: string; is_active: boolean; days_remaining: number } };
+          user: { subscription: { status: string; is_active: boolean; days_remaining: number; billing_enabled: boolean } };
         };
         assert.strictEqual(expiredSessionBody.user.subscription.status, 'active');
         assert.strictEqual(expiredSessionBody.user.subscription.is_active, false);
         assert.strictEqual(expiredSessionBody.user.subscription.days_remaining, 0);
+        assert.strictEqual(expiredSessionBody.user.subscription.billing_enabled, true);
 
         const expiredLogin = await sendJson('/api/auth/login', {
           email,
@@ -3809,6 +4018,111 @@ async function runIntegrationTests() {
       assert.ok(mail.body.includes('reset_token=abc123'));
       assert.ok(logged.every(line => !line.includes('reset_token')));
       rmSync(outboxDir, { recursive: true, force: true });
+    });
+
+    await integrationTest('Avisos de prueba: respeta facturación, notifica una sola vez y entrega correo local', async () => {
+      const outboxDir = mkdtempSync(join(tmpdir(), 'salontrack-trial-notices-'));
+      const previousEnvironment = {
+        billingEnabled: process.env.BILLING_ENABLED,
+        nodeEnv: process.env.NODE_ENV,
+        mailDir: process.env.DEV_MAIL_DIR,
+        apiKey: process.env.RESEND_API_KEY,
+        fromEmail: process.env.RESEND_FROM_EMAIL,
+      };
+      const endingUserId = generateId('usr');
+      const endedUserId = generateId('usr');
+      const endingSubscriptionId = generateId('sub');
+      const endedSubscriptionId = generateId('sub');
+      const now = new Date();
+      const endingDate = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      const endedDate = new Date(now.getTime() - 60_000).toISOString();
+      const messageEnding = 'Tu oferta de lanzamiento termina en 7 días. Elige un plan en Configuración para seguir usando SalonTrack sin interrupciones.';
+      const messageEnded = 'Tu oferta de lanzamiento terminó. Ahora es momento de elegir un plan en Configuración para seguir editando.';
+      const insertTrialAccount = (userId: string, subscriptionId: string, email: string, expirationDate: string) => {
+        sqlite.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
+          .run(userId, email, 'test-hash', now.toISOString());
+        sqlite.prepare(`
+          INSERT INTO subscriptions (
+            id, user_id, plan, status, start_date, expiration_date, payment_provider, created_at
+          ) VALUES (?, ?, 'pro_quarterly', 'trial', ?, ?, 'mercadopago', ?)
+        `).run(subscriptionId, userId, now.toISOString(), expirationDate, now.toISOString());
+      };
+
+      try {
+        process.env.DEV_MAIL_DIR = outboxDir;
+        process.env.NODE_ENV = 'test';
+        delete process.env.RESEND_API_KEY;
+        delete process.env.RESEND_FROM_EMAIL;
+        insertTrialAccount(endingUserId, endingSubscriptionId, `${endingUserId}@example.test`, endingDate);
+        insertTrialAccount(endedUserId, endedSubscriptionId, `${endedUserId}@example.test`, endedDate);
+
+        process.env.BILLING_ENABLED = 'false';
+        assert.strictEqual(await processTrialNotices(now), 0);
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM subscription_notices WHERE subscription_id IN (?, ?)')
+            .get(endingSubscriptionId, endedSubscriptionId) as { count: number }).count,
+          0
+        );
+
+        process.env.BILLING_ENABLED = 'true';
+        assert.strictEqual(await processTrialNotices(now), 2);
+        const notices = sqlite.prepare(`
+          SELECT subscription_id, kind FROM subscription_notices
+          WHERE subscription_id IN (?, ?) ORDER BY subscription_id
+        `).all(endingSubscriptionId, endedSubscriptionId) as Array<{ subscription_id: string; kind: string }>;
+        assert.deepStrictEqual(
+          Object.fromEntries(notices.map(notice => [notice.subscription_id, notice.kind])),
+          {
+            [endedSubscriptionId]: 'trial_ended',
+            [endingSubscriptionId]: 'trial_ending_7d',
+          }
+        );
+        const notifications = sqlite.prepare(`
+          SELECT user_id, message FROM notifications WHERE user_id IN (?, ?) ORDER BY user_id
+        `).all(endedUserId, endingUserId) as Array<{ user_id: string; message: string }>;
+        assert.deepStrictEqual(
+          Object.fromEntries(notifications.map(notification => [notification.user_id, notification.message])),
+          {
+            [endedUserId]: messageEnded,
+            [endingUserId]: messageEnding,
+          }
+        );
+
+        const outboxFile = join(outboxDir, 'outbox.jsonl');
+        const emails = readFileSync(outboxFile, 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
+          to: string;
+          subject: string;
+          body: string;
+        });
+        assert.strictEqual(emails.length, 2);
+        assert.deepStrictEqual(emails.map(email => email.to).sort(), [
+          `${endedUserId}@example.test`,
+          `${endingUserId}@example.test`,
+        ].sort());
+        assert.ok(emails.some(email => email.body.includes(messageEnding)));
+        assert.ok(emails.some(email => email.body.includes(messageEnded)));
+
+        assert.strictEqual(await processTrialNotices(now), 0);
+        assert.strictEqual(readFileSync(outboxFile, 'utf8').trim().split('\n').length, 2);
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM notifications WHERE user_id IN (?, ?)')
+            .get(endingUserId, endedUserId) as { count: number }).count,
+          2
+        );
+      } finally {
+        if (previousEnvironment.billingEnabled === undefined) delete process.env.BILLING_ENABLED;
+        else process.env.BILLING_ENABLED = previousEnvironment.billingEnabled;
+        if (previousEnvironment.nodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = previousEnvironment.nodeEnv;
+        if (previousEnvironment.mailDir === undefined) delete process.env.DEV_MAIL_DIR;
+        else process.env.DEV_MAIL_DIR = previousEnvironment.mailDir;
+        if (previousEnvironment.apiKey === undefined) delete process.env.RESEND_API_KEY;
+        else process.env.RESEND_API_KEY = previousEnvironment.apiKey;
+        if (previousEnvironment.fromEmail === undefined) delete process.env.RESEND_FROM_EMAIL;
+        else process.env.RESEND_FROM_EMAIL = previousEnvironment.fromEmail;
+        sqlite.prepare('DELETE FROM users WHERE id IN (?, ?)').run(endingUserId, endedUserId);
+        rmSync(outboxDir, { recursive: true, force: true });
+      }
     });
 
     await integrationTest('Recuperación: limita solicitudes repetidas por cuenta', async () => {

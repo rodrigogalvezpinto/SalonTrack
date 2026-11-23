@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { Client, ContactLog, Payment, Profile, Service, Subscription, User, generateId } from './db.js';
 import { getSqliteDb, withTransaction } from './sqlite.js';
+import { isBillingEnabled, TRIAL_DAYS } from './billing.js';
 
 const CLIENT_COLUMNS = `
   id, user_id, full_name, phone, notes, preferred_contact, re_engagement_status, created_at, updated_at
@@ -481,7 +482,7 @@ export function getLatestSubscriptionRecord(userId: string): Subscription | null
 export function createTrialSubscription(userId: string, startDate = new Date().toISOString(), expirationDate?: string): Subscription {
   const expiration = expirationDate || (() => {
     const date = new Date(startDate);
-    date.setDate(date.getDate() + 14);
+    date.setDate(date.getDate() + TRIAL_DAYS);
     return date.toISOString();
   })();
   const subscription: Subscription = {
@@ -506,6 +507,7 @@ export function getOrCreateSubscription(userId: string): Subscription {
 }
 
 export function isSubscriptionActive(userId: string, now = new Date()): boolean {
+  if (!isBillingEnabled()) return true;
   const subscription = getOrCreateSubscription(userId);
   return (subscription.status === 'trial' || subscription.status === 'active')
     && new Date(subscription.expiration_date) > now;

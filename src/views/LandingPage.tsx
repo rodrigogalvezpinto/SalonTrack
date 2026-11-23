@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { formatCLP } from '../utils/formatters';
 import { PWAInstallButton } from '../components/PWAInstallButton';
+import { apiRequest } from '../utils/api';
 import { 
   Scissors, 
   Clock, 
@@ -30,9 +31,22 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   // Interactive Calculator State
   const [estimatedClients, setEstimatedClients] = useState<number>(25);
   const [avgTicket, setAvgTicket] = useState<number>(45000);
+  const [billingEnabled, setBillingEnabled] = useState(false);
 
   // FAQ accordion state
   const [openFaq, setOpenFaq] = useState<number | null>(0);
+
+  useEffect(() => {
+    let isCurrent = true;
+    apiRequest<{ billing_enabled: boolean }>('/api/subscriptions/plans')
+      .then((response) => {
+        if (isCurrent) setBillingEnabled(response.billing_enabled === true);
+      })
+      .catch(() => {});
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   // Potential calculated recovered amount: ~20% of clients who would otherwise forget their retouch
   const monthlyRecoverable = Math.round(estimatedClients * 0.25 * avgTicket);
@@ -309,6 +323,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       </section>
 
       {/* Pricing Section */}
+      {billingEnabled ? (
       <section id="pricing" className="py-16 px-4 sm:px-8 bg-slate-100/70 border-t border-slate-200">
         <div className="max-w-6xl mx-auto space-y-12">
           <div className="text-center space-y-3 max-w-2xl mx-auto">
@@ -381,6 +396,20 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           </div>
         </div>
       </section>
+      ) : (
+        <section id="pricing" className="py-16 px-4 sm:px-8 bg-slate-100/70 border-t border-slate-200">
+          <div className="max-w-3xl mx-auto rounded-3xl border border-emerald-200 bg-white p-8 text-center shadow-xs">
+            <h2 className="text-2xl sm:text-3xl font-black text-slate-900">Gratis durante el lanzamiento</h2>
+            <p className="mt-3 text-sm text-slate-600">Todas las cuentas nuevas reciben 3 meses gratis para usar SalonTrack.</p>
+            <button
+              onClick={() => onOpenAuth('register')}
+              className="mt-6 px-6 py-3 rounded-xl bg-emerald-600 text-white font-bold text-sm hover:bg-emerald-700 transition"
+            >
+              Crear cuenta gratis
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* FAQs Section */}
       <section className="py-16 px-4 sm:px-8 max-w-3xl mx-auto w-full space-y-6">

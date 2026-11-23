@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { expireStalePendingBookings } from './server/bookingExpiration.js';
+import { processTrialNotices } from './server/trialNotices.js';
 import apiRouter from './server/routes.js';
 import { seedDemoDataIfEmpty } from './server/auth.js';
 import { emailConfigured } from './server/adapters/email.js';
@@ -73,6 +74,14 @@ async function startServer() {
   };
   expirePendingBookings();
   setInterval(expirePendingBookings, 15 * 60 * 1000).unref();
+
+  const runTrialNotices = () => {
+    void processTrialNotices().catch(err => {
+      console.error('Error al procesar avisos de prueba:', err);
+    });
+  };
+  runTrialNotices();
+  setInterval(runTrialNotices, 60 * 60 * 1000).unref();
 
   // Mount API endpoints
   app.use('/api', apiRouter);
