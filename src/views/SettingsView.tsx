@@ -25,6 +25,19 @@ interface SettingsViewProps {
 
 export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) => {
   const { profile, subscription, user, updateProfile, reloadSession } = useAuth();
+  const [billingEnabled, setBillingEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let isCurrent = true;
+    apiRequest<{ billing_enabled: boolean }>('/api/subscriptions/plans')
+      .then((response) => {
+        if (isCurrent) setBillingEnabled(response.billing_enabled === true);
+      })
+      .catch(() => {});
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   // Salon profile fields
   const [fullName, setFullName] = useState(profile?.full_name || '');
@@ -335,41 +348,55 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
         </div>
 
         {/* License & Subscription Status */}
-        <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-xs space-y-4">
-          <div className="flex items-center justify-between">
+        {billingEnabled === false ? (
+          <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-xs space-y-2">
             <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
               <Crown className="w-4 h-4 text-amber-500" />
-              <span>Estado de Licencia & Pagos (Mercado Pago Chile)</span>
+              <span>Gratis durante el lanzamiento</span>
             </h3>
-            <span className={`px-3 py-1 rounded-full text-xs font-bold ${
-              subscription?.is_active === false ? 'bg-rose-100 text-rose-800' :
-              subscription?.status === 'active' ? 'bg-emerald-100 text-emerald-800' :
-              subscription?.status === 'trial' ? 'bg-amber-100 text-amber-800' :
-              'bg-rose-100 text-rose-800'
-            }`}>
-              {subscription?.is_active === false ? 'Vencida' :
-               subscription?.status === 'active' ? 'Licencia Activa' :
-               subscription?.status === 'trial' ? `Prueba (${subscription.days_remaining} días restantes)` :
-               'Vencida'}
-            </span>
+            <p className="text-sm text-slate-600">
+              {subscription?.expiration_date && new Date(subscription.expiration_date) > new Date()
+                ? `Tus 3 meses gratis terminan el ${new Intl.DateTimeFormat('es-CL').format(new Date(subscription.expiration_date))}.`
+                : 'Sigues con acceso gratis mientras no activemos los planes.'}
+            </p>
           </div>
-
-          <div className="p-4 rounded-2xl bg-gradient-to-r from-slate-900 to-slate-800 text-white flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="space-y-1">
-              <h4 className="font-bold text-sm">Planes SalonTrack Chile</h4>
-              <p className="text-xs text-slate-300">
-                Desde $9.990 CLP mensuales o $14.990 CLP por 3 meses completos.
-              </p>
+        ) : billingEnabled === true ? (
+          <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-xs space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
+                <Crown className="w-4 h-4 text-amber-500" />
+                <span>Estado de Licencia & Pagos (Mercado Pago Chile)</span>
+              </h3>
+              <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+                subscription?.is_active === false ? 'bg-rose-100 text-rose-800' :
+                subscription?.status === 'active' ? 'bg-emerald-100 text-emerald-800' :
+                subscription?.status === 'trial' ? 'bg-amber-100 text-amber-800' :
+                'bg-rose-100 text-rose-800'
+              }`}>
+                {subscription?.is_active === false ? 'Vencida' :
+                 subscription?.status === 'active' ? 'Licencia Activa' :
+                 subscription?.status === 'trial' ? `Prueba (${subscription.days_remaining} días restantes)` :
+                 'Vencida'}
+              </span>
             </div>
-            <button
-              type="button"
-              onClick={onOpenCheckout}
-              className="px-5 py-2.5 bg-gradient-to-r from-rose-500 to-pink-500 text-white font-bold text-xs rounded-xl shadow-lg hover:from-rose-600 hover:to-pink-600 transition active:scale-95 shrink-0"
-            >
-              Renovar o Mejorar Plan
-            </button>
+
+            <div className="p-4 rounded-2xl bg-gradient-to-r from-slate-900 to-slate-800 text-white flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="space-y-1">
+                <h4 className="font-bold text-sm">Planes SalonTrack Chile</h4>
+                <p className="text-xs text-slate-300">
+                  Desde $9.990 CLP mensuales o $14.990 CLP por 3 meses completos.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenCheckout}
+                className="px-5 py-2.5 bg-gradient-to-r from-rose-500 to-pink-500 text-white font-bold text-xs rounded-xl shadow-lg hover:from-rose-600 hover:to-pink-600 transition active:scale-95 shrink-0"
+              >
+                Renovar o Mejorar Plan
+              </button>
+            </div>
           </div>
-        </div>
+        ) : null}
 
         {/* Privacy & Backup */}
         <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">

@@ -2,6 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+process.env.BILLING_ENABLED = 'true';
+process.env.BILLING_GRACE_DAYS = '7';
+
 if (!process.env.DATABASE_FILE || !process.env.DATABASE_FILE_JSON) {
   const tempDirectory = mkdtempSync(join(tmpdir(), 'salontrack-tests-'));
   process.env.DATABASE_FILE ||= join(tempDirectory, 'salontrack.sqlite');

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { getSqliteDb } from '../server/sqlite.js';
 
 console.log('🔄 Ejecutando migraciones de base de datos SQLite...');

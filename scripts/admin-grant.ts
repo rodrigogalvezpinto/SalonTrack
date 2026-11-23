@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { grantPlatformAdmin } from '../server/admin.js';
 import { closeSqliteDb } from '../server/sqlite.js';
 

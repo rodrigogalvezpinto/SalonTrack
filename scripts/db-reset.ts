@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import fs from 'node:fs';
 import { getDatabasePath, getSqliteDb } from '../server/sqlite.js';
 import { seedDemoDataIfEmpty } from '../server/seedData.js';

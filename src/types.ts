@@ -43,6 +43,7 @@ export interface Subscription {
   payment_provider: string;
   days_remaining?: number;
   is_active?: boolean;
+  billing_enabled?: boolean;
 }
 
 export interface PaymentRecord {

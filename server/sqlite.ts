@@ -576,4 +576,23 @@ export const MIGRATIONS: Migration[] = [
   { version: 1, name: 'initial_relational_schema_v2', sql: MIGRATION_V1_SQL },
   { version: 2, name: 'password_reset_tokens', sql: MIGRATION_V2_SQL },
   { version: 3, name: 'business_verification', sql: 'ALTER TABLE businesses ADD COLUMN verified INTEGER NOT NULL DEFAULT 0' },
+  {
+    version: 4,
+    name: 'free_launch_trials_and_subscription_notices',
+    sql: `
+      UPDATE subscriptions
+      SET expiration_date = strftime('%Y-%m-%dT%H:%M:%fZ', start_date, '+90 days')
+      WHERE status = 'trial'
+        AND expiration_date < strftime('%Y-%m-%dT%H:%M:%fZ', start_date, '+90 days');
+
+      CREATE TABLE subscription_notices (
+        id TEXT PRIMARY KEY,
+        subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        sent_at TEXT NOT NULL,
+        email_sent_at TEXT,
+        UNIQUE(subscription_id, kind)
+      );
+    `,
+  },
 ];

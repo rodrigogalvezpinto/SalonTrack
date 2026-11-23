@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { formatCLP } from '../utils/formatters';
 import { PWAInstallButton } from '../components/PWAInstallButton';
+import { apiRequest } from '../utils/api';
 import { 
   Scissors, 
   Clock, 
@@ -30,9 +31,22 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   // Interactive Calculator State
   const [estimatedClients, setEstimatedClients] = useState<number>(25);
   const [avgTicket, setAvgTicket] = useState<number>(45000);
+  const [billingEnabled, setBillingEnabled] = useState(false);
 
   // FAQ accordion state
   const [openFaq, setOpenFaq] = useState<number | null>(0);
+
+  useEffect(() => {
+    let isCurrent = true;
+    apiRequest<{ billing_enabled: boolean }>('/api/subscriptions/plans')
+      .then((response) => {
+        if (isCurrent) setBillingEnabled(response.billing_enabled === true);
+      })
+      .catch(() => {});
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   // Potential calculated recovered amount: ~20% of clients who would otherwise forget their retouch
   const monthlyRecoverable = Math.round(estimatedClients * 0.25 * avgTicket);
@@ -87,7 +101,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     },
   ];
 
-  const faqs = [
+  const faqs: Array<{ q: string; a: string; billingOnly?: boolean }> = [
     {
       q: '¿Cómo funciona el envío de mensajes por WhatsApp?',
       a: 'SalonTrack prepara un mensaje personalizado con el nombre de tu clienta, el salón y el servicio correspondiente. Al presionar "Avisar por WhatsApp", la aplicación abre WhatsApp directamente con el texto listo para enviar. Tú siempre mantienes el control total y puedes editar el texto antes de mandarlo.',
@@ -99,6 +113,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     {
       q: '¿Qué medios de pago aceptan en Chile?',
       a: 'Procesamos pagos en Pesos Chilenos (CLP) a través de Mercado Pago Chile: tarjetas de Débito (Redcompra / CuentaRUT), Webpay Plus y Crédito en cuotas.',
+      billingOnly: true,
     },
     {
       q: '¿Mis datos y fórmulas de tinte están seguros?',
@@ -171,15 +186,24 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <span>Comenzar Prueba Gratuita</span>
             <ArrowRight className="w-5 h-5" />
           </button>
-          <button
-            onClick={() => {
-              const el = document.getElementById('pricing');
-              el?.scrollIntoView({ behavior: 'smooth' });
-            }}
-            className="w-full sm:w-auto px-6 py-4 rounded-2xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-sm transition"
-          >
-            Ver Planes desde $9.990 CLP
-          </button>
+          {billingEnabled ? (
+            <button
+              onClick={() => {
+                const el = document.getElementById('pricing');
+                el?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="w-full sm:w-auto px-6 py-4 rounded-2xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-sm transition"
+            >
+              Ver Planes desde $9.990 CLP
+            </button>
+          ) : (
+            <button
+              onClick={() => onOpenAuth('register')}
+              className="w-full sm:w-auto px-6 py-4 rounded-2xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold text-sm transition"
+            >
+              Empieza gratis: 3 meses
+            </button>
+          )}
         </div>
 
         {/* Chile Trust Badge */}
@@ -190,9 +214,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <span className="flex items-center gap-1.5">
             <Check className="w-4 h-4 text-emerald-600" /> Moneda Chilena (CLP)
           </span>
-          <span className="flex items-center gap-1.5">
-            <Check className="w-4 h-4 text-emerald-600" /> Pagos seguros con Mercado Pago
-          </span>
+          {billingEnabled && (
+            <span className="flex items-center gap-1.5">
+              <Check className="w-4 h-4 text-emerald-600" /> Pagos seguros con Mercado Pago
+            </span>
+          )}
         </div>
       </section>
 
@@ -309,6 +335,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       </section>
 
       {/* Pricing Section */}
+      {billingEnabled ? (
       <section id="pricing" className="py-16 px-4 sm:px-8 bg-slate-100/70 border-t border-slate-200">
         <div className="max-w-6xl mx-auto space-y-12">
           <div className="text-center space-y-3 max-w-2xl mx-auto">
@@ -381,6 +408,20 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           </div>
         </div>
       </section>
+      ) : (
+        <section id="pricing" className="py-16 px-4 sm:px-8 bg-slate-100/70 border-t border-slate-200">
+          <div className="max-w-3xl mx-auto rounded-3xl border border-emerald-200 bg-white p-8 text-center shadow-xs">
+            <h2 className="text-2xl sm:text-3xl font-black text-slate-900">Gratis durante el lanzamiento</h2>
+            <p className="mt-3 text-sm text-slate-600">Todas las cuentas nuevas reciben 3 meses gratis para usar SalonTrack.</p>
+            <button
+              onClick={() => onOpenAuth('register')}
+              className="mt-6 px-6 py-3 rounded-xl bg-emerald-600 text-white font-bold text-sm hover:bg-emerald-700 transition"
+            >
+              Crear cuenta gratis
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* FAQs Section */}
       <section className="py-16 px-4 sm:px-8 max-w-3xl mx-auto w-full space-y-6">
@@ -395,6 +436,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
         <div className="space-y-3">
           {faqs.map((faq, index) => {
+            if (!billingEnabled && faq.billingOnly) return null;
             const isOpen = openFaq === index;
             return (
               <div
@@ -429,8 +471,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
           <div className="flex items-center gap-4 text-slate-600">
             <span>Santiago, Chile 🇨🇱</span>
-            <span>CLP ($)</span>
-            <span>Mercado Pago Oficial</span>
+            {billingEnabled && (
+              <>
+                <span>CLP ($)</span>
+                <span>Mercado Pago Oficial</span>
+              </>
+            )}
           </div>
         </div>
       </footer>

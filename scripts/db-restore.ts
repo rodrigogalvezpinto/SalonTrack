@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { restoreBackup } from '../server/backup.js';
 
 const args = process.argv.slice(2);
