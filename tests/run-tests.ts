@@ -18,6 +18,8 @@ import { getAvailableSlots, isSlotAvailable } from '../server/availability.js';
 import { emailConfigured, emailProvider } from '../server/adapters/email.js';
 import { localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
 import { verifyWebhookSignature } from '../server/adapters/mercadoPago.js';
+import { createRateLimiter, resetRateLimits } from '../server/rateLimit.js';
+import { securityHeadersMiddleware } from '../server/securityHeaders.js';
 import apiRouter from '../server/routes.js';
 
 console.log('🧪 Iniciando Suite de Pruebas Automatizadas de SalonTrack Chile...\n');
@@ -89,6 +91,40 @@ test('Autenticación Segura: Hash bcrypt y verificación de contraseñas', () =>
   assert.notStrictEqual(pass, hash);
   assert.ok(verifyPassword(pass, hash));
   assert.ok(!verifyPassword('WrongPass', hash));
+});
+
+test('Rate limiter: aplica ventanas fijas y permite reiniciar todos los contadores', () => {
+  const originalNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+  resetRateLimits();
+  try {
+    const limiter = createRateLimiter({ windowMs: 100, max: 2 });
+    assert.deepStrictEqual(limiter.hit('ip'), { limited: false, retryAfterSec: 0 });
+    assert.deepStrictEqual(limiter.hit('ip'), { limited: false, retryAfterSec: 0 });
+    const blocked = limiter.hit('ip');
+    assert.strictEqual(blocked.limited, true);
+    assert.ok(blocked.retryAfterSec > 0);
+
+    now += 100;
+    assert.deepStrictEqual(limiter.hit('ip'), { limited: false, retryAfterSec: 0 });
+
+    const boundedLimiter = createRateLimiter({ windowMs: 100, max: 20, maxEntries: 3 });
+    for (let index = 0; index < 10; index++) {
+      boundedLimiter.hit(`ip-${index}`);
+      assert.ok(boundedLimiter.size() <= 3);
+    }
+    assert.strictEqual(boundedLimiter.size(), 3);
+    now += 100;
+    boundedLimiter.check('missing');
+    assert.strictEqual(boundedLimiter.size(), 0);
+
+    resetRateLimits();
+    assert.deepStrictEqual(limiter.hit('ip'), { limited: false, retryAfterSec: 0 });
+  } finally {
+    Date.now = originalNow;
+    resetRateLimits();
+  }
 });
 
 // 7. Aislamiento entre Usuarios (Multi-tenant RLS)
@@ -370,6 +406,7 @@ test('Mercado Pago: valida firmas y normaliza ids alfanuméricos en mayúscula',
 });
 
 async function integrationTest(name: string, fn: () => Promise<void>) {
+  resetRateLimits();
   try {
     await fn();
     console.log(`  ✅ [PASS] ${name}`);
@@ -377,11 +414,15 @@ async function integrationTest(name: string, fn: () => Promise<void>) {
   } catch (err: any) {
     console.error(`  ❌ [FAIL] ${name}: ${err.message}`);
     failed++;
+  } finally {
+    resetRateLimits();
   }
 }
 
 async function runIntegrationTests() {
   const app = express();
+  app.disable('x-powered-by');
+  app.use(securityHeadersMiddleware);
   app.use(express.json());
   app.use('/api', apiRouter);
   const server = app.listen(0, '127.0.0.1');
@@ -488,6 +529,71 @@ async function runIntegrationTests() {
   let olderResetToken = '';
 
   try {
+    await integrationTest('Seguridad HTTP: aplica cabeceras y desactiva x-powered-by', async () => {
+      const previousNodeEnv = process.env.NODE_ENV;
+      try {
+        process.env.NODE_ENV = 'test';
+        const response = await requestJson('/api/auth/me', 'GET');
+        assert.strictEqual(response.status, 401);
+        assert.strictEqual(response.headers.get('x-content-type-options'), 'nosniff');
+        assert.strictEqual(response.headers.get('x-frame-options'), 'DENY');
+        assert.strictEqual(response.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
+        assert.strictEqual(response.headers.get('strict-transport-security'), null);
+        assert.strictEqual(response.headers.get('x-powered-by'), null);
+
+        process.env.NODE_ENV = 'production';
+        const productionResponse = await requestJson('/api/auth/me', 'GET');
+        assert.strictEqual(productionResponse.headers.get('strict-transport-security'), 'max-age=15552000; includeSubDomains');
+      } finally {
+        if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = previousNodeEnv;
+      }
+    });
+
+    await integrationTest('Autenticación: limita intentos fallidos y reinicia el contador al iniciar sesión', async () => {
+      const attemptLogin = (password: string) => sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password,
+      });
+
+      for (let attempt = 0; attempt < 10; attempt++) {
+        assert.strictEqual((await attemptLogin('ClaveIncorrecta123!')).status, 401);
+      }
+      const blocked = await attemptLogin('Salon1234');
+      assert.strictEqual(blocked.status, 429);
+      assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+      assert.deepStrictEqual(await blocked.json(), {
+        error: 'Demasiados intentos. Intenta de nuevo en unos minutos.',
+        code: 'RATE_LIMITED',
+      });
+
+      resetRateLimits();
+      assert.strictEqual((await attemptLogin('Salon1234')).status, 200);
+      for (let attempt = 0; attempt < 5; attempt++) {
+        assert.strictEqual((await attemptLogin('ClaveIncorrecta123!')).status, 401);
+      }
+      assert.strictEqual((await attemptLogin('Salon1234')).status, 200);
+      for (let attempt = 0; attempt < 10; attempt++) {
+        assert.strictEqual((await attemptLogin('ClaveIncorrecta123!')).status, 401);
+      }
+      const blockedAfterSuccessfulLogin = await attemptLogin('ClaveIncorrecta123!');
+      assert.strictEqual(blockedAfterSuccessfulLogin.status, 429);
+    });
+
+    await integrationTest('Registro: limita a 10 solicitudes por hora y por IP', async () => {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const response = await sendJson('/api/auth/register', {});
+        assert.strictEqual(response.status, 400);
+      }
+      const blocked = await sendJson('/api/auth/register', {});
+      assert.strictEqual(blocked.status, 429);
+      assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+      assert.deepStrictEqual(await blocked.json(), {
+        error: 'Demasiados intentos. Intenta de nuevo en unos minutos.',
+        code: 'RATE_LIMITED',
+      });
+    });
+
     await integrationTest('SQLite CRM: GET /clients refleja inserciones y eliminaciones externas', async () => {
       const loginResponse = await sendJson('/api/auth/login', {
         email: 'contacto@valeriaestudio.cl',
