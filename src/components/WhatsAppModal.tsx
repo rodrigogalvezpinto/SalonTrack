@@ -25,6 +25,7 @@ export const WhatsAppModal: React.FC<WhatsAppModalProps> = ({
   const [copied, setCopied] = useState(false);
   const [isLogging, setIsLogging] = useState(false);
   const [notes, setNotes] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
 
   useEffect(() => {
     if (client) {
@@ -39,6 +40,7 @@ export const WhatsAppModal: React.FC<WhatsAppModalProps> = ({
       setMessage(initialMsg);
       setCopied(false);
       setNotes('');
+      setErrorMessage('');
     }
   }, [client, service, profile]);
 
@@ -50,10 +52,14 @@ export const WhatsAppModal: React.FC<WhatsAppModalProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleClose = () => {
+    setErrorMessage('');
+    onClose();
+  };
+
   const handleSendAndLog = async () => {
     const waUrl = buildWhatsAppLink(client.phone, message);
-    
-    // Log contact in backend
+    setErrorMessage('');
     setIsLogging(true);
     try {
       await apiRequest('/api/contact-logs', {
@@ -68,15 +74,14 @@ export const WhatsAppModal: React.FC<WhatsAppModalProps> = ({
       if (onContactLogged) {
         onContactLogged();
       }
-    } catch (e) {
-      console.error('Failed to log contact:', e);
+
+      window.open(waUrl, '_blank', 'noopener,noreferrer');
+      handleClose();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'No se pudo registrar el contacto.');
     } finally {
       setIsLogging(false);
     }
-
-    // Open WhatsApp in new tab / mobile app
-    window.open(waUrl, '_blank', 'noopener,noreferrer');
-    onClose();
   };
 
   return (
@@ -96,7 +101,7 @@ export const WhatsAppModal: React.FC<WhatsAppModalProps> = ({
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1 rounded-full text-white/80 hover:text-white hover:bg-white/10"
           >
             <X className="w-5 h-5" />
@@ -165,24 +170,31 @@ export const WhatsAppModal: React.FC<WhatsAppModalProps> = ({
         </div>
 
         {/* Footer actions */}
-        <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-200/50 rounded-xl transition"
-          >
-            Cancelar
-          </button>
+        <div className="bg-slate-50 px-6 py-4 border-t border-slate-100">
+          {errorMessage && (
+            <p role="alert" className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+              {errorMessage}
+            </p>
+          )}
+          <div className="flex items-center justify-between gap-3">
+            <button
+              type="button"
+              onClick={handleClose}
+              className="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 hover:bg-slate-200/50 rounded-xl transition"
+            >
+              Cancelar
+            </button>
 
-          <button
-            type="button"
-            onClick={handleSendAndLog}
-            disabled={isLogging || !message.trim()}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm shadow-md hover:shadow-emerald-600/25 active:scale-95 transition disabled:opacity-50"
-          >
-            <Send className="w-4 h-4" />
-            <span>Abrir en WhatsApp y Registrar</span>
-          </button>
+            <button
+              type="button"
+              onClick={handleSendAndLog}
+              disabled={isLogging || !message.trim()}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm shadow-md hover:shadow-emerald-600/25 active:scale-95 transition disabled:opacity-50"
+            >
+              <Send className="w-4 h-4" />
+              <span>Abrir en WhatsApp y Registrar</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
