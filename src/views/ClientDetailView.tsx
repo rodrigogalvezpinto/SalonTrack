@@ -44,6 +44,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
   const [editPhone, setEditPhone] = useState('');
   const [editNotes, setEditNotes] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const fetchClientDetails = async () => {
     setLoading(true);
@@ -75,6 +76,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
 
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage(null);
     try {
       const res = await apiRequest<{ client: Client }>(`/api/clients/${clientId}`, {
         method: 'PUT',
@@ -88,6 +90,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
       setIsEditing(false);
     } catch (err) {
       console.error('Error updating client:', err);
+      setErrorMessage(err instanceof Error ? err.message : 'No se pudo actualizar la clienta.');
     }
   };
 
@@ -95,6 +98,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
     if (!confirm(`¿Estás segura de eliminar la ficha de ${client?.full_name}? Se borrará también su historial de fórmulas.`)) {
       return;
     }
+    setErrorMessage(null);
     setIsDeleting(true);
     try {
       await apiRequest(`/api/clients/${clientId}`, { method: 'DELETE' });
@@ -102,6 +106,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
       onBack();
     } catch (err) {
       console.error('Error deleting client:', err);
+      setErrorMessage(err instanceof Error ? err.message : 'No se pudo eliminar la clienta.');
     } finally {
       setIsDeleting(false);
     }
@@ -109,11 +114,13 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
 
   const handleDeleteService = async (serviceId: string) => {
     if (!confirm('¿Eliminar este registro de servicio del historial?')) return;
+    setErrorMessage(null);
     try {
       await apiRequest(`/api/services/${serviceId}`, { method: 'DELETE' });
       await fetchClientDetails();
     } catch (err) {
       console.error('Error deleting service:', err);
+      setErrorMessage(err instanceof Error ? err.message : 'No se pudo eliminar el servicio.');
     }
   };
 
@@ -129,6 +136,12 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {errorMessage && (
+        <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-medium text-rose-700">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{errorMessage}</span>
+        </div>
+      )}
       {/* Back button & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <button
@@ -200,7 +213,10 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setIsEditing(false)}
+                onClick={() => {
+                  setErrorMessage(null);
+                  setIsEditing(false);
+                }}
                 className="px-4 py-2 text-slate-600 text-xs font-bold"
               >
                 Cancelar
