@@ -109,7 +109,7 @@ export const InvitationAcceptanceModal: React.FC<InvitationAcceptanceModalProps>
         {notForUser && (
           <div className="mt-5 space-y-4">
             <p role="alert" className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
-              Esta invitación es para otro correo. Inicia sesión con el correo invitado.
+              Esta invitación ya no está disponible o es para otro correo. Si es tuya, inicia sesión con el correo invitado o pide una nueva invitación al negocio.
             </p>
             <button type="button" onClick={onSwitchAccount} className="w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white">
               Cambiar de cuenta
