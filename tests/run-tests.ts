@@ -2819,6 +2819,61 @@ async function runIntegrationTests() {
       }
     });
 
+    await integrationTest('El catálogo preserva buffer_min cero y rechaza valores inválidos', async () => {
+      const ownerResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const owner = await ownerResponse.json() as { token: string };
+      assert.strictEqual(ownerResponse.status, 200);
+      const serviceName = `Servicio buffer ${generateId('buffer')}`;
+      let serviceId: string | null = null;
+
+      try {
+        const invalidCreate = await sendJson('/api/business/services', {
+          name: `${serviceName} inválido`,
+          price_clp: 15000,
+          buffer_min: -1,
+        }, owner.token);
+        assert.strictEqual(invalidCreate.status, 400);
+
+        const createdResponse = await sendJson('/api/business/services', {
+          name: serviceName,
+          price_clp: 15000,
+          buffer_min: 0,
+        }, owner.token);
+        assert.strictEqual(createdResponse.status, 201);
+        serviceId = (await createdResponse.json() as { service_id: string }).service_id;
+        assert.strictEqual((sqlite.prepare('SELECT clean_minutes FROM services WHERE id = ?')
+          .get(serviceId) as { clean_minutes: number }).clean_minutes, 0);
+
+        const invalidUpdate = await requestJson(
+          `/api/business/services/${serviceId}`,
+          'PUT',
+          owner.token,
+          { buffer_min: 'no es un número' }
+        );
+        assert.strictEqual(invalidUpdate.status, 400);
+        assert.strictEqual((sqlite.prepare('SELECT clean_minutes FROM services WHERE id = ?')
+          .get(serviceId) as { clean_minutes: number }).clean_minutes, 0);
+
+        const zeroUpdate = await requestJson(
+          `/api/business/services/${serviceId}`,
+          'PUT',
+          owner.token,
+          { buffer_min: 0 }
+        );
+        assert.strictEqual(zeroUpdate.status, 200);
+        assert.strictEqual((sqlite.prepare('SELECT clean_minutes FROM services WHERE id = ?')
+          .get(serviceId) as { clean_minutes: number }).clean_minutes, 0);
+      } finally {
+        if (serviceId) {
+          sqlite.prepare('DELETE FROM staff_services WHERE service_id = ?').run(serviceId);
+          sqlite.prepare('DELETE FROM services WHERE id = ?').run(serviceId);
+        }
+      }
+    });
+
     await integrationTest('Autorización integral: aislamiento entre negocios, roles y CRM', async () => {
       const login = async (email: string, password: string) => {
         const response = await sendJson('/api/auth/login', { email, password });

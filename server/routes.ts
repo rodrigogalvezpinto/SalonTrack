@@ -1958,6 +1958,12 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
 };
 
 // Business Catalog Services
+const parseBufferMin = (value: unknown): number | null => {
+  if (value === undefined || value === null || value === '') return 5;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+};
+
 const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
@@ -1968,6 +1974,10 @@ const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
   const { name, category_id, description, price_clp, price_type, duration_minutes, duration_min, buffer_min, is_featured, is_active, modality } = req.body;
   if (!name || !price_clp) {
     return res.status(400).json({ error: 'Nombre y precio son requeridos.' });
+  }
+  const normalizedBufferMin = parseBufferMin(buffer_min);
+  if (normalizedBufferMin === null) {
+    return res.status(400).json({ error: 'buffer_min debe ser un número finito mayor o igual a 0.' });
   }
 
   const srvId = generateId('srv');
@@ -1987,7 +1997,7 @@ const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
     Number(price_clp),
     price_type || 'fixed',
     Number(duration_minutes ?? duration_min) || 45,
-    Number(buffer_min) || 5,
+    normalizedBufferMin,
     modality || 'salon',
     is_featured ? 1 : 0,
     is_active === false || is_active === 0 ? 'INACTIVE' : 'PUBLISHED',
@@ -2023,6 +2033,10 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
   if (businessSubscriptionBlocked(res, srv.business_id)) return;
 
   const { name, price_clp, price_type, duration_minutes, duration_min, buffer_min, description, is_featured, status, is_active } = req.body;
+  const normalizedBufferMin = buffer_min === undefined ? null : parseBufferMin(buffer_min);
+  if (buffer_min !== undefined && normalizedBufferMin === null) {
+    return res.status(400).json({ error: 'buffer_min debe ser un número finito mayor o igual a 0.' });
+  }
   const now = new Date().toISOString();
 
   sqlite.prepare(`
@@ -2042,7 +2056,7 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
     price_clp ? Number(price_clp) : null,
     price_type || null,
     duration_minutes !== undefined || duration_min !== undefined ? Number(duration_minutes ?? duration_min) : null,
-    buffer_min !== undefined ? Number(buffer_min) : null,
+    normalizedBufferMin,
     description !== undefined ? description.trim() : null,
     is_featured !== undefined ? (is_featured ? 1 : 0) : null,
     status || (is_active !== undefined ? (is_active ? 'PUBLISHED' : 'INACTIVE') : null),
