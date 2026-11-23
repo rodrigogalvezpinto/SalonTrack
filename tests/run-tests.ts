@@ -1,6 +1,7 @@
 import './setup-env.js';
 import assert from 'node:assert';
 import { createHash, createHmac } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -9,6 +10,7 @@ import { join } from 'node:path';
 import express from 'express';
 import { formatCLP, formatChileanDate, formatChileanPhone, buildWhatsAppLink, prepareWhatsAppMessage } from '../src/utils/formatters.js';
 import { hashPassword, verifyPassword, seedDemoDataIfEmpty } from '../server/auth.js';
+import { grantPlatformAdmin } from '../server/admin.js';
 import { createBackup, restoreBackup, verifyBackup } from '../server/backup.js';
 import { expireStalePendingBookings } from '../server/bookingExpiration.js';
 import { generateId } from '../server/db.js';
@@ -124,6 +126,95 @@ test('Rate limiter: aplica ventanas fijas y permite reiniciar todos los contador
   } finally {
     Date.now = originalNow;
     resetRateLimits();
+  }
+});
+
+test('Administración: concede PLATFORM_ADMIN de forma idempotente y distingue usuarios inexistentes', () => {
+  const sqlite = getSqliteDb();
+  const userId = generateId('usr');
+  const email = `${userId}@example.test`;
+  const now = new Date().toISOString();
+  sqlite.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
+    .run(userId, email, 'test-hash', now);
+
+  try {
+    assert.deepStrictEqual(grantPlatformAdmin(email.toUpperCase()), { status: 'granted', userId });
+    assert.deepStrictEqual(grantPlatformAdmin(email), { status: 'already_granted', userId });
+    assert.strictEqual(
+      sqlite.prepare("SELECT COUNT(*) AS count FROM user_roles WHERE user_id = ? AND role = 'PLATFORM_ADMIN'")
+        .get(userId)?.count,
+      1,
+    );
+    assert.deepStrictEqual(grantPlatformAdmin(`${userId}-missing@example.test`), { status: 'not_found' });
+  } finally {
+    sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+  }
+});
+
+test('Semilla: omite cuentas demo en producción y conserva el comportamiento de desarrollo y tests', () => {
+  const originalEnvironment = {
+    NODE_ENV: process.env.NODE_ENV,
+    DATABASE_FILE: process.env.DATABASE_FILE,
+    DATABASE_FILE_JSON: process.env.DATABASE_FILE_JSON,
+    SEED_DEMO_DATA: process.env.SEED_DEMO_DATA,
+  };
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'salontrack-seed-test-'));
+  const childScript = `
+    import { seedDemoDataIfEmpty } from './server/seedData.ts';
+    import { closeSqliteDb, getSqliteDb } from './server/sqlite.ts';
+    seedDemoDataIfEmpty();
+    const db = getSqliteDb();
+    const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
+    const categoryCount = db.prepare('SELECT COUNT(*) AS count FROM categories').get().count;
+    const adminCount = db.prepare("SELECT COUNT(*) AS count FROM user_roles WHERE role = 'PLATFORM_ADMIN'").get().count;
+    console.log('SEED_RESULT=' + JSON.stringify({ userCount, categoryCount, adminCount }));
+    closeSqliteDb();
+  `;
+
+  try {
+    const runScenario = (name: string, nodeEnv: string, seedDemoData?: boolean) => {
+      process.env.NODE_ENV = nodeEnv;
+      process.env.DATABASE_FILE = join(temporaryDirectory, `${name}.sqlite`);
+      process.env.DATABASE_FILE_JSON = join(temporaryDirectory, 'missing-legacy.json');
+      if (seedDemoData === undefined) delete process.env.SEED_DEMO_DATA;
+      else process.env.SEED_DEMO_DATA = seedDemoData ? 'true' : 'false';
+
+      const result = spawnSync(
+        process.execPath,
+        ['--import', 'tsx', '--input-type=module', '--eval', childScript],
+        { cwd: process.cwd(), env: { ...process.env }, encoding: 'utf8', timeout: 60_000 },
+      );
+      assert.strictEqual(result.status, 0, `${result.stderr}\n${result.stdout}`);
+      const resultLine = result.stdout.split(/\r?\n/).find(line => line.startsWith('SEED_RESULT='));
+      assert.ok(resultLine, result.stdout);
+      return {
+        ...JSON.parse(resultLine.slice('SEED_RESULT='.length)) as {
+          userCount: number;
+          categoryCount: number;
+          adminCount: number;
+        },
+        stdout: result.stdout,
+      };
+    };
+
+    const production = runScenario('production-default', 'production');
+    assert.strictEqual(production.userCount, 0);
+    assert.strictEqual(production.adminCount, 0);
+    assert.ok(production.categoryCount > 0);
+    assert.ok(production.stdout.includes('Se omitió la carga de cuentas y negocios demo en producción.'));
+
+    const productionOptIn = runScenario('production-opt-in', 'production', true);
+    assert.ok(productionOptIn.userCount > 0);
+    assert.ok(productionOptIn.adminCount > 0);
+
+    assert.ok(runScenario('development-default', 'development').userCount > 0);
+    assert.ok(runScenario('test-default', 'test').userCount > 0);
+  } finally {
+    for (const [key, value] of Object.entries(originalEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 });
 

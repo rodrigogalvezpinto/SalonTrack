@@ -185,6 +185,11 @@ export function seedDemoDataIfEmpty() {
   const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
   if (userCount.count > 0) return;
 
+  if (process.env.NODE_ENV === 'production' && process.env.SEED_DEMO_DATA !== 'true') {
+    console.info('ℹ️ Se omitió la carga de cuentas y negocios demo en producción.');
+    return;
+  }
+
   console.log('🌱 Inicializando cuentas y negocios demo para SalonTrack 2.0 (Chile)...');
   const now = new Date().toISOString();
 

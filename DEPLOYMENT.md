@@ -105,6 +105,14 @@ La imagen incluye una comprobación automática en `/api/health`. En cualquier h
 - [ ] Volumen persistente montado en `/data`.
 - [ ] Respaldo periódico programado y copiado fuera del volumen.
 - [ ] `ALLOW_SIMULATED_PAYMENTS=false`.
+- [ ] `SEED_DEMO_DATA` no está definida; nunca la establezca en producción.
+- [ ] Registrar primero una cuenta normal en el sitio y luego concederle `PLATFORM_ADMIN`:
+
+  ```bash
+  docker exec <contenedor> npm run admin:grant -- tu@correo.cl
+  ```
+
+  En Railway o Fly, ejecute `npm run admin:grant -- tu@correo.cl` desde la consola del contenedor.
 
 ## 5. Respaldo y restauración de SQLite
 
