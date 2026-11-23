@@ -1047,7 +1047,8 @@ async function runIntegrationTests() {
             type: 'payment',
             data: { id: pendingConfirmationId },
           });
-          assert.strictEqual(missingWebhookSecret.status, 503);
+          assert.strictEqual(missingWebhookSecret.status, 200);
+          assert.deepStrictEqual(await missingWebhookSecret.json(), { received: true, ignored: true });
         } finally {
           restoreEnvironmentValue('MERCADO_PAGO_WEBHOOK_SECRET', originalWebhookSecret);
           restoreEnvironmentValue('NODE_ENV', originalNodeEnv);
@@ -1085,16 +1086,26 @@ async function runIntegrationTests() {
       const userId = registered.user.id;
       const originalNodeEnv = process.env.NODE_ENV;
       const originalAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
+      const originalWebhookSecret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
       const originalAllowSimulatedPayments = process.env.ALLOW_SIMULATED_PAYMENTS;
       try {
         process.env.NODE_ENV = 'production';
-        delete process.env.MERCADO_PAGO_ACCESS_TOKEN;
+        process.env.MERCADO_PAGO_ACCESS_TOKEN = 'test-token-without-webhook-secret';
+        delete process.env.MERCADO_PAGO_WEBHOOK_SECRET;
         delete process.env.ALLOW_SIMULATED_PAYMENTS;
         const response = await sendJson('/api/payments/create-preference', {
           plan_id: 'pro_quarterly',
         }, registered.token);
         assert.strictEqual(response.status, 503);
         assert.deepStrictEqual(await response.json(), {
+          error: 'Los pagos en línea aún no están configurados. Contáctanos para renovar tu licencia.',
+          code: 'PAYMENTS_NOT_CONFIGURED',
+        });
+        const confirmWithoutConfiguration = await sendJson('/api/payments/confirm', {
+          payment_id: '123',
+        }, registered.token);
+        assert.strictEqual(confirmWithoutConfiguration.status, 503);
+        assert.deepStrictEqual(await confirmWithoutConfiguration.json(), {
           error: 'Los pagos en línea aún no están configurados. Contáctanos para renovar tu licencia.',
           code: 'PAYMENTS_NOT_CONFIGURED',
         });
@@ -1108,6 +1119,8 @@ async function runIntegrationTests() {
         else process.env.NODE_ENV = originalNodeEnv;
         if (originalAccessToken === undefined) delete process.env.MERCADO_PAGO_ACCESS_TOKEN;
         else process.env.MERCADO_PAGO_ACCESS_TOKEN = originalAccessToken;
+        if (originalWebhookSecret === undefined) delete process.env.MERCADO_PAGO_WEBHOOK_SECRET;
+        else process.env.MERCADO_PAGO_WEBHOOK_SECRET = originalWebhookSecret;
         if (originalAllowSimulatedPayments === undefined) delete process.env.ALLOW_SIMULATED_PAYMENTS;
         else process.env.ALLOW_SIMULATED_PAYMENTS = originalAllowSimulatedPayments;
         sqlite.prepare('DELETE FROM payments WHERE user_id = ?').run(userId);

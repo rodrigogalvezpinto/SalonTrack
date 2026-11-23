@@ -18,7 +18,10 @@ export interface MercadoPagoPayment {
 }
 
 export function mercadoPagoConfigured(): boolean {
-  return Boolean(process.env.MERCADO_PAGO_ACCESS_TOKEN?.trim());
+  return Boolean(
+    process.env.MERCADO_PAGO_ACCESS_TOKEN?.trim()
+    && process.env.MERCADO_PAGO_WEBHOOK_SECRET?.trim()
+  );
 }
 
 export function apiBase(): string {

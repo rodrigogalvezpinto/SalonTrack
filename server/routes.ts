@@ -2714,17 +2714,14 @@ router.post('/payments/create-preference', requireAuth, async (req: AuthRequest,
 router.post('/payments/webhook', async (req, res) => {
   if (!mercadoPagoConfigured()) return res.status(200).json({ received: true, ignored: true });
 
-  const secret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
-  if (!secret && process.env.NODE_ENV === 'production') {
-    return res.status(503).json({ error: 'El webhook de Mercado Pago no está configurado.' });
-  }
+  const secret = process.env.MERCADO_PAGO_WEBHOOK_SECRET!;
 
   const rawDataId = req.query['data.id'] ?? req.body?.data?.id;
   const dataId = typeof rawDataId === 'string' || typeof rawDataId === 'number' ? String(rawDataId) : undefined;
   const rawType = req.query.type ?? req.body?.type;
   const type = typeof rawType === 'string' ? rawType : '';
 
-  if (secret && !verifyWebhookSignature({
+  if (!verifyWebhookSignature({
     xSignature: req.get('x-signature'),
     xRequestId: req.get('x-request-id'),
     dataId,
