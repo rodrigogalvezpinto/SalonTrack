@@ -256,6 +256,24 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
 
   try {
     assert.deepStrictEqual(checkMigrations(db), ['No existe la tabla schema_migrations.']);
+    runMigrations(db, MIGRATIONS.slice(0, 4));
+    const createdAt = new Date().toISOString();
+    db.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
+      .run('usr_migration_owner', 'migration-owner@example.test', 'hash', createdAt);
+    db.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
+      .run('usr_migration_existing', 'migration-existing@example.test', 'hash', createdAt);
+    db.prepare(`
+      INSERT INTO businesses (id, owner_id, slug, name, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run('biz_migration_owner', 'usr_migration_owner', 'migration-owner', 'Migration Owner', createdAt, createdAt);
+    db.prepare(`
+      INSERT INTO businesses (id, owner_id, slug, name, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run('biz_migration_existing', 'usr_migration_existing', 'migration-existing', 'Existing Role', createdAt, createdAt);
+    db.prepare(`
+      INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run('bm_migration_existing', 'biz_migration_existing', 'usr_migration_existing', 'RECEPTION', 0, createdAt);
     runMigrations(db);
     const recorded = db.prepare('SELECT version, checksum FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number; checksum: string }>;
@@ -263,6 +281,16 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
     assert.deepStrictEqual(
       recorded.map(row => row.checksum),
       MIGRATIONS.map(migrationChecksum)
+    );
+    assert.deepStrictEqual(
+      { ...db.prepare('SELECT role, is_active FROM business_members WHERE business_id = ? AND user_id = ?')
+        .get('biz_migration_owner', 'usr_migration_owner') as { role: string; is_active: number } },
+      { role: 'OWNER', is_active: 1 },
+    );
+    assert.deepStrictEqual(
+      { ...db.prepare('SELECT role, is_active FROM business_members WHERE business_id = ? AND user_id = ?')
+        .get('biz_migration_existing', 'usr_migration_existing') as { role: string; is_active: number } },
+      { role: 'RECEPTION', is_active: 0 },
     );
 
     db.prepare('UPDATE schema_migrations SET checksum = NULL WHERE version = 2').run();
@@ -2693,10 +2721,13 @@ async function runIntegrationTests() {
       const targetBusinessId = 'biz_valeria_studio';
       const originalBookingMode = (sqlite.prepare('SELECT booking_mode FROM businesses WHERE id = ?').get(targetBusinessId) as any).booking_mode;
       assert.strictEqual(owner.user.business.auto_confirm_bookings, originalBookingMode === 'AUTOMATIC');
-      sqlite.prepare(`
-        INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
-        VALUES (?, 'biz_route68_barber', ?, 'OWNER', 1, ?)
-      `).run(generateId('bm'), unrelatedOwner.user.id, new Date().toISOString());
+      const unrelatedOwnerMembership = sqlite.prepare(`
+        SELECT role, is_active FROM business_members
+        WHERE business_id = 'biz_route68_barber' AND user_id = ?
+      `).get(unrelatedOwner.user.id) as { role: string; is_active: number } | undefined;
+      assert.ok(unrelatedOwnerMembership);
+      assert.strictEqual(unrelatedOwnerMembership.role, 'OWNER');
+      assert.strictEqual(unrelatedOwnerMembership.is_active, 1);
       const secondOwnerBusiness = sqlite.prepare(`
         SELECT business_id FROM business_members
         WHERE user_id = ? AND is_active = 1
@@ -4592,6 +4623,7 @@ async function runIntegrationTests() {
       const owner = await login('contacto@valeriaestudio.cl', 'NuevaClaveSegura123!');
       const invitee = await login('ignacio@barberiaroute.cl', 'Barber1234!');
       const customer = await login('cliente@gmail.com', 'Cliente1234!');
+      const natalia = await login('natalia@glamnails.cl', 'Nails1234!');
       const businessId = 'biz_valeria_studio';
       const invitationIds: string[] = [];
       const staffIds: string[] = [];
@@ -4605,6 +4637,15 @@ async function runIntegrationTests() {
       if (previousCustomerMembership) {
         sqlite.prepare('DELETE FROM business_members WHERE id = ?').run(previousCustomerMembership.id);
       }
+      const previousNataliaMembership = sqlite.prepare(`
+        SELECT id, role, is_active, created_at FROM business_members WHERE business_id = ? AND user_id = ?
+      `).get(businessId, natalia.user.id) as { id: string; role: string; is_active: number; created_at: string } | undefined;
+      if (previousNataliaMembership) {
+        sqlite.prepare('DELETE FROM business_members WHERE id = ?').run(previousNataliaMembership.id);
+      }
+      const hadNataliaStaffRole = Boolean(sqlite.prepare(`
+        SELECT 1 FROM user_roles WHERE user_id = ? AND role = 'BUSINESS_STAFF'
+      `).get(natalia.user.id));
       const previousOtherMembership = sqlite.prepare(`
         SELECT id, role, is_active, created_at FROM business_members
         WHERE business_id = 'biz_route68_barber' AND user_id = ?
@@ -4657,6 +4698,16 @@ async function runIntegrationTests() {
         process.env.DEV_MAIL_DIR = mailDirectory;
         delete process.env.RESEND_API_KEY;
         delete process.env.RESEND_FROM_EMAIL;
+
+        const nataliaBeforeResponse = await requestJson('/api/auth/me', 'GET', natalia.token);
+        const nataliaBefore = (await nataliaBeforeResponse.json() as {
+          user: {
+            business: { id: string } | null;
+            memberships: Array<{ business_id: string; role: string }>;
+          };
+        }).user;
+        assert.ok(nataliaBefore.memberships.some(item => item.business_id === 'biz_glam_nails' && item.role === 'OWNER'));
+        assert.strictEqual(nataliaBefore.business?.id, 'biz_glam_nails');
 
         const created = await sendJson('/api/business/staff', {
           name: 'Profesional invitada',
@@ -4762,6 +4813,40 @@ async function runIntegrationTests() {
         assert.strictEqual(
           ((await switchedSession.json() as { user: { business: { id: string } } }).user.business.id),
           businessId,
+        );
+
+        const nataliaInvitationResponse = await sendJson('/api/business/staff', {
+          name: 'Natalia profesional invitada',
+          email: 'natalia@glamnails.cl',
+          member_role: 'RECEPTION',
+        }, owner.token);
+        assert.strictEqual(nataliaInvitationResponse.status, 201);
+        const nataliaInvitationBody = await nataliaInvitationResponse.json() as {
+          staff_id: string;
+          invitation: { id: string };
+        };
+        staffIds.push(nataliaInvitationBody.staff_id);
+        invitationIds.push(nataliaInvitationBody.invitation.id);
+        const nataliaInvitationToken = latestInvitationToken();
+        const nataliaAcceptResponse = await sendJson(
+          `/api/invitations/${nataliaInvitationBody.invitation.id}/accept`,
+          { token: nataliaInvitationToken },
+          natalia.token,
+        );
+        assert.strictEqual(nataliaAcceptResponse.status, 200);
+        const nataliaAfterResponse = await requestJson('/api/auth/me', 'GET', natalia.token);
+        const nataliaAfter = (await nataliaAfterResponse.json() as {
+          user: {
+            business: { id: string } | null;
+            memberships: Array<{ business_id: string; role: string }>;
+          };
+        }).user;
+        assert.ok(nataliaAfter.memberships.some(item => item.business_id === 'biz_glam_nails' && item.role === 'OWNER'));
+        assert.ok(nataliaAfter.memberships.some(item => item.business_id === businessId && item.role === 'RECEPTION'));
+        const nataliaBusinessResponse = await requestJson('/api/business/my', 'GET', natalia.token);
+        assert.strictEqual(
+          ((await nataliaBusinessResponse.json() as { business: { id: string } }).business.id),
+          'biz_glam_nails',
         );
         const otherBusiness = await requestJson('/api/business/my', 'GET', invitee.token, undefined, {
           'X-Business-Id': 'biz_route68_barber',
@@ -4914,6 +4999,25 @@ async function runIntegrationTests() {
             previousCustomerMembership.is_active,
             previousCustomerMembership.created_at,
           );
+        }
+        sqlite.prepare('DELETE FROM business_members WHERE business_id = ? AND user_id = ?')
+          .run(businessId, natalia.user.id);
+        if (previousNataliaMembership) {
+          sqlite.prepare(`
+            INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            previousNataliaMembership.id,
+            businessId,
+            natalia.user.id,
+            previousNataliaMembership.role,
+            previousNataliaMembership.is_active,
+            previousNataliaMembership.created_at,
+          );
+        }
+        if (!hadNataliaStaffRole) {
+          sqlite.prepare("DELETE FROM user_roles WHERE user_id = ? AND role = 'BUSINESS_STAFF'")
+            .run(natalia.user.id);
         }
         sqlite.prepare('DELETE FROM business_members WHERE business_id = ? AND user_id = ?')
           .run('biz_route68_barber', invitee.user.id);
