@@ -184,16 +184,25 @@ function authorizeBusiness(
   req: AuthRequest,
   res: Response,
   businessId: string,
-  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF']
+  allowedRoles: string[] = ['OWNER', 'ADMIN', 'PROFESSIONAL', 'RECEPTION', 'STAFF'],
+  inactiveStatus: 403 | 404 = 404
 ): string | null {
   const member = getSqliteDb().prepare(`
-    SELECT role
+    SELECT role, is_active
     FROM business_members
-    WHERE business_id = ? AND user_id = ? AND is_active = 1
-  `).get(businessId, req.userId || '') as { role: string } | undefined;
+    WHERE business_id = ? AND user_id = ?
+  `).get(businessId, req.userId || '') as { role: string; is_active: number } | undefined;
 
   if (!member) {
     res.status(404).json({ error: 'Negocio no encontrado.' });
+    return null;
+  }
+  if (!member.is_active) {
+    res.status(inactiveStatus).json({
+      error: inactiveStatus === 403
+        ? 'No tienes permisos para esta acción en el negocio.'
+        : 'Negocio no encontrado.',
+    });
     return null;
   }
   if (!allowedRoles.includes(member.role)) {
@@ -1517,18 +1526,25 @@ const completeBookingHandler = (req: AuthRequest, res: Response) => {
       }, booking.business_id, booking.id);
     }
 
-    createBookingPayment(db, {
-      userId: booking.customer_user_id,
-      businessId: booking.business_id,
-      bookingId: booking.id,
-      amountClp: booking.amount_clp,
-      provider: 'local',
-      providerPaymentId: `PRES_PAY_${booking.id}`,
-      status: 'approved',
-      paymentMethod: 'presential',
-      createdAt: now,
-      replace: true,
-    });
+    const hasApprovedPayment = db.prepare(`
+      SELECT 1 FROM payments
+      WHERE booking_id = ? AND type = 'booking_payment' AND status = 'approved'
+      LIMIT 1
+    `).get(booking.id);
+    if (!hasApprovedPayment) {
+      createBookingPayment(db, {
+        userId: booking.customer_user_id,
+        businessId: booking.business_id,
+        bookingId: booking.id,
+        amountClp: booking.amount_clp,
+        provider: 'local',
+        providerPaymentId: `PRES_PAY_${booking.id}`,
+        status: 'approved',
+        paymentMethod: 'presential',
+        createdAt: now,
+        replace: true,
+      });
+    }
 
     if (booking.customer_user_id) {
       createNotification(booking.customer_user_id, 'review_request', '¿Cómo estuvo tu atención?', `Tu servicio en ${business.name} ha finalizado. ¡Comparte tu opinión dejando una reseña!`, 'booking', booking.id, 'low');
@@ -1546,7 +1562,7 @@ router.put('/bookings/:id/status', requireAuth, (req: AuthRequest, res: Response
   const sqlite = getSqliteDb();
   const booking = sqlite.prepare('SELECT * FROM bookings WHERE id = ?').get(req.params.id) as any;
   if (!booking) return res.status(404).json({ error: 'Reserva no encontrada.' });
-  if (authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION']) === null) return;
+  if (authorizeBusiness(req, res, booking.business_id, ['OWNER', 'ADMIN', 'STAFF', 'PROFESSIONAL', 'RECEPTION'], 403) === null) return;
 
   const { status } = req.body;
   const transitions: Record<string, string[]> = {
@@ -1904,6 +1920,13 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
     min_advance_hours, max_advance_days, buffer_minutes, cancellation_policy
   } = req.body;
 
+  const normalizedBufferMinutes = buffer_minutes !== undefined && buffer_minutes !== ''
+    ? Number(buffer_minutes)
+    : null;
+  if (normalizedBufferMinutes !== null && (!Number.isFinite(normalizedBufferMinutes) || normalizedBufferMinutes < 0)) {
+    return res.status(400).json({ error: 'buffer_minutes debe ser un número finito mayor o igual a 0.' });
+  }
+
   const now = new Date().toISOString();
   sqlite.prepare(`
     UPDATE businesses
@@ -1940,7 +1963,7 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
     booking_mode || (auto_confirm_bookings === undefined ? null : (auto_confirm_bookings ? 'AUTOMATIC' : 'MANUAL')),
     min_advance_hours ? Number(min_advance_hours) : null,
     max_advance_days ? Number(max_advance_days) : null,
-    buffer_minutes ? Number(buffer_minutes) : null,
+    normalizedBufferMinutes,
     cancellation_policy?.trim() || null,
     now,
     bizId
@@ -1951,6 +1974,12 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
 };
 
 // Business Catalog Services
+const parseBufferMin = (value: unknown): number | null => {
+  if (value === undefined || value === null || value === '') return 5;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+};
+
 const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
   const bizId = req.params.id;
@@ -1961,6 +1990,10 @@ const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
   const { name, category_id, description, price_clp, price_type, duration_minutes, duration_min, buffer_min, is_featured, is_active, modality } = req.body;
   if (!name || !price_clp) {
     return res.status(400).json({ error: 'Nombre y precio son requeridos.' });
+  }
+  const normalizedBufferMin = parseBufferMin(buffer_min);
+  if (normalizedBufferMin === null) {
+    return res.status(400).json({ error: 'buffer_min debe ser un número finito mayor o igual a 0.' });
   }
 
   const srvId = generateId('srv');
@@ -1980,7 +2013,7 @@ const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
     Number(price_clp),
     price_type || 'fixed',
     Number(duration_minutes ?? duration_min) || 45,
-    Number(buffer_min) || 5,
+    normalizedBufferMin,
     modality || 'salon',
     is_featured ? 1 : 0,
     is_active === false || is_active === 0 ? 'INACTIVE' : 'PUBLISHED',
@@ -2016,6 +2049,10 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
   if (businessSubscriptionBlocked(res, srv.business_id)) return;
 
   const { name, price_clp, price_type, duration_minutes, duration_min, buffer_min, description, is_featured, status, is_active } = req.body;
+  const normalizedBufferMin = buffer_min === undefined ? null : parseBufferMin(buffer_min);
+  if (buffer_min !== undefined && normalizedBufferMin === null) {
+    return res.status(400).json({ error: 'buffer_min debe ser un número finito mayor o igual a 0.' });
+  }
   const now = new Date().toISOString();
 
   sqlite.prepare(`
@@ -2035,7 +2072,7 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
     price_clp ? Number(price_clp) : null,
     price_type || null,
     duration_minutes !== undefined || duration_min !== undefined ? Number(duration_minutes ?? duration_min) : null,
-    buffer_min !== undefined ? Number(buffer_min) : null,
+    normalizedBufferMin,
     description !== undefined ? description.trim() : null,
     is_featured !== undefined ? (is_featured ? 1 : 0) : null,
     status || (is_active !== undefined ? (is_active ? 'PUBLISHED' : 'INACTIVE') : null),
@@ -2107,11 +2144,37 @@ router.post('/business/staff', requireAuth, (req: AuthRequest, res: Response) =>
 
 router.delete('/business/staff/:id', requireAuth, (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
-  const staff = sqlite.prepare('SELECT business_id FROM staff WHERE id = ?').get(req.params.id) as any;
+  const staff = sqlite.prepare('SELECT business_id, user_id FROM staff WHERE id = ?').get(req.params.id) as any;
   if (!staff) return res.status(404).json({ error: 'Trabajador no encontrado.' });
   if (authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN']) === null) return;
+  const member = staff.user_id
+    ? sqlite.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ?')
+      .get(staff.business_id, staff.user_id) as { role: string } | undefined
+    : undefined;
+  if (member?.role === 'OWNER') {
+    return res.status(400).json({ error: 'No se puede desactivar al propietario del negocio.' });
+  }
   if (businessSubscriptionBlocked(res, staff.business_id)) return;
-  sqlite.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(req.params.id);
+
+  const deactivated = withTransaction(db => {
+    const currentMember = staff.user_id
+      ? db.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ?')
+        .get(staff.business_id, staff.user_id) as { role: string } | undefined
+      : undefined;
+    if (currentMember?.role === 'OWNER') return false;
+
+    db.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run(req.params.id);
+    if (staff.user_id) {
+      db.prepare(`
+        UPDATE business_members SET is_active = 0
+        WHERE business_id = ? AND user_id = ? AND role != 'OWNER'
+      `).run(staff.business_id, staff.user_id);
+    }
+    return true;
+  });
+  if (!deactivated) {
+    return res.status(400).json({ error: 'No se puede desactivar al propietario del negocio.' });
+  }
   return res.json({ message: 'Trabajador desactivado correctamente.' });
 });
 

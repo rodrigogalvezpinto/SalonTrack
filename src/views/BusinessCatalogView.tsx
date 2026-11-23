@@ -353,7 +353,7 @@ export const BusinessCatalogView: React.FC = () => {
                   <div className="flex items-center gap-3 text-xs text-slate-400 pt-1">
                     <span>Duración: {formatDuration(svc.duration_minutes || svc.duration_min)}</span>
                     <span aria-hidden="true">·</span>
-                    <span>Buffer: {svc.clean_minutes || svc.buffer_min || 0} min</span>
+                    <span>Buffer: {svc.clean_minutes ?? svc.buffer_min ?? 0} min</span>
                   </div>
                 </div>
 
@@ -371,7 +371,7 @@ export const BusinessCatalogView: React.FC = () => {
                           description: svc.description || '',
                           duration_min: svc.duration_minutes || svc.duration_min || 45,
                           price_clp: svc.price_clp,
-                          buffer_min: svc.clean_minutes || svc.buffer_min || 10,
+                          buffer_min: svc.clean_minutes ?? svc.buffer_min ?? 10,
                           is_active: svc.status !== 'INACTIVE'
                         });
                         setIsServiceModalOpen(true);
