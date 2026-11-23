@@ -2744,6 +2744,7 @@ router.post('/payments/webhook', async (req, res) => {
     applyMercadoPagoPayment(payment);
   } catch (error) {
     console.error('Error al aplicar el pago de Mercado Pago:', error);
+    return res.status(500).json({ error: 'No se pudo aplicar el pago de Mercado Pago.' });
   }
   return res.status(200).json({ received: true });
 });
