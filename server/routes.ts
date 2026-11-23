@@ -2433,7 +2433,6 @@ router.post('/business/staff/:id/invite', requireAuth, async (req: AuthRequest, 
 router.get('/business/invitations', requireAuth, (req: AuthRequest, res: Response) => {
   const businessId = getManagedBusinessId(req, res);
   if (!businessId) return;
-  if (businessSubscriptionBlocked(res, businessId)) return;
   const invitations = getSqliteDb().prepare(`
     SELECT bi.*, s.name AS staff_name
     FROM business_invitations bi
