@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { apiRequest } from '../utils/api';
 import { Client, Service, ContactLog } from '../types';
 import { formatCLP, formatChileanDate, formatChileanPhone } from '../utils/formatters';
@@ -45,6 +45,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
   const [editNotes, setEditNotes] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const errorAlertRef = useRef<HTMLDivElement>(null);
 
   const fetchClientDetails = async () => {
     setLoading(true);
@@ -73,6 +74,12 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
   useEffect(() => {
     fetchClientDetails();
   }, [clientId, refreshKey]);
+
+  useEffect(() => {
+    if (errorMessage) {
+      errorAlertRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [errorMessage]);
 
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -137,7 +144,7 @@ export const ClientDetailView: React.FC<ClientDetailViewProps> = ({
   return (
     <div className="space-y-6">
       {errorMessage && (
-        <div role="alert" className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-medium text-rose-700">
+        <div ref={errorAlertRef} role="alert" className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-medium text-rose-700">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>{errorMessage}</span>
         </div>
