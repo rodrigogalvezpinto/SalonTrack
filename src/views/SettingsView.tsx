@@ -339,11 +339,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onOpenCheckout }) =>
               <span>Estado de Licencia & Pagos (Mercado Pago Chile)</span>
             </h3>
             <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+              subscription?.is_active === false ? 'bg-rose-100 text-rose-800' :
               subscription?.status === 'active' ? 'bg-emerald-100 text-emerald-800' :
               subscription?.status === 'trial' ? 'bg-amber-100 text-amber-800' :
               'bg-rose-100 text-rose-800'
             }`}>
-              {subscription?.status === 'active' ? 'Licencia Activa' :
+              {subscription?.is_active === false ? 'Vencida' :
+               subscription?.status === 'active' ? 'Licencia Activa' :
                subscription?.status === 'trial' ? `Prueba (${subscription.days_remaining} días restantes)` :
                'Vencida'}
             </span>
