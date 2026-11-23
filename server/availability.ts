@@ -22,6 +22,48 @@ export function formatMinutesToTime(totalMinutes: number): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+export function getPersonStaffIds(db: ReturnType<typeof getSqliteDb>, staffId: string): string[] {
+  const staff = db.prepare('SELECT user_id FROM staff WHERE id = ?')
+    .get(staffId) as { user_id: string | null } | undefined;
+  if (!staff?.user_id) return [staffId];
+
+  return (db.prepare('SELECT id FROM staff WHERE user_id = ? ORDER BY id')
+    .all(staff.user_id) as Array<{ id: string }>).map(row => row.id);
+}
+
+function getBlockIntervalsForDate(
+  db: ReturnType<typeof getSqliteDb>,
+  businessId: string,
+  personStaffIds: string[],
+  dateStr: string,
+): Array<{ start: number; end: number }> {
+  const placeholders = personStaffIds.map(() => '?').join(', ');
+  const dayStart = `${dateStr}T00:00:00`;
+  const dayEnd = `${dateStr}T23:59:59`;
+  const blocks = db.prepare(`
+    SELECT start_datetime, end_datetime
+    FROM availability_blocks
+    WHERE (
+      (staff_id IS NULL AND business_id = ?)
+      OR staff_id IN (${placeholders})
+    )
+      AND start_datetime < ?
+      AND end_datetime > ?
+  `).all(businessId, ...personStaffIds, dayEnd, dayStart) as Array<{
+    start_datetime: string;
+    end_datetime: string;
+  }>;
+
+  return blocks.map(block => ({
+    start: block.start_datetime.slice(0, 10) < dateStr
+      ? 0
+      : parseTimeToMinutes(block.start_datetime.slice(11, 16)),
+    end: block.end_datetime.slice(0, 10) > dateStr
+      ? 24 * 60
+      : parseTimeToMinutes(block.end_datetime.slice(11, 16)),
+  }));
+}
+
 export function getAvailableSlots(params: {
   businessId: string;
   serviceId: string;
@@ -124,16 +166,19 @@ export function getAvailableSlots(params: {
     const breakStart = stAvail.break_start ? parseTimeToMinutes(stAvail.break_start) : null;
     const breakEnd = stAvail.break_end ? parseTimeToMinutes(stAvail.break_end) : null;
 
-    // Existing active bookings for this staff on this date
+    const personStaffIds = getPersonStaffIds(db, st.id);
+    const staffPlaceholders = personStaffIds.map(() => '?').join(', ');
+
+    // Existing active bookings for this person on this date
     const existingBookings = db.prepare(`
       SELECT b.id, b.start_time, b.end_time, sv.clean_minutes
       FROM bookings b
       LEFT JOIN services sv ON sv.id = b.service_id
-      WHERE b.staff_id = ? AND b.booking_date = ?
+      WHERE b.staff_id IN (${staffPlaceholders}) AND b.booking_date = ?
       AND b.status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
       ${excludeBookingId ? 'AND b.id != ?' : ''}
     `).all(
-      st.id,
+      ...personStaffIds,
       dateStr,
       ...(excludeBookingId ? [excludeBookingId] : [])
     ) as Array<{ id: string; start_time: string; end_time: string; clean_minutes: number | null }>;
@@ -143,23 +188,7 @@ export function getAvailableSlots(params: {
       end: parseTimeToMinutes(b.end_time) + (b.clean_minutes ?? 5) + bufferMinutes,
     }));
 
-    // Availability blocks (vacations, absences, locks)
-    const blocks = db.prepare(`
-      SELECT start_datetime, end_datetime
-      FROM availability_blocks
-      WHERE (staff_id = ? OR staff_id IS NULL)
-      AND business_id = ?
-      AND (start_datetime LIKE ? OR end_datetime LIKE ?)
-    `).all(st.id, businessId, `${dateStr}%`, `${dateStr}%`) as any[];
-
-    const blockIntervals = blocks.map(bl => {
-      const bStartTime = bl.start_datetime.includes('T') ? bl.start_datetime.split('T')[1].substring(0, 5) : '00:00';
-      const bEndTime = bl.end_datetime.includes('T') ? bl.end_datetime.split('T')[1].substring(0, 5) : '23:59';
-      return {
-        start: parseTimeToMinutes(bStartTime),
-        end: parseTimeToMinutes(bEndTime),
-      };
-    });
+    const blockIntervals = getBlockIntervalsForDate(db, businessId, personStaffIds, dateStr);
 
     // Step through available time window in 15-minute increments
     const step = 15;
@@ -247,16 +276,19 @@ export function isSlotAvailable(params: {
     .get(serviceId, businessId) as { clean_minutes: number | null } | undefined;
   const serviceCleanMinutes = service?.clean_minutes ?? 5;
   const endMin = startMin + durationMinutes + serviceCleanMinutes + bufferMinutes;
+  const appointmentEndMin = startMin + durationMinutes;
+  const personStaffIds = getPersonStaffIds(db, staffId);
+  const staffPlaceholders = personStaffIds.map(() => '?').join(', ');
 
   const collisions = db.prepare(`
     SELECT b.id, b.start_time, b.end_time, sv.clean_minutes
     FROM bookings b
     LEFT JOIN services sv ON sv.id = b.service_id
-    WHERE b.staff_id = ? AND b.booking_date = ?
+    WHERE b.staff_id IN (${staffPlaceholders}) AND b.booking_date = ?
     AND b.status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
     ${excludeBookingId ? 'AND b.id != ?' : ''}
   `).all(
-    staffId,
+    ...personStaffIds,
     dateStr,
     ...(excludeBookingId ? [excludeBookingId] : [])
   ) as Array<{ id: string; start_time: string; end_time: string; clean_minutes: number | null }>;
@@ -267,6 +299,11 @@ export function isSlotAvailable(params: {
     if (!(endMin <= cStart || startMin >= cEnd)) {
       return false; // Collision detected!
     }
+  }
+
+  const blockIntervals = getBlockIntervalsForDate(db, businessId, personStaffIds, dateStr);
+  for (const block of blockIntervals) {
+    if (!(appointmentEndMin <= block.start || startMin >= block.end)) return false;
   }
 
   return true;

@@ -20,10 +20,39 @@ import {
   Sparkles
 } from 'lucide-react';
 
+type AvailabilityBlock = {
+  id: string;
+  staff_id: string | null;
+  staff_name: string | null;
+  start_datetime: string;
+  end_datetime: string;
+  reason: string | null;
+  can_delete: boolean;
+};
+
+type BusinessBlocksResponse = {
+  blocks: AvailabilityBlock[];
+  can_manage_all: boolean;
+  own_staff_id: string | null;
+  staff: Array<{ id: string; name: string }>;
+};
+
 export const BusinessBookingsView: React.FC = () => {
   const { business } = useAuth();
 
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [blocks, setBlocks] = useState<AvailabilityBlock[]>([]);
+  const [blockStaffOptions, setBlockStaffOptions] = useState<Array<{ id: string; name: string }>>([]);
+  const [canManageAllBlocks, setCanManageAllBlocks] = useState<boolean>(false);
+  const [ownStaffId, setOwnStaffId] = useState<string | null>(null);
+  const [isLoadingBlocks, setIsLoadingBlocks] = useState<boolean>(true);
+  const [blocksError, setBlocksError] = useState<string | null>(null);
+  const [blockStaffSelection, setBlockStaffSelection] = useState<string>('business');
+  const [blockStart, setBlockStart] = useState<string>('');
+  const [blockEnd, setBlockEnd] = useState<string>('');
+  const [blockReason, setBlockReason] = useState<string>('');
+  const [isSavingBlock, setIsSavingBlock] = useState<boolean>(false);
+  const [conflictingBookings, setConflictingBookings] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -37,6 +66,7 @@ export const BusinessBookingsView: React.FC = () => {
 
   useEffect(() => {
     loadBookings();
+    if (business) void loadBlocks();
   }, [business]);
 
   const loadBookings = async () => {
@@ -48,6 +78,60 @@ export const BusinessBookingsView: React.FC = () => {
       console.error('Error loading business bookings:', err);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadBlocks = async () => {
+    setIsLoadingBlocks(true);
+    setBlocksError(null);
+    try {
+      const response = await apiRequest<BusinessBlocksResponse>('/api/business/blocks');
+      setBlocks(response.blocks || []);
+      setBlockStaffOptions(response.staff || []);
+      setCanManageAllBlocks(response.can_manage_all);
+      setOwnStaffId(response.own_staff_id);
+    } catch (err: any) {
+      setBlocksError(err.message || 'No se pudieron cargar las ausencias.');
+    } finally {
+      setIsLoadingBlocks(false);
+    }
+  };
+
+  const handleCreateBlock = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setIsSavingBlock(true);
+    setBlocksError(null);
+    setConflictingBookings(0);
+    const staffId = canManageAllBlocks
+      ? blockStaffSelection === 'business' ? null : blockStaffSelection
+      : ownStaffId;
+    try {
+      const response = await apiRequest<{ conflicting_bookings: number }>('/api/business/blocks', {
+        method: 'POST',
+        body: JSON.stringify({
+          staff_id: staffId,
+          start_datetime: blockStart,
+          end_datetime: blockEnd,
+          reason: blockReason,
+        }),
+      });
+      setConflictingBookings(response.conflicting_bookings);
+      setBlockReason('');
+      await loadBlocks();
+    } catch (err: any) {
+      setBlocksError(err.message || 'No se pudo registrar la ausencia.');
+    } finally {
+      setIsSavingBlock(false);
+    }
+  };
+
+  const handleDeleteBlock = async (id: string) => {
+    setBlocksError(null);
+    try {
+      await apiRequest(`/api/business/blocks/${id}`, { method: 'DELETE' });
+      await loadBlocks();
+    } catch (err: any) {
+      setBlocksError(err.message || 'No se pudo eliminar el bloqueo.');
     }
   };
 
@@ -199,6 +283,108 @@ export const BusinessBookingsView: React.FC = () => {
           <span className="text-[11px] text-slate-400">En servicios del día</span>
         </div>
       </div>
+
+      <section className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">
+        <div>
+          <h2 className="text-base font-bold text-slate-900">Ausencias y bloqueos</h2>
+          <p className="mt-1 text-xs text-slate-500">Revisa las ausencias próximas y bloquea horarios sin eliminar citas.</p>
+        </div>
+
+        {blocksError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{blocksError}</p>}
+        {conflictingBookings > 0 && (
+          <p role="status" className="rounded-lg bg-amber-50 p-3 text-xs font-medium text-amber-800">
+            Hay {conflictingBookings} citas en ese horario. Revísalas o reprográmalas.
+          </p>
+        )}
+
+        {isLoadingBlocks ? (
+          <p className="py-3 text-center text-xs text-slate-500">Cargando ausencias...</p>
+        ) : blocks.length === 0 ? (
+          <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">No hay ausencias próximas.</p>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {blocks.map(block => (
+              <div key={block.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-slate-800">
+                    {block.staff_name || 'Todo el negocio'}
+                    <span className="ml-2 font-normal text-slate-500">
+                      {block.start_datetime.replace('T', ' ').slice(0, 16)} – {block.end_datetime.replace('T', ' ').slice(0, 16)}
+                    </span>
+                  </p>
+                  {block.reason && <p className="mt-1 text-xs text-slate-500">{block.reason}</p>}
+                </div>
+                {block.can_delete && (
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteBlock(block.id)}
+                    className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-rose-600 hover:text-rose-800"
+                  >
+                    <XCircle className="h-3.5 w-3.5" /> Eliminar
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {(canManageAllBlocks || (ownStaffId && ['STAFF', 'PROFESSIONAL'].includes(business?.member_role || ''))) && (
+          <form onSubmit={handleCreateBlock} className="grid grid-cols-1 gap-3 border-t border-slate-100 pt-4 sm:grid-cols-2 lg:grid-cols-5">
+            {canManageAllBlocks ? (
+              <label className="text-[11px] font-medium text-slate-600">
+                Profesional
+                <select
+                  value={blockStaffSelection}
+                  onChange={event => setBlockStaffSelection(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs"
+                >
+                  <option value="business">Todo el negocio</option>
+                  {blockStaffOptions.map(staff => <option key={staff.id} value={staff.id}>{staff.name}</option>)}
+                </select>
+              </label>
+            ) : (
+              <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">Mi ausencia</div>
+            )}
+            <label className="text-[11px] font-medium text-slate-600">
+              Desde
+              <input
+                type="datetime-local"
+                required
+                value={blockStart}
+                onChange={event => setBlockStart(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs"
+              />
+            </label>
+            <label className="text-[11px] font-medium text-slate-600">
+              Hasta
+              <input
+                type="datetime-local"
+                required
+                value={blockEnd}
+                onChange={event => setBlockEnd(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs"
+              />
+            </label>
+            <label className="text-[11px] font-medium text-slate-600">
+              Motivo (opcional)
+              <input
+                type="text"
+                maxLength={200}
+                value={blockReason}
+                onChange={event => setBlockReason(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-2 text-xs"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={isSavingBlock || !blockStart || !blockEnd}
+              className="self-end rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
+            >
+              {isSavingBlock ? 'Guardando...' : 'Agregar ausencia'}
+            </button>
+          </form>
+        )}
+      </section>
 
       {/* Search and Filters */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">

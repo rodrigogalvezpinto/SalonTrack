@@ -254,6 +254,7 @@ export interface Business {
   featured_service?: CatalogService;
   verified?: boolean | number;
   auto_confirm_bookings?: boolean;
+  member_role?: string;
   hours?: BusinessHours[];
 }
 
