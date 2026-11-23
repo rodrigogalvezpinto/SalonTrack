@@ -91,11 +91,24 @@ export async function processTrialNotices(now = new Date()): Promise<number> {
         );
         return true;
       });
-      if (!inserted) continue;
+      if (inserted) sentCount++;
 
-      sentCount++;
+      const noticeRecord = getSqliteDb().prepare(`
+        SELECT email_sent_at FROM subscription_notices
+        WHERE subscription_id = ? AND kind = ?
+      `).get(subscription.id, notice.kind) as { email_sent_at: string | null } | undefined;
+      if (!noticeRecord || noticeRecord.email_sent_at !== null) continue;
+
       const html = `<p>${notice.message}</p>`;
-      await emailProvider.send(subscription.email, notice.title, html, notice.message);
+      const emailResult = await emailProvider.send(subscription.email, notice.title, html, notice.message);
+      if (!emailResult.success) {
+        console.error('[Trial notices] El adaptador no confirmó el envío del correo:', subscription.id, notice.kind);
+        continue;
+      }
+      getSqliteDb().prepare(`
+        UPDATE subscription_notices SET email_sent_at = ?
+        WHERE subscription_id = ? AND kind = ? AND email_sent_at IS NULL
+      `).run(now.toISOString(), subscription.id, notice.kind);
     } catch (error) {
       console.error('[Trial notices] No se pudo enviar un aviso de suscripción:', error);
     }

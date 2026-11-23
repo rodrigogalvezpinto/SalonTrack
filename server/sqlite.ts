@@ -590,6 +590,7 @@ export const MIGRATIONS: Migration[] = [
         subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
         kind TEXT NOT NULL,
         sent_at TEXT NOT NULL,
+        email_sent_at TEXT,
         UNIQUE(subscription_id, kind)
       );
     `,

@@ -354,6 +354,10 @@ test('Migración de lanzamiento extiende las pruebas antiguas a 90 días', () =>
         .get() as { count: number }).count,
       1
     );
+    assert.ok(
+      (db.prepare('PRAGMA table_info(subscription_notices)').all() as Array<{ name: string }>)
+        .some(column => column.name === 'email_sent_at')
+    );
   } finally {
     db.close();
     rmSync(temporaryDirectory, { recursive: true, force: true });
@@ -4020,7 +4024,7 @@ async function runIntegrationTests() {
       rmSync(outboxDir, { recursive: true, force: true });
     });
 
-    await integrationTest('Avisos de prueba: respeta facturación, notifica una sola vez y entrega correo local', async () => {
+    await integrationTest('Avisos de prueba: reintenta correo sin duplicar notificaciones', async () => {
       const outboxDir = mkdtempSync(join(tmpdir(), 'salontrack-trial-notices-'));
       const previousEnvironment = {
         billingEnabled: process.env.BILLING_ENABLED,
@@ -4029,6 +4033,11 @@ async function runIntegrationTests() {
         apiKey: process.env.RESEND_API_KEY,
         fromEmail: process.env.RESEND_FROM_EMAIL,
       };
+      const originalSend = emailProvider.send;
+      const originalConsoleError = console.error;
+      let sendAttempts = 0;
+      let failedRecipient = '';
+      const loggedErrors: string[] = [];
       const endingUserId = generateId('usr');
       const endedUserId = generateId('usr');
       const endingSubscriptionId = generateId('sub');
@@ -4053,6 +4062,15 @@ async function runIntegrationTests() {
         process.env.NODE_ENV = 'test';
         delete process.env.RESEND_API_KEY;
         delete process.env.RESEND_FROM_EMAIL;
+        emailProvider.send = async (to, subject, html, text) => {
+          sendAttempts++;
+          if (sendAttempts === 1) {
+            failedRecipient = to;
+            throw new Error('Fallo simulado de correo.');
+          }
+          return originalSend.call(emailProvider, to, subject, html, text);
+        };
+        console.error = (...args: unknown[]) => { loggedErrors.push(args.join(' ')); };
         insertTrialAccount(endingUserId, endingSubscriptionId, `${endingUserId}@example.test`, endingDate);
         insertTrialAccount(endedUserId, endedSubscriptionId, `${endedUserId}@example.test`, endedDate);
 
@@ -4094,22 +4112,43 @@ async function runIntegrationTests() {
           subject: string;
           body: string;
         });
-        assert.strictEqual(emails.length, 2);
-        assert.deepStrictEqual(emails.map(email => email.to).sort(), [
-          `${endedUserId}@example.test`,
-          `${endingUserId}@example.test`,
-        ].sort());
-        assert.ok(emails.some(email => email.body.includes(messageEnding)));
-        assert.ok(emails.some(email => email.body.includes(messageEnded)));
+        assert.strictEqual(emails.length, 1);
+        assert.ok(emails.every(email => email.to !== failedRecipient));
+        assert.ok(failedRecipient);
+        assert.ok(!emails.some(email => email.to === failedRecipient));
+        assert.ok(loggedErrors.some(message => message.includes('[Trial notices] No se pudo enviar un aviso de suscripción:')));
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM subscription_notices WHERE email_sent_at IS NULL')
+            .get() as { count: number }).count,
+          1
+        );
 
         assert.strictEqual(await processTrialNotices(now), 0);
+        const retriedEmails = readFileSync(outboxFile, 'utf8').trim().split('\n').map(line => JSON.parse(line) as {
+          to: string;
+          subject: string;
+          body: string;
+        });
+        assert.strictEqual(retriedEmails.length, 2);
+        assert.ok(retriedEmails.some(email => email.to === failedRecipient));
+        assert.ok(retriedEmails.some(email => email.body.includes(messageEnding)));
+        assert.ok(retriedEmails.some(email => email.body.includes(messageEnded)));
+        assert.strictEqual(sendAttempts, 3);
+        assert.strictEqual(await processTrialNotices(now), 0);
         assert.strictEqual(readFileSync(outboxFile, 'utf8').trim().split('\n').length, 2);
+        assert.strictEqual(
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM subscription_notices WHERE email_sent_at IS NULL')
+            .get() as { count: number }).count,
+          0
+        );
         assert.strictEqual(
           (sqlite.prepare('SELECT COUNT(*) AS count FROM notifications WHERE user_id IN (?, ?)')
             .get(endingUserId, endedUserId) as { count: number }).count,
           2
         );
       } finally {
+        emailProvider.send = originalSend;
+        console.error = originalConsoleError;
         if (previousEnvironment.billingEnabled === undefined) delete process.env.BILLING_ENABLED;
         else process.env.BILLING_ENABLED = previousEnvironment.billingEnabled;
         if (previousEnvironment.nodeEnv === undefined) delete process.env.NODE_ENV;
