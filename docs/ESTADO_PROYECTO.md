@@ -13,10 +13,10 @@ Auditoría de la base `origin/main` (`9a75d5a`) y de los endurecimientos puntual
 | 4 — Agenda y disponibilidad | Parcial | `server/availability.ts` y `/api/availability/slots` consideran jornada, personal, pausas, reservas y bloqueos; `POST /api/bookings` exige un horario publicado y libre. Sigue pendiente reforzar la concurrencia de solicitudes simultáneas. |
 | 5 — Marketplace | Hecho | `MarketplaceView.tsx`, `/api/marketplace/search`, `/api/marketplace/business/:slug` y favoritos cubren búsqueda, filtros, ordenamiento, mapa local y perfiles públicos. |
 | 6 — Reservas | Parcial | `/api/bookings` valida disponibilidad y su creación es transaccional; la reprogramación es autorizada y las finalizaciones escriben en el CRM del dueño con coincidencia telefónica normalizada. Las pruebas cubren creación y reprogramación simultáneas; falta concurrencia multi-proceso, que la suite de un solo proceso no cubre. |
-| 7 — Pagos | Parcial | Las suscripciones usan Checkout Pro y un webhook con firma verificada cuando hay credenciales de Mercado Pago; la simulación queda para desarrollo y pruebas. Los depósitos de reservas siguen fuera de esta integración. |
+| 7 — Pagos | Parcial | Mercado Pago Checkout Pro y el webhook firmado están implementados y fusionados en el PR #12; faltan credenciales reales y el manejo de reembolsos/contracargos. Los depósitos de reservas siguen fuera de esta integración. |
 | 8 — Paneles y estadísticas | Parcial | `/api/dashboard/stats`, `/api/admin/dashboard` y `CustomerPortalView.tsx` entregan paneles básicos con datos consultados directamente de SQLite. |
-| 9 — Notificaciones y reputación | Parcial | Existen tablas y rutas de notificaciones/reseñas y adaptadores locales de WhatsApp/email; no hay entrega real ni procesamiento programado completo. |
-| 10 — Suscripciones y monetización | Parcial | La expiración se aplica en backend y Mercado Pago Checkout Pro activa suscripciones tras validar pagos y firmas de webhook; falta validar la integración con credenciales de producción y decidir si los negocios vencidos deben desaparecer del marketplace. |
+| 9 — Notificaciones y reputación | Parcial | La recuperación de contraseña envía correo por Resend cuando está configurado; quedan pendientes las credenciales reales y un dominio remitente verificado. WhatsApp sigue usando el adaptador local y falta completar el procesamiento programado. |
+| 10 — Suscripciones y monetización | Parcial | La expiración se aplica en backend y Mercado Pago Checkout Pro activa suscripciones tras validar pagos y firmas de webhook; falta validar credenciales de producción y decidir si los negocios vencidos deben desaparecer del marketplace. |
 | 11 — Calidad y estabilización | Parcial | `.github/workflows/ci.yml` ejecuta lint, pruebas automatizadas y build en cada PR y push a `main`; `tests/run-tests.ts` incluye cobertura de autorización entre negocios, roles y CRM. Faltan pruebas E2E, concurrencia, accesibilidad y cobertura de rutas nuevas. |
 
 ## Decisión sobre las implementaciones alternativas
@@ -31,13 +31,13 @@ Los PR #1 y #2 contenían una implementación alternativa. Se decidió cerrarlos
 - `npm run db:backup` verifica el respaldo y `npm run db:restore -- <archivo>` valida integridad y migraciones antes de restaurar; la restauración requiere detener el servidor y crea un respaldo `pre_restore_` si existe una base previa.
 - `authorizeBusiness` y las rutas CRM aíslan los flujos cubiertos por la matriz de integración; los cambios de nuevas rutas requieren ampliar esos casos.
 - Los pagos simulados de activación y checkout se bloquean en producción por defecto; `ALLOW_SIMULATED_PAYMENTS=true` solo debe usarse para demostraciones.
-- La recuperación usa un adaptador local que no entrega correo real. Fuera de producción, cada correo (incluido el enlace de recuperación) se guarda en `data/dev-mail/outbox.jsonl`, ignorado por git; la consola solo indica el destinatario. En producción no se guarda el cuerpo: debe integrarse una entrega real antes de habilitar la recuperación.
-- La integración de pagos de suscripción con Mercado Pago está implementada, pero falta validarla con credenciales de producción; los depósitos de reservas siguen usando el flujo simulado.
+- Resend está integrado para la recuperación de contraseña; fuera de producción, si no hay credenciales, los correos se guardan en `data/dev-mail/outbox.jsonl`, ignorado por git. En producción se requiere `RESEND_API_KEY`, `RESEND_FROM_EMAIL` y un dominio verificado.
+- Mercado Pago real está integrado y fusionado en el PR #12; quedan pendientes credenciales reales y soporte para reembolsos/contracargos. Los depósitos de reservas siguen usando el flujo simulado.
 - La disponibilidad consulta reservas antes de insertar, sin una garantía atómica contra dos reservas concurrentes.
 
 ## Próximos pasos prioritarios
 
 1. **P0 — Autorización:** mantener en GitHub Actions (`npm run lint`, `npm test` y `npm run build` por PR) la cobertura de cruces de cuentas/negocios, roles, membresías desactivadas y CRM agregada para reservas, negocio y clientes.
 2. **P1 — Reservas:** mantener cobertura de creación/reprogramación concurrentes y finalización transaccional en el CRM del dueño; queda pendiente probar concurrencia multi-proceso porque la suite se ejecuta en un solo proceso.
-3. **P2 — Servicios externos:** validar Mercado Pago con credenciales de producción e integrar entrega real de email.
+3. **P2 — Servicios externos:** configurar credenciales y dominio verificado de Resend; validar Mercado Pago con credenciales de producción y cubrir reembolsos/contracargos.
 4. **P2 — Estabilización:** ampliar pruebas E2E, de concurrencia y accesibilidad; mejorar la cobertura de rutas nuevas y validar permisos en CI.

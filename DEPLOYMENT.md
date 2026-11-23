@@ -40,6 +40,10 @@ DATABASE_FILE="./data/salontrack.sqlite"
 
 Los pagos simulados están bloqueados en producción por defecto; no establezca `ALLOW_SIMULATED_PAYMENTS=true` en producción.
 
+## Correo transaccional con Resend
+
+En el panel de Resend, verifique el dominio remitente con sus registros SPF y DKIM. Configure `RESEND_FROM_EMAIL` con una dirección de ese dominio, además de `RESEND_API_KEY`. Sin credenciales y un dominio verificado, la recuperación de contraseña no podrá enviar correos en producción.
+
 ---
 
 ## 3. Pasos de Compilación y Lanzamiento

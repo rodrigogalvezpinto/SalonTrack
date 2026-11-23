@@ -36,7 +36,8 @@ import {
   updateProfileTemplate,
 } from './crmRepository.js';
 import { getAvailableSlots, isSlotAvailable } from './availability.js';
-import { localGeolocationProvider, localWhatsAppProvider, localEmailProvider, localPaymentProvider } from './adapters/index.js';
+import { emailProvider } from './adapters/email.js';
+import { localGeolocationProvider, localWhatsAppProvider, localPaymentProvider } from './adapters/index.js';
 import {
   createPreference,
   getMercadoPagoPayment,
@@ -428,6 +429,21 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
   });
 });
 
+const PASSWORD_RESET_COOLDOWN_MS = 60 * 1000;
+const PASSWORD_RESET_MAX_REQUESTS_PER_HOUR = 5;
+const PASSWORD_RESET_WINDOW_MS = 60 * 60 * 1000;
+
+function escapeHtml(value: string): string {
+  const entities: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  };
+  return value.replace(/[&<>"']/g, character => entities[character]);
+}
+
 router.post('/auth/forgot-password', (req, res) => {
   const { email } = req.body;
   const sqlite = getSqliteDb();
@@ -436,20 +452,39 @@ router.post('/auth/forgot-password', (req, res) => {
     : undefined;
 
   if (user) {
-    const token = randomBytes(32).toString('hex');
     const now = new Date();
-    const createdAt = now.toISOString();
-    const expiresAt = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
-    const tokenHash = createHash('sha256').update(token).digest('hex');
-    sqlite.prepare(`
-      INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(generateId('prt'), user.id, tokenHash, expiresAt, createdAt);
+    const resetActivity = sqlite.prepare(`
+      SELECT
+        MAX(created_at) AS latest_created_at,
+        COUNT(CASE WHEN created_at >= ? THEN 1 END) AS recent_count
+      FROM password_reset_tokens
+      WHERE user_id = ?
+    `).get(
+      new Date(now.getTime() - PASSWORD_RESET_WINDOW_MS).toISOString(),
+      user.id,
+    ) as { latest_created_at: string | null; recent_count: number };
+    const lastRequestTooRecent = resetActivity.latest_created_at !== null &&
+      now.getTime() - Date.parse(resetActivity.latest_created_at) < PASSWORD_RESET_COOLDOWN_MS;
 
-    const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
-    const resetLink = `${appUrl}/?reset_token=${token}`;
-    void localEmailProvider.send(email.trim(), 'Recuperación de contraseña', `Abre este enlace para crear una nueva contraseña: ${resetLink}`);
-    console.log(`[Password reset link] ${appUrl}/?reset_token=[REDACTED]`);
+    if (lastRequestTooRecent || resetActivity.recent_count >= PASSWORD_RESET_MAX_REQUESTS_PER_HOUR) {
+      console.warn('[Password reset] Solicitud limitada por frecuencia.');
+    } else {
+      const token = randomBytes(32).toString('hex');
+      const createdAt = now.toISOString();
+      const expiresAt = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+      sqlite.prepare(`
+        INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(generateId('prt'), user.id, tokenHash, expiresAt, createdAt);
+
+      const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
+      const resetLink = `${appUrl}/?reset_token=${token}`;
+      const html = `<p>Recibimos una solicitud para restablecer tu contraseña de SalonTrack.</p><p><a href="${escapeHtml(resetLink)}">Restablecer contraseña</a></p><p>Este enlace vence en 30 minutos.</p>`;
+      const text = `Para restablecer tu contraseña de SalonTrack, abre este enlace: ${resetLink}\n\nEl enlace vence en 30 minutos.`;
+      void emailProvider.send(email.trim(), 'Recuperación de contraseña', html, text)
+        .catch(err => console.error('[Password reset] No se pudo enviar el correo:', err instanceof Error ? err.message : err));
+    }
   }
 
   return res.json({ message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.' });

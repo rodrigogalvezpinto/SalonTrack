@@ -15,7 +15,8 @@ import { generateId } from '../server/db.js';
 import { listClients, listContactLogs, listServices } from '../server/crmRepository.js';
 import { checkMigrations, closeSqliteDb, getDatabasePath, getSqliteDb, MIGRATIONS, migrationChecksum, runMigrations, withTransaction } from '../server/sqlite.js';
 import { getAvailableSlots, isSlotAvailable } from '../server/availability.js';
-import { localEmailProvider, localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
+import { emailConfigured, emailProvider } from '../server/adapters/email.js';
+import { localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
 import { verifyWebhookSignature } from '../server/adapters/mercadoPago.js';
 import apiRouter from '../server/routes.js';
 
@@ -462,18 +463,27 @@ async function runIntegrationTests() {
   };
   const requestReset = async (email: string) => {
     let emailContent = '';
-    const originalSend = localEmailProvider.send;
-    localEmailProvider.send = async (to, subject, html) => {
+    let emailText = '';
+    const originalSend = emailProvider.send;
+    emailProvider.send = async (to, subject, html, text) => {
       emailContent = html;
+      emailText = text || '';
       return { success: true, to, subject, simulated: true, sentAt: new Date().toISOString() };
     };
     try {
       const response = await sendJson('/api/auth/forgot-password', { email });
       const body = await response.json() as Record<string, unknown>;
-      return { response, body, emailContent };
+      return { response, body, emailContent, emailText };
     } finally {
-      localEmailProvider.send = originalSend;
+      emailProvider.send = originalSend;
     }
+  };
+  const backdatePasswordResetTokens = (email: string, ageMs: number) => {
+    const user = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?')
+      .get(email.trim().toLowerCase()) as { id: string } | undefined;
+    assert.ok(user, `Debe existir la cuenta ${email} para ajustar sus tokens de prueba.`);
+    sqlite.prepare('UPDATE password_reset_tokens SET created_at = ? WHERE user_id = ?')
+      .run(new Date(Date.now() - ageMs).toISOString(), user.id);
   };
   let olderResetToken = '';
 
@@ -2917,18 +2927,212 @@ async function runIntegrationTests() {
       assert.strictEqual(loginResponse.status, 200);
     });
 
+    await integrationTest('Resend: envía correo, informa errores y recupera contraseñas sin exponer el token', async () => {
+      type ResendRequest = {
+        method?: string;
+        path: string;
+        authorization?: string;
+        contentType?: string;
+        body: any;
+      };
+      const requests: ResendRequest[] = [];
+      const requestWaiters: Array<(request: ResendRequest) => void> = [];
+      let responseStatus = 200;
+      const fakeResendServer = createServer((request, response) => {
+        let requestBody = '';
+        request.on('data', chunk => {
+          requestBody += chunk.toString();
+        });
+        request.on('end', () => {
+          const captured: ResendRequest = {
+            method: request.method,
+            path: request.url || '/',
+            authorization: request.headers.authorization,
+            contentType: request.headers['content-type'],
+            body: JSON.parse(requestBody),
+          };
+          requests.push(captured);
+          requestWaiters.shift()?.(captured);
+          response.writeHead(responseStatus, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify(
+            responseStatus >= 200 && responseStatus < 300
+              ? { id: `resend-${requests.length}` }
+              : { message: 'Fake Resend error' }
+          ));
+        });
+      });
+      fakeResendServer.listen(0, '127.0.0.1');
+      await new Promise<void>(resolve => fakeResendServer.once('listening', () => resolve()));
+      const fakeAddress = fakeResendServer.address();
+      assert.ok(fakeAddress && typeof fakeAddress !== 'string');
+
+      const outboxDir = mkdtempSync(join(tmpdir(), 'salontrack-resend-'));
+      const outboxFile = join(outboxDir, 'outbox.jsonl');
+      const originalEnvironment = {
+        resendApiKey: process.env.RESEND_API_KEY,
+        resendFromEmail: process.env.RESEND_FROM_EMAIL,
+        resendApiBase: process.env.RESEND_API_BASE,
+        devMailDir: process.env.DEV_MAIL_DIR,
+        nodeEnv: process.env.NODE_ENV,
+        appUrl: process.env.APP_URL,
+      };
+      const restoreEnvironmentValue = (name: string, value: string | undefined) => {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      };
+      const apiKey = 'resend-test-secret';
+      const from = 'SalonTrack <notificaciones@salontrack.cl>';
+      const appUrl = 'https://salontrack.test/<app>"&x';
+      const waitForNextRequest = () => new Promise<ResendRequest>(resolve => requestWaiters.push(resolve));
+      const previousConsoleError = console.error;
+      const loggedErrors: string[] = [];
+      let resolveFailureLog: (() => void) | undefined;
+      const failureLog = new Promise<void>(resolve => {
+        resolveFailureLog = resolve;
+      });
+
+      try {
+        process.env.RESEND_API_KEY = apiKey;
+        process.env.RESEND_FROM_EMAIL = from;
+        process.env.RESEND_API_BASE = `http://127.0.0.1:${fakeAddress.port}`;
+        process.env.DEV_MAIL_DIR = outboxDir;
+        process.env.NODE_ENV = 'test';
+        assert.strictEqual(emailConfigured(), true);
+
+        const result = await emailProvider.send(
+          'qa@salontrack.cl',
+          'Prueba Resend',
+          '<p>Contenido HTML</p>',
+          'Contenido de texto',
+        );
+        assert.deepStrictEqual({
+          success: result.success,
+          to: result.to,
+          subject: result.subject,
+          simulated: result.simulated,
+          id: result.id,
+        }, {
+          success: true,
+          to: 'qa@salontrack.cl',
+          subject: 'Prueba Resend',
+          simulated: false,
+          id: 'resend-1',
+        });
+        assert.ok(!Number.isNaN(Date.parse(result.sentAt)));
+        assert.deepStrictEqual(requests[0], {
+          method: 'POST',
+          path: '/emails',
+          authorization: `Bearer ${apiKey}`,
+          contentType: 'application/json',
+          body: {
+            from,
+            to: ['qa@salontrack.cl'],
+            subject: 'Prueba Resend',
+            html: '<p>Contenido HTML</p>',
+            text: 'Contenido de texto',
+          },
+        });
+        assert.strictEqual(existsSync(outboxFile), false);
+
+        for (const status of [422, 503]) {
+          responseStatus = status;
+          await assert.rejects(
+            emailProvider.send('qa@salontrack.cl', 'Error de prueba', '<p>Prueba</p>'),
+            (error: unknown) => {
+              assert.ok(error instanceof Error);
+              assert.ok(error.message.includes(String(status)));
+              assert.ok(!error.message.includes(apiKey));
+              return true;
+            },
+          );
+        }
+
+        process.env.NODE_ENV = 'production';
+        process.env.RESEND_API_KEY = '   ';
+        delete process.env.RESEND_FROM_EMAIL;
+        assert.strictEqual(emailConfigured(), false);
+        await assert.rejects(
+          emailProvider.send('qa@salontrack.cl', 'Sin configurar', '<p>Prueba</p>'),
+          /El correo transaccional no está configurado \(RESEND_API_KEY \/ RESEND_FROM_EMAIL\)\./,
+        );
+
+        process.env.NODE_ENV = 'test';
+        process.env.RESEND_API_KEY = apiKey;
+        process.env.RESEND_FROM_EMAIL = from;
+        process.env.APP_URL = appUrl;
+        responseStatus = 200;
+        backdatePasswordResetTokens('contacto@valeriaestudio.cl', 2 * 60 * 60 * 1000);
+        const successfulDelivery = waitForNextRequest();
+        const genericMessage = {
+          message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.',
+        };
+        const successfulRecovery = await sendJson('/api/auth/forgot-password', {
+          email: 'contacto@valeriaestudio.cl',
+        });
+        assert.strictEqual(successfulRecovery.status, 200);
+        assert.deepStrictEqual(await successfulRecovery.json(), genericMessage);
+        const successfulEmail = await successfulDelivery;
+        assert.ok(successfulEmail.body.html.includes('reset_token='));
+        assert.ok(successfulEmail.body.text.includes('reset_token='));
+        assert.ok(successfulEmail.body.html.includes('&lt;app&gt;&quot;&amp;x'));
+        assert.ok(successfulEmail.body.html.includes('vence en 30 minutos'));
+        assert.ok(successfulEmail.body.text.includes('vence en 30 minutos'));
+
+        backdatePasswordResetTokens('contacto@valeriaestudio.cl', 61_000);
+        responseStatus = 500;
+        console.error = (...args: unknown[]) => {
+          loggedErrors.push(args.join(' '));
+          resolveFailureLog?.();
+        };
+        const failedDelivery = waitForNextRequest();
+        const failedRecovery = await sendJson('/api/auth/forgot-password', {
+          email: 'contacto@valeriaestudio.cl',
+        });
+        assert.strictEqual(failedRecovery.status, 200);
+        assert.deepStrictEqual(await failedRecovery.json(), genericMessage);
+        const failedEmail = await failedDelivery;
+        assert.ok(failedEmail.body.html.includes('reset_token='));
+        await failureLog;
+        assert.ok(loggedErrors.some(message => message.includes('[Password reset] No se pudo enviar el correo:')));
+        assert.ok(!loggedErrors.join(' ').includes('reset_token='));
+        assert.ok(!loggedErrors.join(' ').includes(appUrl));
+      } finally {
+        console.error = previousConsoleError;
+        restoreEnvironmentValue('RESEND_API_KEY', originalEnvironment.resendApiKey);
+        restoreEnvironmentValue('RESEND_FROM_EMAIL', originalEnvironment.resendFromEmail);
+        restoreEnvironmentValue('RESEND_API_BASE', originalEnvironment.resendApiBase);
+        restoreEnvironmentValue('DEV_MAIL_DIR', originalEnvironment.devMailDir);
+        restoreEnvironmentValue('NODE_ENV', originalEnvironment.nodeEnv);
+        restoreEnvironmentValue('APP_URL', originalEnvironment.appUrl);
+        backdatePasswordResetTokens('contacto@valeriaestudio.cl', 2 * 60 * 60 * 1000);
+        await new Promise<void>((resolve, reject) => {
+          fakeResendServer.close(error => error ? reject(error) : resolve());
+        });
+        rmSync(outboxDir, { recursive: true, force: true });
+      }
+    });
+
     await integrationTest('Correo local: guarda el enlace en el buzón de desarrollo, no en consola', async () => {
       const outboxDir = mkdtempSync(join(tmpdir(), 'salontrack-dev-mail-'));
       const previousDir = process.env.DEV_MAIL_DIR;
+      const previousApiKey = process.env.RESEND_API_KEY;
+      const previousFromEmail = process.env.RESEND_FROM_EMAIL;
+      const previousNodeEnv = process.env.NODE_ENV;
       const previousLog = console.log;
       const logged: string[] = [];
       process.env.DEV_MAIL_DIR = outboxDir;
+      delete process.env.RESEND_API_KEY;
+      delete process.env.RESEND_FROM_EMAIL;
+      process.env.NODE_ENV = 'test';
       console.log = (...args: unknown[]) => { logged.push(args.join(' ')); };
       try {
-        await localEmailProvider.send('qa@salontrack.cl', 'Recuperación', 'Enlace: http://localhost:3000/?reset_token=abc123');
+        await emailProvider.send('qa@salontrack.cl', 'Recuperación', 'Enlace: http://localhost:3000/?reset_token=abc123');
       } finally {
         console.log = previousLog;
         if (previousDir === undefined) delete process.env.DEV_MAIL_DIR; else process.env.DEV_MAIL_DIR = previousDir;
+        if (previousApiKey === undefined) delete process.env.RESEND_API_KEY; else process.env.RESEND_API_KEY = previousApiKey;
+        if (previousFromEmail === undefined) delete process.env.RESEND_FROM_EMAIL; else process.env.RESEND_FROM_EMAIL = previousFromEmail;
+        if (previousNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousNodeEnv;
       }
       const lines = readFileSync(join(outboxDir, 'outbox.jsonl'), 'utf8').trim().split('\n');
       const mail = JSON.parse(lines[lines.length - 1]);
@@ -2936,6 +3140,58 @@ async function runIntegrationTests() {
       assert.ok(mail.body.includes('reset_token=abc123'));
       assert.ok(logged.every(line => !line.includes('reset_token')));
       rmSync(outboxDir, { recursive: true, force: true });
+    });
+
+    await integrationTest('Recuperación: limita solicitudes repetidas por cuenta', async () => {
+      const primaryEmail = 'contacto@valeriaestudio.cl';
+      const otherEmail = 'camila@valeriaestudio.cl';
+      const primaryUser = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?')
+        .get(primaryEmail) as { id: string } | undefined;
+      const otherUser = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?')
+        .get(otherEmail) as { id: string } | undefined;
+      assert.ok(primaryUser);
+      assert.ok(otherUser);
+      sqlite.prepare('DELETE FROM password_reset_tokens WHERE user_id IN (?, ?)')
+        .run(primaryUser.id, otherUser.id);
+
+      const previousWarn = console.warn;
+      const warnings: string[] = [];
+      console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+      try {
+        const first = await requestReset(primaryEmail);
+        const second = await requestReset(primaryEmail);
+        const genericMessage = {
+          message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.',
+        };
+        assert.strictEqual(first.response.status, 200);
+        assert.strictEqual(second.response.status, 200);
+        assert.deepStrictEqual(first.body, genericMessage);
+        assert.deepStrictEqual(second.body, genericMessage);
+        assert.match(first.emailContent, /reset_token=/);
+        assert.strictEqual(second.emailContent, '');
+        assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ?')
+          .get(primaryUser.id) as { count: number }).count, 1);
+        assert.deepStrictEqual(warnings, ['[Password reset] Solicitud limitada por frecuencia.']);
+
+        backdatePasswordResetTokens(primaryEmail, 61_000);
+        const third = await requestReset(primaryEmail);
+        assert.strictEqual(third.response.status, 200);
+        assert.deepStrictEqual(third.body, genericMessage);
+        assert.match(third.emailContent, /reset_token=/);
+        assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ?')
+          .get(primaryUser.id) as { count: number }).count, 2);
+
+        const other = await requestReset(otherEmail);
+        assert.strictEqual(other.response.status, 200);
+        assert.deepStrictEqual(other.body, genericMessage);
+        assert.match(other.emailContent, /reset_token=/);
+        assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ?')
+          .get(otherUser.id) as { count: number }).count, 1);
+      } finally {
+        console.warn = previousWarn;
+        sqlite.prepare('DELETE FROM password_reset_tokens WHERE user_id IN (?, ?)')
+          .run(primaryUser.id, otherUser.id);
+      }
     });
 
     await integrationTest('Recuperación: mismo cuerpo para correo registrado y no registrado', async () => {
@@ -2962,6 +3218,7 @@ async function runIntegrationTests() {
     });
 
     await integrationTest('Reset de contraseña: token válido funciona una vez e invalida los anteriores', async () => {
+      backdatePasswordResetTokens('contacto@valeriaestudio.cl', 2 * 60 * 60 * 1000);
       const request = await requestReset('contacto@valeriaestudio.cl');
       const match = request.emailContent.match(/reset_token=([a-f0-9]{64})/);
       assert.ok(match);
