@@ -512,8 +512,22 @@ router.get('/profile', requireAuth, (req: AuthRequest, res: Response) => {
 });
 
 router.put('/profile', requireAuth, (req: AuthRequest, res: Response) => {
+  const userId = req.userId || '';
   const { full_name, phone, default_interval_days, whatsapp_template, re_engagement_template, re_engagement_days_threshold } = req.body;
-  const updated = updateProfileDetails(req.userId || '', {
+  const currentProfile = getProfile(userId);
+  const reEngagementSettingsChanged = (
+    re_engagement_template !== undefined
+    && (re_engagement_template ?? '') !== (currentProfile?.re_engagement_template ?? '')
+  ) || (
+    re_engagement_days_threshold !== undefined
+    && Number(re_engagement_days_threshold || 90) !== Number(currentProfile?.re_engagement_days_threshold || 90)
+  );
+  if (reEngagementSettingsChanged && !isSubscriptionActive(userId)) {
+    subscriptionExpiredResponse(res);
+    return;
+  }
+
+  const updated = updateProfileDetails(userId, {
     full_name,
     phone,
     default_interval_days,

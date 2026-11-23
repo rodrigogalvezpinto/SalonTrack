@@ -874,14 +874,53 @@ async function runIntegrationTests() {
           contactLogsBefore
         );
 
-        const profileBefore = sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId);
+        const profileBefore = sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId) as any;
+        const blockedProfileTemplate = await requestJson('/api/profile', 'PUT', registered.token, {
+          re_engagement_template: `${profileBefore.re_engagement_template || ''} cambio no autorizado`,
+        });
+        assert.strictEqual(blockedProfileTemplate.status, 402);
+        assert.deepStrictEqual(await blockedProfileTemplate.json(), expiredError);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId), profileBefore);
+
+        const blockedProfileThreshold = await requestJson('/api/profile', 'PUT', registered.token, {
+          re_engagement_days_threshold: Number(profileBefore.re_engagement_days_threshold || 90) + 1,
+        });
+        assert.strictEqual(blockedProfileThreshold.status, 402);
+        assert.deepStrictEqual(await blockedProfileThreshold.json(), expiredError);
+        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId), profileBefore);
+
+        const allowedProfileUpdate = await requestJson('/api/profile', 'PUT', registered.token, {
+          full_name: 'Nombre actualizado con licencia vencida',
+          phone: profileBefore.phone,
+          default_interval_days: profileBefore.default_interval_days,
+          whatsapp_template: profileBefore.whatsapp_template,
+          re_engagement_template: profileBefore.re_engagement_template || '',
+          re_engagement_days_threshold: profileBefore.re_engagement_days_threshold || 90,
+        });
+        assert.strictEqual(allowedProfileUpdate.status, 200);
+        const profileAfterNameUpdate = sqlite.prepare(
+          'SELECT * FROM user_profiles WHERE user_id = ?'
+        ).get(userId) as any;
+        assert.strictEqual(profileAfterNameUpdate.full_name, 'Nombre actualizado con licencia vencida');
+        assert.strictEqual(
+          profileAfterNameUpdate.re_engagement_template || '',
+          profileBefore.re_engagement_template || ''
+        );
+        assert.strictEqual(
+          profileAfterNameUpdate.re_engagement_days_threshold || 90,
+          profileBefore.re_engagement_days_threshold || 90
+        );
+
         const blockedTemplate = await requestJson('/api/re-engagement/template', 'PUT', registered.token, {
           template: 'No debe guardarse',
           threshold_days: 120,
         });
         assert.strictEqual(blockedTemplate.status, 402);
         assert.deepStrictEqual(await blockedTemplate.json(), expiredError);
-        assert.deepStrictEqual(sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId), profileBefore);
+        assert.deepStrictEqual(
+          sqlite.prepare('SELECT * FROM user_profiles WHERE user_id = ?').get(userId),
+          profileAfterNameUpdate
+        );
 
         const activation = await sendJson('/api/subscriptions/activate-license', {
           plan_id: 'pro_quarterly',
