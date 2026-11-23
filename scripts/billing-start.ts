@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { pathToFileURL } from 'node:url';
 import { BILLING_GRACE_DAYS } from '../server/billing.js';
 import { closeSqliteDb, withTransaction } from '../server/sqlite.js';
