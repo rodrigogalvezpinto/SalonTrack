@@ -126,20 +126,21 @@ export function getAvailableSlots(params: {
 
     // Existing active bookings for this staff on this date
     const existingBookings = db.prepare(`
-      SELECT id, start_time, end_time
-      FROM bookings
-      WHERE staff_id = ? AND booking_date = ?
-      AND status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
-      ${excludeBookingId ? 'AND id != ?' : ''}
+      SELECT b.id, b.start_time, b.end_time, sv.clean_minutes
+      FROM bookings b
+      LEFT JOIN services sv ON sv.id = b.service_id
+      WHERE b.staff_id = ? AND b.booking_date = ?
+      AND b.status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+      ${excludeBookingId ? 'AND b.id != ?' : ''}
     `).all(
       st.id,
       dateStr,
       ...(excludeBookingId ? [excludeBookingId] : [])
-    ) as Array<{ id: string; start_time: string; end_time: string }>;
+    ) as Array<{ id: string; start_time: string; end_time: string; clean_minutes: number | null }>;
 
     const bookedIntervals = existingBookings.map(b => ({
       start: parseTimeToMinutes(b.start_time),
-      end: parseTimeToMinutes(b.end_time) + bufferMinutes,
+      end: parseTimeToMinutes(b.end_time) + (b.clean_minutes ?? 5) + bufferMinutes,
     }));
 
     // Availability blocks (vacations, absences, locks)
@@ -236,26 +237,33 @@ export function isSlotAvailable(params: {
   excludeBookingId?: string;
 }): boolean {
   const db = getSqliteDb();
-  const { staffId, dateStr, startTime, durationMinutes, excludeBookingId } = params;
+  const { businessId, staffId, serviceId, dateStr, startTime, durationMinutes, excludeBookingId } = params;
 
   const startMin = parseTimeToMinutes(startTime);
-  const endMin = startMin + durationMinutes;
+  const business = db.prepare('SELECT buffer_minutes FROM businesses WHERE id = ?')
+    .get(businessId) as { buffer_minutes: number | null } | undefined;
+  const bufferMinutes = business?.buffer_minutes ?? 5;
+  const service = db.prepare('SELECT clean_minutes FROM services WHERE id = ? AND business_id = ?')
+    .get(serviceId, businessId) as { clean_minutes: number | null } | undefined;
+  const serviceCleanMinutes = service?.clean_minutes ?? 5;
+  const endMin = startMin + durationMinutes + serviceCleanMinutes + bufferMinutes;
 
   const collisions = db.prepare(`
-    SELECT id, start_time, end_time
-    FROM bookings
-    WHERE staff_id = ? AND booking_date = ?
-    AND status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
-    ${excludeBookingId ? 'AND id != ?' : ''}
+    SELECT b.id, b.start_time, b.end_time, sv.clean_minutes
+    FROM bookings b
+    LEFT JOIN services sv ON sv.id = b.service_id
+    WHERE b.staff_id = ? AND b.booking_date = ?
+    AND b.status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+    ${excludeBookingId ? 'AND b.id != ?' : ''}
   `).all(
     staffId,
     dateStr,
     ...(excludeBookingId ? [excludeBookingId] : [])
-  ) as Array<{ id: string; start_time: string; end_time: string }>;
+  ) as Array<{ id: string; start_time: string; end_time: string; clean_minutes: number | null }>;
 
   for (const c of collisions) {
     const cStart = parseTimeToMinutes(c.start_time);
-    const cEnd = parseTimeToMinutes(c.end_time);
+    const cEnd = parseTimeToMinutes(c.end_time) + (c.clean_minutes ?? 5) + bufferMinutes;
     if (!(endMin <= cStart || startMin >= cEnd)) {
       return false; // Collision detected!
     }

@@ -2986,6 +2986,116 @@ async function runIntegrationTests() {
       }
     });
 
+    await integrationTest('La limpieza del servicio anterior bloquea los siguientes 15 minutos', async () => {
+      const ownerResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const owner = await ownerResponse.json() as { token: string };
+      assert.strictEqual(ownerResponse.status, 200);
+
+      const businessId = 'biz_valeria_studio';
+      const businessBefore = (sqlite.prepare('SELECT buffer_minutes FROM businesses WHERE id = ?')
+        .get(businessId) as { buffer_minutes: number }).buffer_minutes;
+      const candidateName = `Servicio sin limpieza ${generateId('cleanup')}`;
+      const existingName = `Servicio con limpieza ${generateId('cleanup')}`;
+      let candidateServiceId: string | null = null;
+      let existingServiceId: string | null = null;
+      let bookingId: string | null = null;
+      const toMinutes = (time: string) => {
+        const [hour, minute] = time.split(':').map(Number);
+        return hour * 60 + minute;
+      };
+
+      try {
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = 5 WHERE id = ?').run(businessId);
+        const candidateServiceResponse = await sendJson('/api/business/services', {
+          name: candidateName,
+          price_clp: 15000,
+          duration_min: 60,
+          buffer_min: 0,
+        }, owner.token);
+        assert.strictEqual(candidateServiceResponse.status, 201);
+        candidateServiceId = (await candidateServiceResponse.json() as { service_id: string }).service_id;
+
+        const existingServiceResponse = await sendJson('/api/business/services', {
+          name: existingName,
+          price_clp: 15000,
+          duration_min: 60,
+          buffer_min: 15,
+        }, owner.token);
+        assert.strictEqual(existingServiceResponse.status, 201);
+        existingServiceId = (await existingServiceResponse.json() as { service_id: string }).service_id;
+        assert.strictEqual((sqlite.prepare('SELECT clean_minutes FROM services WHERE id = ?')
+          .get(existingServiceId) as { clean_minutes: number }).clean_minutes, 15);
+
+        const businessBufferResponse = await requestJson('/api/business/my', 'PUT', owner.token, {
+          buffer_minutes: 0,
+        });
+        assert.strictEqual(businessBufferResponse.status, 200);
+
+        const available = await findAvailableSlots(businessId, candidateServiceId, 'stf_valeria');
+        const candidate = available.slots.find(slot => toMinutes(slot.endTime) <= 16 * 60);
+        assert.ok(candidate, 'Debe existir un horario temprano para probar la limpieza posterior.');
+
+        const now = new Date().toISOString();
+        bookingId = generateId('cleanup_boundary');
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, 'stf_valeria', ?, NULL, ?, ?, ?, 60, 15000, 'salon', 'CONFIRMED',
+            'presential', 'pending', 'Reserva anterior', '+56912345078', ?, ?)
+        `).run(
+          bookingId,
+          `CLEANUP-BOUNDARY-${bookingId}`,
+          businessId,
+          existingServiceId,
+          available.date,
+          candidate.time,
+          candidate.endTime,
+          now,
+          now
+        );
+
+        const params = new URLSearchParams({
+          business_id: businessId,
+          service_id: candidateServiceId,
+          date: available.date,
+          staff_id: 'stf_valeria',
+        });
+        const slotsResponse = await requestJson(`/api/availability/slots?${params}`, 'GET');
+        assert.strictEqual(slotsResponse.status, 200);
+        const slots = (await slotsResponse.json() as {
+          slots: Array<{ time: string }>;
+        }).slots;
+        assert.ok(!slots.some(slot => slot.time === candidate.endTime));
+
+        const firstSlotAfterBooking = slots.find(slot => toMinutes(slot.time) >= toMinutes(candidate.endTime));
+        assert.ok(firstSlotAfterBooking);
+        assert.ok(toMinutes(firstSlotAfterBooking.time) >= toMinutes(candidate.endTime) + 15);
+        assert.strictEqual(isSlotAvailable({
+          businessId,
+          staffId: 'stf_valeria',
+          serviceId: candidateServiceId,
+          dateStr: available.date,
+          startTime: candidate.endTime,
+          durationMinutes: 60,
+        }), false);
+      } finally {
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = ? WHERE id = ?')
+          .run(businessBefore, businessId);
+        if (bookingId) sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        for (const serviceId of [candidateServiceId, existingServiceId]) {
+          if (serviceId) {
+            sqlite.prepare('DELETE FROM staff_services WHERE service_id = ?').run(serviceId);
+            sqlite.prepare('DELETE FROM services WHERE id = ?').run(serviceId);
+          }
+        }
+      }
+    });
+
     await integrationTest('Autorización integral: aislamiento entre negocios, roles y CRM', async () => {
       const login = async (email: string, password: string) => {
         const response = await sendJson('/api/auth/login', { email, password });
