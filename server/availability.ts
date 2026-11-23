@@ -75,9 +75,9 @@ export function getAvailableSlots(params: {
   if (!service) return [];
 
   const serviceDuration = service.duration_minutes || 45;
-  const prepMinutes = service.prep_minutes || 0;
-  const cleanMinutes = service.clean_minutes || 5;
-  const bufferMinutes = business.buffer_minutes || 5;
+  const prepMinutes = service.prep_minutes ?? 0;
+  const cleanMinutes = service.clean_minutes ?? 5;
+  const bufferMinutes = business.buffer_minutes ?? 5;
   const totalOccupiedMinutes = serviceDuration + cleanMinutes + bufferMinutes;
 
   // 5. Candidate staff members

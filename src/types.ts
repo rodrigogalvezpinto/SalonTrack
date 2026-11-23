@@ -277,10 +277,10 @@ export interface CatalogService {
   price_type: 'fixed' | 'from' | 'variable' | 'evaluation';
   duration_minutes: number;
   duration_min?: number;
-  buffer_min?: number;
+  buffer_min?: number | null;
   is_active?: boolean | number;
-  prep_minutes?: number;
-  clean_minutes?: number;
+  prep_minutes?: number | null;
+  clean_minutes?: number | null;
   modality?: 'salon' | 'home' | 'remote' | 'both';
   is_featured?: number;
   status?: 'DRAFT' | 'PUBLISHED' | 'INACTIVE';

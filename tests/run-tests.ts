@@ -16,7 +16,7 @@ import { expireStalePendingBookings } from '../server/bookingExpiration.js';
 import { generateId } from '../server/db.js';
 import { listClients, listContactLogs, listServices } from '../server/crmRepository.js';
 import { checkMigrations, closeSqliteDb, getDatabasePath, getSqliteDb, MIGRATIONS, migrationChecksum, runMigrations, withTransaction } from '../server/sqlite.js';
-import { getAvailableSlots, isSlotAvailable } from '../server/availability.js';
+import { formatMinutesToTime, getAvailableSlots, isSlotAvailable } from '../server/availability.js';
 import { emailConfigured, emailProvider } from '../server/adapters/email.js';
 import { localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
 import { verifyWebhookSignature } from '../server/adapters/mercadoPago.js';
@@ -2865,6 +2865,120 @@ async function runIntegrationTests() {
         assert.strictEqual((sqlite.prepare('SELECT clean_minutes FROM services WHERE id = ?')
           .get(serviceId) as { clean_minutes: number }).clean_minutes, 0);
       } finally {
+        if (serviceId) {
+          sqlite.prepare('DELETE FROM staff_services WHERE service_id = ?').run(serviceId);
+          sqlite.prepare('DELETE FROM services WHERE id = ?').run(serviceId);
+        }
+      }
+    });
+
+    await integrationTest('La disponibilidad permite reservas contiguas con buffers en cero', async () => {
+      const ownerResponse = await sendJson('/api/auth/login', {
+        email: 'contacto@valeriaestudio.cl',
+        password: 'Salon1234',
+      });
+      const owner = await ownerResponse.json() as { token: string };
+      assert.strictEqual(ownerResponse.status, 200);
+
+      const businessId = 'biz_valeria_studio';
+      const businessBefore = (sqlite.prepare('SELECT buffer_minutes FROM businesses WHERE id = ?')
+        .get(businessId) as { buffer_minutes: number }).buffer_minutes;
+      const serviceName = `Servicio buffer contiguo ${generateId('buffer')}`;
+      let serviceId: string | null = null;
+      let bookingId: string | null = null;
+
+      try {
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = 5 WHERE id = ?').run(businessId);
+        const serviceResponse = await sendJson('/api/business/services', {
+          name: serviceName,
+          price_clp: 15000,
+          duration_min: 60,
+          buffer_min: 0,
+        }, owner.token);
+        assert.strictEqual(serviceResponse.status, 201);
+        serviceId = (await serviceResponse.json() as { service_id: string }).service_id;
+        assert.strictEqual((sqlite.prepare('SELECT clean_minutes FROM services WHERE id = ?')
+          .get(serviceId) as { clean_minutes: number }).clean_minutes, 0);
+
+        const zeroBusinessBuffer = await requestJson('/api/business/my', 'PUT', owner.token, {
+          buffer_minutes: 0,
+        });
+        assert.strictEqual(zeroBusinessBuffer.status, 200);
+        assert.strictEqual((sqlite.prepare('SELECT buffer_minutes FROM businesses WHERE id = ?')
+          .get(businessId) as { buffer_minutes: number }).buffer_minutes, 0);
+        const invalidBusinessBuffer = await requestJson('/api/business/my', 'PUT', owner.token, {
+          buffer_minutes: -1,
+        });
+        assert.strictEqual(invalidBusinessBuffer.status, 400);
+        assert.strictEqual((sqlite.prepare('SELECT buffer_minutes FROM businesses WHERE id = ?')
+          .get(businessId) as { buffer_minutes: number }).buffer_minutes, 0);
+
+        const available = await findAvailableSlots(businessId, serviceId, 'stf_valeria');
+        const candidate = available.slots.find(slot => !sqlite.prepare(`
+          SELECT 1 FROM bookings
+          WHERE staff_id = ? AND booking_date = ? AND start_time = ?
+            AND status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+          LIMIT 1
+        `).get('stf_valeria', available.date, slot.endTime));
+        assert.ok(candidate, 'Debe existir un horario seguido por un inicio de reserva libre.');
+
+        const [endHour, endMinute] = candidate.endTime.split(':').map(Number);
+        const nextBookingEnd = formatMinutesToTime(endHour * 60 + endMinute + 60);
+        const now = new Date().toISOString();
+        bookingId = generateId('zero_buffer_boundary');
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, 'stf_valeria', ?, NULL, ?, ?, ?, 60, 15000, 'salon', 'CONFIRMED',
+            'presential', 'pending', 'Reserva contigua', '+56912345077', ?, ?)
+        `).run(
+          bookingId,
+          `BUFFER-BOUNDARY-${bookingId}`,
+          businessId,
+          serviceId,
+          available.date,
+          candidate.endTime,
+          nextBookingEnd,
+          now,
+          now
+        );
+
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = 5 WHERE id = ?').run(businessId);
+        sqlite.prepare('UPDATE services SET clean_minutes = 5 WHERE id = ?').run(serviceId);
+        const querySlots = async () => {
+          const params = new URLSearchParams({
+            business_id: businessId,
+            service_id: serviceId!,
+            date: available.date,
+            staff_id: 'stf_valeria',
+          });
+          const response = await requestJson(`/api/availability/slots?${params}`, 'GET');
+          assert.strictEqual(response.status, 200);
+          return (await response.json() as {
+            slots: Array<{ time: string; endTime: string }>;
+          }).slots;
+        };
+        const slotsWithDefaults = await querySlots();
+        assert.ok(!slotsWithDefaults.some(slot => slot.time === candidate.time));
+
+        const resetServiceBuffer = await requestJson(`/api/business/services/${serviceId}`, 'PUT', owner.token, {
+          buffer_min: 0,
+        });
+        assert.strictEqual(resetServiceBuffer.status, 200);
+        const resetBusinessBuffer = await requestJson('/api/business/my', 'PUT', owner.token, {
+          buffer_minutes: 0,
+        });
+        assert.strictEqual(resetBusinessBuffer.status, 200);
+        const slotsWithoutBuffers = await querySlots();
+        assert.ok(slotsWithoutBuffers.some(
+          slot => slot.time === candidate.time && slot.endTime === candidate.endTime
+        ));
+      } finally {
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = ? WHERE id = ?')
+          .run(businessBefore, businessId);
+        if (bookingId) sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
         if (serviceId) {
           sqlite.prepare('DELETE FROM staff_services WHERE service_id = ?').run(serviceId);
           sqlite.prepare('DELETE FROM services WHERE id = ?').run(serviceId);

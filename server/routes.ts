@@ -1920,6 +1920,13 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
     min_advance_hours, max_advance_days, buffer_minutes, cancellation_policy
   } = req.body;
 
+  const normalizedBufferMinutes = buffer_minutes !== undefined && buffer_minutes !== ''
+    ? Number(buffer_minutes)
+    : null;
+  if (normalizedBufferMinutes !== null && (!Number.isFinite(normalizedBufferMinutes) || normalizedBufferMinutes < 0)) {
+    return res.status(400).json({ error: 'buffer_minutes debe ser un número finito mayor o igual a 0.' });
+  }
+
   const now = new Date().toISOString();
   sqlite.prepare(`
     UPDATE businesses
@@ -1956,7 +1963,7 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
     booking_mode || (auto_confirm_bookings === undefined ? null : (auto_confirm_bookings ? 'AUTOMATIC' : 'MANUAL')),
     min_advance_hours ? Number(min_advance_hours) : null,
     max_advance_days ? Number(max_advance_days) : null,
-    buffer_minutes ? Number(buffer_minutes) : null,
+    normalizedBufferMinutes,
     cancellation_policy?.trim() || null,
     now,
     bizId
