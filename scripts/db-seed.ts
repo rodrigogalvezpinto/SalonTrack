@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { seedDemoDataIfEmpty } from '../server/seedData.js';
 
 console.log('🌱 Inicializando datos demo de SalonTrack 2.0 (Chile)...');

@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createBackup, verifyBackup } from '../server/backup.js';
 
 const backup = createBackup();
