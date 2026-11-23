@@ -13,13 +13,24 @@ export function setStoredToken(token: string | null) {
   }
 }
 
+// Each tab pins its active business in sessionStorage so switching in one tab
+// never redirects another tab's requests; localStorage seeds new tabs.
 export function getStoredActiveBusinessId(): string | null {
-  return localStorage.getItem(ACTIVE_BUSINESS_KEY);
+  const pinned = sessionStorage.getItem(ACTIVE_BUSINESS_KEY);
+  if (pinned) return pinned;
+  const fallback = localStorage.getItem(ACTIVE_BUSINESS_KEY);
+  if (fallback) sessionStorage.setItem(ACTIVE_BUSINESS_KEY, fallback);
+  return fallback;
 }
 
 export function setStoredActiveBusinessId(id: string | null) {
-  if (id) localStorage.setItem(ACTIVE_BUSINESS_KEY, id);
-  else localStorage.removeItem(ACTIVE_BUSINESS_KEY);
+  if (id) {
+    sessionStorage.setItem(ACTIVE_BUSINESS_KEY, id);
+    localStorage.setItem(ACTIVE_BUSINESS_KEY, id);
+  } else {
+    sessionStorage.removeItem(ACTIVE_BUSINESS_KEY);
+    localStorage.removeItem(ACTIVE_BUSINESS_KEY);
+  }
 }
 
 export async function apiRequest<T = any>(
