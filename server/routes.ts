@@ -36,7 +36,8 @@ import {
   updateProfileTemplate,
 } from './crmRepository.js';
 import { getAvailableSlots, isSlotAvailable } from './availability.js';
-import { localGeolocationProvider, localWhatsAppProvider, localEmailProvider, localPaymentProvider } from './adapters/index.js';
+import { emailProvider } from './adapters/email.js';
+import { localGeolocationProvider, localWhatsAppProvider, localPaymentProvider } from './adapters/index.js';
 import {
   createPreference,
   getMercadoPagoPayment,
@@ -428,6 +429,17 @@ router.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
   });
 });
 
+function escapeHtml(value: string): string {
+  const entities: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  };
+  return value.replace(/[&<>"']/g, character => entities[character]);
+}
+
 router.post('/auth/forgot-password', (req, res) => {
   const { email } = req.body;
   const sqlite = getSqliteDb();
@@ -448,8 +460,10 @@ router.post('/auth/forgot-password', (req, res) => {
 
     const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
     const resetLink = `${appUrl}/?reset_token=${token}`;
-    void localEmailProvider.send(email.trim(), 'Recuperación de contraseña', `Abre este enlace para crear una nueva contraseña: ${resetLink}`);
-    console.log(`[Password reset link] ${appUrl}/?reset_token=[REDACTED]`);
+    const html = `<p>Recibimos una solicitud para restablecer tu contraseña de SalonTrack.</p><p><a href="${escapeHtml(resetLink)}">Restablecer contraseña</a></p><p>Este enlace vence en 30 minutos.</p>`;
+    const text = `Para restablecer tu contraseña de SalonTrack, abre este enlace: ${resetLink}\n\nEl enlace vence en 30 minutos.`;
+    void emailProvider.send(email.trim(), 'Recuperación de contraseña', html, text)
+      .catch(err => console.error('[Password reset] No se pudo enviar el correo:', err instanceof Error ? err.message : err));
   }
 
   return res.json({ message: 'Si el correo está registrado, recibirás instrucciones para restablecer tu contraseña.' });

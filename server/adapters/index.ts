@@ -1,8 +1,5 @@
 // SalonTrack 2.0 - Decoupled Adapter Interfaces & Local Implementations
 
-import fs from 'fs';
-import path from 'path';
-
 export interface PaymentResult {
   paymentId: string;
   provider: 'local' | 'mercadopago';
@@ -118,36 +115,6 @@ export class LocalWhatsAppProvider {
   }
 }
 
-// 3. Local Email Provider
-export interface EmailResult {
-  success: boolean;
-  to: string;
-  subject: string;
-  simulated: boolean;
-  sentAt: string;
-}
-
-export class LocalEmailProvider {
-  async send(to: string, subject: string, html: string): Promise<EmailResult> {
-    if (process.env.NODE_ENV === 'production') {
-      console.log(`[Local Email Provider] Correo simulado a <${to}>: Asunto: "${subject}"`);
-    } else {
-      const outboxDir = process.env.DEV_MAIL_DIR || path.join(process.cwd(), 'data', 'dev-mail');
-      fs.mkdirSync(outboxDir, { recursive: true });
-      const outboxFile = path.join(outboxDir, 'outbox.jsonl');
-      fs.appendFileSync(outboxFile, JSON.stringify({ sentAt: new Date().toISOString(), to, subject, body: html }) + '\n', { mode: 0o600 });
-      console.log(`[Local Email Provider] Correo simulado a <${to}> guardado en ${path.relative(process.cwd(), outboxFile)}`);
-    }
-    return {
-      success: true,
-      to,
-      subject,
-      simulated: true,
-      sentAt: new Date().toISOString(),
-    };
-  }
-}
-
 // 4. Local Geolocation & Distance Provider (Haversine formula without external Google Maps API)
 export class LocalGeolocationProvider {
   // Returns distance in Kilometers
@@ -206,5 +173,4 @@ export class LocalGeolocationProvider {
 // Singletons
 export const localPaymentProvider = new LocalPaymentProvider();
 export const localWhatsAppProvider = new LocalWhatsAppProvider();
-export const localEmailProvider = new LocalEmailProvider();
 export const localGeolocationProvider = new LocalGeolocationProvider();

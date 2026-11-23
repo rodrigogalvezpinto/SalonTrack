@@ -4,6 +4,8 @@ import { fileURLToPath } from 'url';
 import { expireStalePendingBookings } from './server/bookingExpiration.js';
 import apiRouter from './server/routes.js';
 import { seedDemoDataIfEmpty } from './server/auth.js';
+import { emailConfigured } from './server/adapters/email.js';
+import { mercadoPagoConfigured } from './server/adapters/mercadoPago.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +19,12 @@ async function startServer() {
       process.env.JWT_SECRET === DEVELOPMENT_JWT_SECRET)
   ) {
     throw new Error('Production requires a JWT_SECRET of at least 32 characters that is not the development default.');
+  }
+  if (process.env.NODE_ENV === 'production' && !emailConfigured()) {
+    console.warn('Correo transaccional no configurado: configure RESEND_API_KEY y RESEND_FROM_EMAIL para habilitar la recuperación de contraseña.');
+  }
+  if (process.env.NODE_ENV === 'production' && !mercadoPagoConfigured()) {
+    console.warn('Mercado Pago no está configurado: configure las credenciales de acceso y firma para habilitar pagos de suscripción.');
   }
 
   const app = express();
