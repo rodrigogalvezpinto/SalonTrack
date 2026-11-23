@@ -1100,8 +1100,18 @@ async function runIntegrationTests() {
             type: 'payment',
             data: { id: pendingConfirmationId },
           });
-          assert.strictEqual(missingWebhookSecret.status, 200);
-          assert.deepStrictEqual(await missingWebhookSecret.json(), { received: true, ignored: true });
+          assert.strictEqual(missingWebhookSecret.status, 503);
+          assert.deepStrictEqual(await missingWebhookSecret.json(), {
+            error: 'El webhook de Mercado Pago no está configurado.',
+          });
+
+          delete process.env.MERCADO_PAGO_ACCESS_TOKEN;
+          const missingWebhookConfiguration = await sendJson('/api/payments/webhook', {
+            type: 'payment',
+            data: { id: pendingConfirmationId },
+          });
+          assert.strictEqual(missingWebhookConfiguration.status, 200);
+          assert.deepStrictEqual(await missingWebhookConfiguration.json(), { received: true, ignored: true });
         } finally {
           restoreEnvironmentValue('MERCADO_PAGO_WEBHOOK_SECRET', originalWebhookSecret);
           restoreEnvironmentValue('NODE_ENV', originalNodeEnv);
@@ -1162,11 +1172,14 @@ async function runIntegrationTests() {
           error: 'Los pagos en línea aún no están configurados. Contáctanos para renovar tu licencia.',
           code: 'PAYMENTS_NOT_CONFIGURED',
         });
-        const ignoredWebhook = await sendJson('/api/payments/webhook', {
+        const webhookWithoutSecret = await sendJson('/api/payments/webhook', {
           type: 'payment',
           data: { id: 'not-configured' },
         });
-        assert.strictEqual(ignoredWebhook.status, 200);
+        assert.strictEqual(webhookWithoutSecret.status, 503);
+        assert.deepStrictEqual(await webhookWithoutSecret.json(), {
+          error: 'El webhook de Mercado Pago no está configurado.',
+        });
       } finally {
         if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
         else process.env.NODE_ENV = originalNodeEnv;
