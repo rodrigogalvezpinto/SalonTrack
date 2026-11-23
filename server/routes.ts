@@ -206,8 +206,14 @@ function authorizeBusiness(
 // -------------------------------------------------------------
 // System Health
 // -------------------------------------------------------------
-router.get('/health', (req, res) => {
-  res.json({
+router.get('/health', (_req, res) => {
+  try {
+    getSqliteDb().prepare('SELECT 1').get();
+  } catch {
+    return res.status(503).json({ status: 'unavailable', database: 'SQLite' });
+  }
+
+  return res.json({
     status: 'ok',
     app: 'SalonTrack Chile',
     version: '2.0.0',

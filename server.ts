@@ -7,6 +7,7 @@ import { seedDemoDataIfEmpty } from './server/auth.js';
 import { emailConfigured } from './server/adapters/email.js';
 import { mercadoPagoConfigured } from './server/adapters/mercadoPago.js';
 import { securityHeadersMiddleware } from './server/securityHeaders.js';
+import { closeSqliteDb } from './server/sqlite.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -124,9 +125,21 @@ async function startServer() {
     console.log(`🇨🇱 Región: Chile | Zona Horaria: America/Santiago | Moneda: CLP ($)`);
   });
 
-  process.on('SIGTERM', () => {
-    server.close();
-  });
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    server.close(() => {
+      try {
+        closeSqliteDb();
+      } catch (error) {
+        console.error('Error al cerrar SQLite:', error);
+        process.exitCode = 1;
+      }
+    });
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 process.on('uncaughtException', (err) => {

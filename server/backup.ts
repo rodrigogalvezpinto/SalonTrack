@@ -11,7 +11,7 @@ function buildBackupPath(targetDir: string, prefix: string): string {
 }
 
 export function createBackup(
-  targetDir = path.resolve('data/backups'),
+  targetDir = path.join(path.dirname(getDatabasePath()), 'backups'),
   prefix = 'salontrack_backup_'
 ): string {
   const file = buildBackupPath(targetDir, prefix);

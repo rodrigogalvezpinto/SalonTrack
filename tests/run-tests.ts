@@ -529,6 +529,14 @@ async function runIntegrationTests() {
   let olderResetToken = '';
 
   try {
+    await integrationTest('Health: consulta SQLite y responde sin autenticación', async () => {
+      const response = await requestJson('/api/health', 'GET');
+      assert.strictEqual(response.status, 200);
+      const body = await response.json() as { status: string; database: string };
+      assert.strictEqual(body.status, 'ok');
+      assert.strictEqual(body.database, 'SQLite (Persistent with WAL)');
+    });
+
     await integrationTest('Seguridad HTTP: aplica cabeceras y desactiva x-powered-by', async () => {
       const previousNodeEnv = process.env.NODE_ENV;
       try {
