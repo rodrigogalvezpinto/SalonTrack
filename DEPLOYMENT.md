@@ -3,7 +3,7 @@
 ## 1. Entorno de Ejecución
 
 - **Plataforma:** Google Cloud Run / Docker / Node.js 22 LTS
-- **Puerto:** `3000` (definido por variable de entorno `PORT`)
+- **Puerto:** definido por `PORT` de la plataforma; en desarrollo se usa `3000` por defecto
 - **Modo:** `NODE_ENV=production`
 
 ---
@@ -15,6 +15,10 @@ Configure las siguientes variables en el panel de secretos de su proveedor:
 ```ini
 # Puerto del servidor
 PORT=3000
+
+# Configure el número de proxies confiables si el servicio está detrás de uno.
+# Por ejemplo, use 1 detrás de un único proxy de Railway, Fly o un balanceador.
+# TRUST_PROXY=1
 
 # URL canónica del servicio; debe ser pública y usar HTTPS en producción.
 APP_URL="https://salontrack.cl"
@@ -39,6 +43,10 @@ DATABASE_FILE="./data/salontrack.sqlite"
 ```
 
 Los pagos simulados están bloqueados en producción por defecto; no establezca `ALLOW_SIMULATED_PAYMENTS=true` en producción.
+
+## Proxy confiable y límites de autenticación
+
+Configure `TRUST_PROXY` según los saltos de proxy confiables de su despliegue (por ejemplo, `1` detrás de un proxy de Railway, Fly o un balanceador). Esto permite que los límites por IP usen la dirección del cliente. Los limitadores se mantienen en memoria y comparten estado únicamente dentro de una instancia; esta protección presupone una sola instancia.
 
 ## Correo transaccional con Resend
 
