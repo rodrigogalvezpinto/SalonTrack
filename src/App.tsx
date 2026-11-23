@@ -76,7 +76,7 @@ function MainApp() {
   const [selectedBusinessSlug, setSelectedBusinessSlug] = useState<string>('valeria-henriquez-studio');
 
   // Modals
-  const [authModalOpen, setAuthModalOpen] = useState(() => Boolean(resetToken || invitationLink));
+  const [authModalOpen, setAuthModalOpen] = useState(() => Boolean(resetToken));
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register' | 'reset'>(() => resetToken ? 'reset' : 'login');
   const handleCloseAuthModal = () => {
     setAuthModalOpen(false);
