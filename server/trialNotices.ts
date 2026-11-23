@@ -4,8 +4,6 @@ import { createNotification } from './notifications.js';
 import { getSqliteDb, withTransaction } from './sqlite.js';
 import { isBillingEnabled } from './billing.js';
 
-const TRIAL_NOTICE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-
 type TrialNotice = {
   kind: 'trial_ending_7d' | 'trial_ended';
   title: string;
@@ -31,11 +29,13 @@ function getTrialNotice(expirationDate: string, now: Date): TrialNotice | null {
     };
   }
 
-  if (expirationTime <= now.getTime() + TRIAL_NOTICE_WINDOW_MS) {
+  const daysRemaining = Math.ceil((expirationTime - now.getTime()) / 86_400_000);
+  if (daysRemaining <= 7) {
+    const endingCopy = daysRemaining === 1 ? 'termina mañana' : `termina en ${daysRemaining} días`;
     return {
       kind: 'trial_ending_7d',
-      title: 'Tu oferta de lanzamiento termina en 7 días',
-      message: 'Tu oferta de lanzamiento termina en 7 días. Elige un plan en Configuración para seguir usando SalonTrack sin interrupciones.',
+      title: `Tu oferta de lanzamiento ${endingCopy}`,
+      message: `Tu oferta de lanzamiento ${endingCopy}. Elige un plan en Configuración para seguir usando SalonTrack sin interrupciones.`,
       urgency: 'medium',
     };
   }

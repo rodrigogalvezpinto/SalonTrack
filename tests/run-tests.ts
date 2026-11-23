@@ -4043,9 +4043,9 @@ async function runIntegrationTests() {
       const endingSubscriptionId = generateId('sub');
       const endedSubscriptionId = generateId('sub');
       const now = new Date();
-      const endingDate = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      const endingDate = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
       const endedDate = new Date(now.getTime() - 60_000).toISOString();
-      const messageEnding = 'Tu oferta de lanzamiento termina en 7 días. Elige un plan en Configuración para seguir usando SalonTrack sin interrupciones.';
+      const messageEnding = 'Tu oferta de lanzamiento termina mañana. Elige un plan en Configuración para seguir usando SalonTrack sin interrupciones.';
       const messageEnded = 'Tu oferta de lanzamiento terminó. Ahora es momento de elegir un plan en Configuración para seguir editando.';
       const insertTrialAccount = (userId: string, subscriptionId: string, email: string, expirationDate: string) => {
         sqlite.prepare('INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)')
@@ -4133,6 +4133,8 @@ async function runIntegrationTests() {
         assert.ok(retriedEmails.some(email => email.to === failedRecipient));
         assert.ok(retriedEmails.some(email => email.body.includes(messageEnding)));
         assert.ok(retriedEmails.some(email => email.body.includes(messageEnded)));
+        assert.ok(retriedEmails.some(email => email.subject === 'Tu oferta de lanzamiento termina mañana'));
+        assert.ok(!retriedEmails.some(email => email.to === `${endingUserId}@example.test` && email.body.includes('7 días')));
         assert.strictEqual(sendAttempts, 3);
         assert.strictEqual(await processTrialNotices(now), 0);
         assert.strictEqual(readFileSync(outboxFile, 'utf8').trim().split('\n').length, 2);
