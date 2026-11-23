@@ -693,6 +693,46 @@ async function runIntegrationTests() {
       });
     });
 
+    await integrationTest('Autorización: aplica roles actuales con el mismo token tras conceder o revocar permisos', async () => {
+      const email = `role-refresh-${generateId('usr')}@example.test`;
+      const password = 'Password123!';
+      let userId: string | undefined;
+      try {
+        const registration = await sendJson('/api/auth/register', {
+          email,
+          password,
+          full_name: 'Role Refresh',
+          role: 'CUSTOMER',
+        });
+        assert.strictEqual(registration.status, 201);
+        const registered = await registration.json() as {
+          token: string;
+          user: { id: string; roles: string[] };
+        };
+        userId = registered.user.id;
+
+        const firstAdminRequest = await requestJson('/api/admin/metrics', 'GET', registered.token);
+        assert.strictEqual(firstAdminRequest.status, 403);
+
+        assert.deepStrictEqual(grantPlatformAdmin(email), { status: 'granted', userId });
+        const grantedAdminRequest = await requestJson('/api/admin/metrics', 'GET', registered.token);
+        assert.strictEqual(grantedAdminRequest.status, 200);
+
+        const refreshedSession = await requestJson('/api/auth/me', 'GET', registered.token);
+        const refreshedBody = await refreshedSession.json() as { user: { roles: string[] } };
+        assert.ok(refreshedBody.user.roles.includes('PLATFORM_ADMIN'));
+
+        const elevatedLogin = await sendJson('/api/auth/login', { email, password });
+        assert.strictEqual(elevatedLogin.status, 200);
+        const elevatedSession = await elevatedLogin.json() as { token: string };
+        sqlite.prepare("DELETE FROM user_roles WHERE user_id = ? AND role = 'PLATFORM_ADMIN'").run(userId);
+        const revokedAdminRequest = await requestJson('/api/admin/metrics', 'GET', elevatedSession.token);
+        assert.strictEqual(revokedAdminRequest.status, 403);
+      } finally {
+        if (userId) sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+      }
+    });
+
     await integrationTest('SQLite CRM: GET /clients refleja inserciones y eliminaciones externas', async () => {
       const loginResponse = await sendJson('/api/auth/login', {
         email: 'contacto@valeriaestudio.cl',
