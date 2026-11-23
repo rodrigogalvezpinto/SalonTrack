@@ -6,12 +6,14 @@ import { X, Scissors, Lock, Mail, User, Building, Phone, ArrowRight, Check } fro
 interface AuthModalProps {
   isOpen: boolean;
   initialMode?: 'login' | 'register' | 'reset';
+  hint?: string;
   onClose: () => void;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
   isOpen,
   initialMode = 'login',
+  hint,
   onClose,
 }) => {
   const { login, register } = useAuth();
@@ -113,6 +115,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto">
+          {hint && (
+            <p className="rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs font-semibold text-indigo-800">
+              {hint}
+            </p>
+          )}
           {error && (
             <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-semibold">
               {error}

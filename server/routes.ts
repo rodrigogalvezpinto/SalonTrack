@@ -1,5 +1,5 @@
 import { NextFunction, Request, Router, Response } from 'express';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { generateId, Subscription, Client, Service, ContactLog } from './db.js';
 import { hashPassword, verifyPassword, generateToken, optionalAuth, requireAuth, requireRole, getUserRoles, AuthRequest } from './auth.js';
 import { getSqliteDb, withTransaction } from './sqlite.js';
@@ -2247,10 +2247,19 @@ function hasPendingBusinessInvitation(db: ReturnType<typeof getSqliteDb>, busine
   `).get(businessId, email));
 }
 
+function createBusinessInvitationToken(): { token: string; tokenHash: string } {
+  const token = randomBytes(32).toString('base64url');
+  return {
+    token,
+    tokenHash: createHash('sha256').update(token).digest('hex'),
+  };
+}
+
 function notifyAndEmailInvitation(
   email: string,
   businessName: string,
   invitationId: string,
+  token: string,
 ): Promise<void> {
   const sqlite = getSqliteDb();
   const invitee = sqlite.prepare('SELECT id FROM users WHERE LOWER(email) = ?').get(email) as { id: string } | undefined;
@@ -2266,7 +2275,7 @@ function notifyAndEmailInvitation(
   }
 
   const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
-  const invitationLink = `${appUrl}/?invitation=${encodeURIComponent(invitationId)}`;
+  const invitationLink = `${appUrl}/?invitation=${encodeURIComponent(invitationId)}&invitation_token=${encodeURIComponent(token)}`;
   const subject = `Invitación para unirte a ${businessName} en SalonTrack`;
   const html = `<p>Te invitaron a formar parte de ${escapeHtml(businessName)} en SalonTrack.</p><p><a href="${escapeHtml(invitationLink)}">Revisar invitación</a></p>`;
   const text = `Te invitaron a formar parte de ${businessName} en SalonTrack. Revisa la invitación desde tu cuenta: ${invitationLink}`;
@@ -2302,6 +2311,7 @@ const createBusinessStaffHandler = async (req: AuthRequest, res: Response) => {
 
   const staffId = generateId('stf');
   const invitationId = email ? generateId('inv') : null;
+  const invitationToken = email ? createBusinessInvitationToken() : null;
   const now = new Date().toISOString();
 
   try {
@@ -2335,9 +2345,9 @@ const createBusinessStaffHandler = async (req: AuthRequest, res: Response) => {
       if (invitationId && email) {
         db.prepare(`
           INSERT INTO business_invitations (
-            id, business_id, staff_id, email, role, status, invited_by_user_id, created_at
-          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-        `).run(invitationId, bizId, staffId, email, memberRole, req.userId || null, now);
+            id, business_id, staff_id, email, token_hash, role, status, invited_by_user_id, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        `).run(invitationId, bizId, staffId, email, invitationToken!.tokenHash, memberRole, req.userId || null, now);
       }
     });
   } catch (error) {
@@ -2353,9 +2363,14 @@ const createBusinessStaffHandler = async (req: AuthRequest, res: Response) => {
 
   const business = sqlite.prepare('SELECT name FROM businesses WHERE id = ?').get(bizId) as { name: string };
   const invitation = invitationId
-    ? sqlite.prepare('SELECT * FROM business_invitations WHERE id = ?').get(invitationId)
+    ? sqlite.prepare(`
+      SELECT id, business_id, staff_id, email, role, status, invited_by_user_id, created_at, responded_at
+      FROM business_invitations WHERE id = ?
+    `).get(invitationId)
     : null;
-  if (email && invitationId) await notifyAndEmailInvitation(email, business.name, invitationId);
+  if (email && invitationId && invitationToken) {
+    await notifyAndEmailInvitation(email, business.name, invitationId, invitationToken.token);
+  }
   return res.status(201).json({
     message: 'Trabajador agregado exitosamente al equipo.',
     staff_id: staffId,
@@ -2403,6 +2418,7 @@ router.post('/business/staff/:id/invite', requireAuth, async (req: AuthRequest, 
   }
 
   const invitationId = generateId('inv');
+  const invitationToken = createBusinessInvitationToken();
   const now = new Date().toISOString();
   try {
     withTransaction(db => {
@@ -2412,9 +2428,9 @@ router.post('/business/staff/:id/invite', requireAuth, async (req: AuthRequest, 
       db.prepare('UPDATE staff SET email = ? WHERE id = ? AND user_id IS NULL').run(email, staff.id);
       db.prepare(`
         INSERT INTO business_invitations (
-          id, business_id, staff_id, email, role, status, invited_by_user_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-      `).run(invitationId, businessId, staff.id, email, memberRole, req.userId || null, now);
+          id, business_id, staff_id, email, token_hash, role, status, invited_by_user_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+      `).run(invitationId, businessId, staff.id, email, invitationToken.tokenHash, memberRole, req.userId || null, now);
     });
   } catch (error) {
     if (error instanceof Error && error.message === 'INVITATION_CONFLICT') {
@@ -2425,8 +2441,11 @@ router.post('/business/staff/:id/invite', requireAuth, async (req: AuthRequest, 
   }
 
   const business = sqlite.prepare('SELECT name FROM businesses WHERE id = ?').get(businessId) as { name: string };
-  const invitation = sqlite.prepare('SELECT * FROM business_invitations WHERE id = ?').get(invitationId);
-  await notifyAndEmailInvitation(email, business.name, invitationId);
+  const invitation = sqlite.prepare(`
+    SELECT id, business_id, staff_id, email, role, status, invited_by_user_id, created_at, responded_at
+    FROM business_invitations WHERE id = ?
+  `).get(invitationId);
+  await notifyAndEmailInvitation(email, business.name, invitationId, invitationToken.token);
   return res.status(201).json({ invitation });
 });
 
@@ -2434,7 +2453,8 @@ router.get('/business/invitations', requireAuth, (req: AuthRequest, res: Respons
   const businessId = getManagedBusinessId(req, res);
   if (!businessId) return;
   const invitations = getSqliteDb().prepare(`
-    SELECT bi.*, s.name AS staff_name
+    SELECT bi.id, bi.business_id, bi.staff_id, bi.email, bi.role, bi.status,
+           bi.invited_by_user_id, bi.created_at, bi.responded_at, s.name AS staff_name
     FROM business_invitations bi
     LEFT JOIN staff s ON s.id = bi.staff_id
     WHERE bi.business_id = ?
@@ -2492,19 +2512,29 @@ router.post('/invitations/:id/accept', requireAuth, (req: AuthRequest, res: Resp
   const now = new Date().toISOString();
   const outcome = withTransaction(db => {
     const invitation = db.prepare(`
-      SELECT id, business_id, staff_id, email, role, status, invited_by_user_id
+      SELECT id, business_id, staff_id, email, token_hash, role, status, invited_by_user_id
       FROM business_invitations WHERE id = ?
     `).get(req.params.id) as {
       id: string;
       business_id: string;
       staff_id: string | null;
       email: string;
+      token_hash: string;
       role: string;
       status: string;
       invited_by_user_id: string | null;
     } | undefined;
     if (!invitation || invitation.email.toLowerCase() !== userEmail) return { kind: 'not_found' as const };
     if (invitation.status !== 'pending') return { kind: 'conflict' as const };
+    const suppliedToken = typeof req.body?.token === 'string' ? req.body.token : '';
+    const suppliedTokenHash = createHash('sha256').update(suppliedToken).digest();
+    const expectedTokenHash = Buffer.from(invitation.token_hash, 'hex');
+    if (
+      suppliedTokenHash.length !== expectedTokenHash.length ||
+      !timingSafeEqual(suppliedTokenHash, expectedTokenHash)
+    ) {
+      return { kind: 'invalid_token' as const };
+    }
 
     const ownerMembership = db.prepare(`
       SELECT 1 FROM business_members
@@ -2553,6 +2583,9 @@ router.post('/invitations/:id/accept', requireAuth, (req: AuthRequest, res: Resp
 
   if (outcome.kind === 'not_found') return res.status(404).json({ error: 'Invitación no encontrada.' });
   if (outcome.kind === 'conflict') return res.status(409).json({ error: 'La invitación ya no está pendiente.' });
+  if (outcome.kind === 'invalid_token') {
+    return res.status(403).json({ error: 'Abre el enlace de invitación que te enviamos por correo para aceptarla.' });
+  }
   if (outcome.kind === 'owner') return res.status(409).json({ error: 'Ya eres propietario de este negocio.' });
   if (outcome.kind === 'staff_linked') return res.status(409).json({ error: 'Este perfil de trabajador ya está vinculado a otra cuenta.' });
 

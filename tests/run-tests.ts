@@ -4651,7 +4651,7 @@ async function runIntegrationTests() {
         assert.strictEqual(created.status, 201);
         const createdBody = await created.json() as {
           staff_id: string;
-          invitation: { id: string; email: string; role: string; status: string };
+          invitation: { id: string; email: string; role: string; status: string; token_hash?: string };
         };
         staffIds.push(createdBody.staff_id);
         invitationIds.push(createdBody.invitation.id);
@@ -4659,6 +4659,15 @@ async function runIntegrationTests() {
           { email: createdBody.invitation.email, role: createdBody.invitation.role, status: createdBody.invitation.status },
           { email: 'ignacio@barberiaroute.cl', role: 'STAFF', status: 'pending' },
         );
+        assert.ok(!('token_hash' in createdBody.invitation));
+        const invitationEmailLines = readFileSync(join(mailDirectory, 'outbox.jsonl'), 'utf8').trim().split('\n');
+        const invitationEmail = JSON.parse(invitationEmailLines[invitationEmailLines.length - 1]) as { body: string };
+        const invitationHref = invitationEmail.body.match(/href="([^"]+)"/)?.[1]?.replace(/&amp;/g, '&');
+        assert.ok(invitationHref);
+        const invitationUrl = new URL(invitationHref);
+        const invitationToken = invitationUrl.searchParams.get('invitation_token');
+        assert.strictEqual(invitationUrl.searchParams.get('invitation'), createdBody.invitation.id);
+        assert.ok(invitationToken);
         assert.ok(sqlite.prepare(`
           SELECT 1 FROM notifications WHERE user_id = ? AND type = 'team_invitation' AND entity_id = ?
         `).get(invitee.user.id, createdBody.invitation.id));
@@ -4671,8 +4680,12 @@ async function runIntegrationTests() {
           { account_status: 'pending', invitation_id: createdBody.invitation.id },
         );
         const invitationListResponse = await requestJson('/api/business/invitations', 'GET', owner.token);
-        assert.ok(((await invitationListResponse.json() as { invitations: Array<{ id: string }> }).invitations)
-          .some(item => item.id === createdBody.invitation.id));
+        const invitationList = (await invitationListResponse.json() as {
+          invitations: Array<{ id: string; token_hash?: string }>;
+        }).invitations;
+        const listedInvitation = invitationList.find(item => item.id === createdBody.invitation.id);
+        assert.ok(listedInvitation);
+        assert.ok(!('token_hash' in listedInvitation));
         assert.strictEqual((await sendJson('/api/business/staff', {
           name: 'Invitación duplicada',
           email: 'IGNACIO@BARBERIAROUTE.CL',
@@ -4687,7 +4700,31 @@ async function runIntegrationTests() {
         const inviteeInvitations = await requestJson('/api/invitations/mine', 'GET', invitee.token);
         assert.ok(((await inviteeInvitations.json() as { invitations: Array<{ id: string }> }).invitations)
           .some(item => item.id === createdBody.invitation.id));
-        const acceptResponse = await sendJson(`/api/invitations/${createdBody.invitation.id}/accept`, {}, invitee.token);
+        const membershipBeforeAccept = sqlite.prepare(`
+          SELECT id, role, is_active FROM business_members WHERE business_id = ? AND user_id = ?
+        `).get(businessId, invitee.user.id);
+        const staffBeforeAccept = sqlite.prepare('SELECT user_id, is_active FROM staff WHERE id = ?')
+          .get(createdBody.staff_id);
+        const invitationBeforeAccept = sqlite.prepare('SELECT status FROM business_invitations WHERE id = ?')
+          .get(createdBody.invitation.id);
+        const missingTokenAccept = await sendJson(`/api/invitations/${createdBody.invitation.id}/accept`, {}, invitee.token);
+        assert.strictEqual(missingTokenAccept.status, 403);
+        assert.strictEqual((await missingTokenAccept.json() as { error: string }).error,
+          'Abre el enlace de invitación que te enviamos por correo para aceptarla.');
+        const wrongTokenAccept = await sendJson(`/api/invitations/${createdBody.invitation.id}/accept`, { token: 'token-incorrecto' }, invitee.token);
+        assert.strictEqual(wrongTokenAccept.status, 403);
+        assert.deepStrictEqual(sqlite.prepare(`
+          SELECT id, role, is_active FROM business_members WHERE business_id = ? AND user_id = ?
+        `).get(businessId, invitee.user.id), membershipBeforeAccept);
+        assert.deepStrictEqual(sqlite.prepare('SELECT user_id, is_active FROM staff WHERE id = ?')
+          .get(createdBody.staff_id), staffBeforeAccept);
+        assert.deepStrictEqual(sqlite.prepare('SELECT status FROM business_invitations WHERE id = ?')
+          .get(createdBody.invitation.id), invitationBeforeAccept);
+        const acceptResponse = await sendJson(
+          `/api/invitations/${createdBody.invitation.id}/accept`,
+          { token: invitationToken },
+          invitee.token,
+        );
         assert.strictEqual(acceptResponse.status, 200, `Aceptación de invitación: HTTP ${acceptResponse.status}`);
         const membership = sqlite.prepare(`
           SELECT role, is_active FROM business_members WHERE business_id = ? AND user_id = ?

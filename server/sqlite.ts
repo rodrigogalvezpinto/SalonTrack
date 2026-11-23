@@ -571,6 +571,7 @@ const MIGRATION_V5_SQL = `
     business_id TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     staff_id TEXT REFERENCES staff(id) ON DELETE SET NULL,
     email TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'STAFF',
     status TEXT NOT NULL DEFAULT 'pending',
     invited_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,

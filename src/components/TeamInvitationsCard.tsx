@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiRequest } from '../utils/api';
-import { useAuth } from '../context/AuthContext';
 
 interface TeamInvitation {
   id: string;
+  email: string;
   role: string;
   created_at: string;
   business_name: string;
@@ -18,7 +18,6 @@ const invitationRoleLabels: Record<string, string> = {
 };
 
 export const TeamInvitationsCard: React.FC = () => {
-  const { reloadSession } = useAuth();
   const [invitations, setInvitations] = useState<TeamInvitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -40,19 +39,15 @@ export const TeamInvitationsCard: React.FC = () => {
     void loadInvitations();
   }, [loadInvitations]);
 
-  const respond = async (invitation: TeamInvitation, action: 'accept' | 'decline') => {
+  const respond = async (invitation: TeamInvitation) => {
     setBusyId(invitation.id);
     setError(null);
     try {
-      const response = await apiRequest<{ message: string }>(`/api/invitations/${invitation.id}/${action}`, {
+      await apiRequest(`/api/invitations/${invitation.id}/decline`, {
         method: 'POST',
       });
-      if (action === 'accept') {
-        await reloadSession();
-        setSuccess(`Ahora eres parte de ${invitation.business_name}.`);
-      }
       setInvitations(current => current.filter(item => item.id !== invitation.id));
-      if (response.message && action === 'accept') setSuccess(response.message);
+      setSuccess('Invitación rechazada.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo responder a la invitación.');
     } finally {
@@ -83,19 +78,12 @@ export const TeamInvitationsCard: React.FC = () => {
               </p>
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-col items-start gap-2 sm:items-end">
+            <p className="text-xs text-slate-600">Para aceptar, abre el enlace que te enviamos a {invitation.email}.</p>
             <button
               type="button"
               disabled={busyId === invitation.id}
-              onClick={() => void respond(invitation, 'accept')}
-              className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
-            >
-              Aceptar
-            </button>
-            <button
-              type="button"
-              disabled={busyId === invitation.id}
-              onClick={() => void respond(invitation, 'decline')}
+              onClick={() => void respond(invitation)}
               className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50"
             >
               Rechazar
