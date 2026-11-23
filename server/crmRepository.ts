@@ -544,6 +544,7 @@ export function activateLicense(
   planPrice: number,
   durationDays: number,
   providerPaymentId: string,
+  paymentMethod = 'simulated_online',
 ): { kind: 'created'; payment: Payment; subscription: Subscription } | { kind: 'duplicate'; payment: Payment } | { kind: 'conflict' } {
   return withTransaction(db => {
     const existing = db.prepare(`
@@ -573,8 +574,8 @@ export function activateLicense(
       INSERT INTO payments (
         id, user_id, type, amount_clp, currency, provider, provider_payment_id,
         status, payment_method, metadata, created_at
-      ) VALUES (?, ?, 'subscription_payment', ?, 'CLP', 'mercadopago', ?, 'approved', 'simulated_online', ?, ?)
-    `).run(payment.id, userId, planPrice, providerPaymentId, JSON.stringify({ plan: planId }), payment.created_at);
+      ) VALUES (?, ?, 'subscription_payment', ?, 'CLP', 'mercadopago', ?, 'approved', ?, ?, ?)
+    `).run(payment.id, userId, planPrice, providerPaymentId, paymentMethod, JSON.stringify({ plan: planId }), payment.created_at);
 
     const now = new Date();
     const subscriptionRow = db.prepare(`

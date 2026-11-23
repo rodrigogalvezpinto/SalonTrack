@@ -37,6 +37,13 @@ import {
 } from './crmRepository.js';
 import { getAvailableSlots, isSlotAvailable } from './availability.js';
 import { localGeolocationProvider, localWhatsAppProvider, localEmailProvider, localPaymentProvider } from './adapters/index.js';
+import {
+  createPreference,
+  getMercadoPagoPayment,
+  mercadoPagoConfigured,
+  verifyWebhookSignature,
+  type MercadoPagoPayment,
+} from './adapters/mercadoPago.js';
 
 const router = Router();
 
@@ -2584,6 +2591,51 @@ const PLANS: Record<string, { name: string; price_clp: number; duration_days: nu
   },
 };
 
+function parseSubscriptionExternalReference(externalReference: string): { userId: string; planId: string } | null {
+  const match = /^sub:([^:]+):([^:]+):([a-f0-9]{12})$/.exec(externalReference);
+  if (!match || !PLANS[match[2]]) return null;
+  return { userId: match[1], planId: match[2] };
+}
+
+type MercadoPagoApplicationResult =
+  | { kind: 'activated'; subscription: NonNullable<ReturnType<typeof getSubscription>>; message: string }
+  | { kind: 'duplicate'; subscription: NonNullable<ReturnType<typeof getSubscription>>; message: string }
+  | { kind: 'ignored'; reason: string }
+  | { kind: 'forbidden' };
+
+function applyMercadoPagoPayment(
+  payment: MercadoPagoPayment,
+  expectedUserId?: string,
+): MercadoPagoApplicationResult {
+  const reference = parseSubscriptionExternalReference(payment.external_reference);
+  if (!reference) return { kind: 'ignored', reason: 'invalid_reference' };
+  if (expectedUserId && reference.userId !== expectedUserId) return { kind: 'forbidden' };
+  if (payment.status !== 'approved') return { kind: 'ignored', reason: 'not_approved' };
+  if (payment.currency_id !== 'CLP') return { kind: 'ignored', reason: 'currency_mismatch' };
+
+  const plan = PLANS[reference.planId];
+  if (Math.round(payment.transaction_amount) !== plan.price_clp) {
+    return { kind: 'ignored', reason: 'amount_mismatch' };
+  }
+
+  const result = activateLicense(
+    reference.userId,
+    reference.planId as Subscription['plan'],
+    plan.price_clp,
+    plan.duration_days,
+    `mp_${payment.id}`,
+    'mercadopago_checkout',
+  );
+  if (result.kind === 'conflict') return { kind: 'forbidden' };
+
+  const subscription = result.kind === 'created'
+    ? result.subscription
+    : getSubscription(reference.userId) || getOrCreateSubscription(reference.userId);
+  return result.kind === 'duplicate'
+    ? { kind: 'duplicate', subscription, message: 'Este pago ya fue procesado.' }
+    : { kind: 'activated', subscription, message: '¡Licencia activada con éxito!' };
+}
+
 router.get('/subscriptions/plans', (req, res) => {
   res.json({
     plans: PLANS,
@@ -2617,6 +2669,37 @@ router.post('/payments/create-preference', requireAuth, async (req: AuthRequest,
   const plan = PLANS[plan_id];
   if (!plan) return res.status(400).json({ error: 'Plan seleccionado inválido.' });
 
+  if (mercadoPagoConfigured()) {
+    const appUrl = (process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/+$/, '');
+    const user = getUser(req.userId!);
+    const externalReference = `sub:${req.userId}:${plan_id}:${randomBytes(6).toString('hex')}`;
+    try {
+      const preference = await createPreference({
+        title: plan.name,
+        unitPriceClp: plan.price_clp,
+        externalReference,
+        payerEmail: user?.email || '',
+        appUrl,
+      });
+      return res.json({
+        mode: 'mercadopago_live',
+        preference_id: preference.id,
+        init_point: preference.init_point,
+        plan_id,
+        plan,
+      });
+    } catch {
+      return res.status(502).json({ error: 'No se pudo iniciar el pago con Mercado Pago. Intenta nuevamente.' });
+    }
+  }
+
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SIMULATED_PAYMENTS !== 'true') {
+    return res.status(503).json({
+      error: 'Los pagos en línea aún no están configurados. Contáctanos para renovar tu licencia.',
+      code: 'PAYMENTS_NOT_CONFIGURED',
+    });
+  }
+
   const simulatedPrefId = `PREF_MP_${Date.now()}_${Math.random().toString(36).substring(7)}`;
   return res.json({
     preference_id: simulatedPrefId,
@@ -2628,8 +2711,77 @@ router.post('/payments/create-preference', requireAuth, async (req: AuthRequest,
   });
 });
 
-router.post('/payments/webhook', (req, res) => {
-  return res.status(200).send('Webhook received (simulated local)');
+router.post('/payments/webhook', async (req, res) => {
+  if (!mercadoPagoConfigured()) {
+    if (process.env.MERCADO_PAGO_ACCESS_TOKEN?.trim()) {
+      return res.status(503).json({ error: 'El webhook de Mercado Pago no está configurado.' });
+    }
+    return res.status(200).json({ received: true, ignored: true });
+  }
+
+  const secret = process.env.MERCADO_PAGO_WEBHOOK_SECRET!;
+
+  const rawDataId = req.query['data.id'] ?? req.body?.data?.id;
+  const dataId = typeof rawDataId === 'string' || typeof rawDataId === 'number' ? String(rawDataId) : undefined;
+  const rawType = req.query.type ?? req.body?.type;
+  const type = typeof rawType === 'string' ? rawType : '';
+
+  if (!verifyWebhookSignature({
+    xSignature: req.get('x-signature'),
+    xRequestId: req.get('x-request-id'),
+    dataId,
+    secret,
+  })) {
+    return res.status(401).json({ error: 'La firma del webhook de Mercado Pago no es válida.' });
+  }
+
+  if (type !== 'payment' || !dataId) return res.status(200).json({ received: true, ignored: true });
+
+  let payment: Awaited<ReturnType<typeof getMercadoPagoPayment>>;
+  try {
+    payment = await getMercadoPagoPayment(dataId);
+  } catch {
+    return res.status(500).json({ error: 'No se pudo consultar el pago en Mercado Pago.' });
+  }
+  if (!payment) return res.status(200).json({ received: true, ignored: true });
+
+  try {
+    applyMercadoPagoPayment(payment);
+  } catch (error) {
+    console.error('Error al aplicar el pago de Mercado Pago:', error);
+    return res.status(500).json({ error: 'No se pudo aplicar el pago de Mercado Pago.' });
+  }
+  return res.status(200).json({ received: true });
+});
+
+router.post('/payments/confirm', requireAuth, async (req: AuthRequest, res: Response) => {
+  if (!mercadoPagoConfigured()) {
+    return res.status(503).json({
+      error: 'Los pagos en línea aún no están configurados. Contáctanos para renovar tu licencia.',
+      code: 'PAYMENTS_NOT_CONFIGURED',
+    });
+  }
+
+  const paymentId = typeof req.body?.payment_id === 'string' ? req.body.payment_id.trim() : '';
+  if (!paymentId) return res.status(400).json({ error: 'Falta el identificador del pago.' });
+
+  let payment: Awaited<ReturnType<typeof getMercadoPagoPayment>>;
+  try {
+    payment = await getMercadoPagoPayment(paymentId);
+  } catch {
+    return res.status(502).json({ error: 'No se pudo consultar el pago en Mercado Pago.' });
+  }
+  const paymentNotFound = () => res.status(404).json({ error: 'No se encontró el pago.' });
+  if (!payment) return paymentNotFound();
+
+  const result = applyMercadoPagoPayment(payment, req.userId);
+  if (result.kind === 'forbidden') return paymentNotFound();
+  if (result.kind === 'ignored') {
+    if (result.reason === 'invalid_reference') return paymentNotFound();
+    if (result.reason === 'not_approved') return res.status(409).json({ status: payment.status });
+    return paymentNotFound();
+  }
+  return res.json({ message: result.message, subscription: result.subscription });
 });
 
 router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, res: Response) => {
@@ -2640,7 +2792,7 @@ router.post('/subscriptions/activate-license', requireAuth, (req: AuthRequest, r
     const plan = PLANS[plan_id];
     if (!plan) return res.status(400).json({ error: 'Plan seleccionado no existe.' });
 
-    const providerPaymentId = payment_ref || `MP_${Date.now()}`;
+    const providerPaymentId = `sim_${payment_ref || Date.now()}`;
     const result = activateLicense(
       userId,
       plan_id as Subscription['plan'],

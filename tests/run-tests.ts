@@ -1,7 +1,8 @@
 import './setup-env.js';
 import assert from 'node:assert';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { createServer } from 'node:http';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +16,7 @@ import { listClients, listContactLogs, listServices } from '../server/crmReposit
 import { checkMigrations, closeSqliteDb, getDatabasePath, getSqliteDb, MIGRATIONS, migrationChecksum, runMigrations, withTransaction } from '../server/sqlite.js';
 import { getAvailableSlots, isSlotAvailable } from '../server/availability.js';
 import { localEmailProvider, localGeolocationProvider, localPaymentProvider } from '../server/adapters/index.js';
+import { verifyWebhookSignature } from '../server/adapters/mercadoPago.js';
 import apiRouter from '../server/routes.js';
 
 console.log('🧪 Iniciando Suite de Pruebas Automatizadas de SalonTrack Chile...\n');
@@ -324,6 +326,48 @@ test('Proveedor Local de Pagos: Generación de checkout sin claves externas', as
   assert.ok(result.checkoutUrl?.includes('SIM_PAY_'));
 });
 
+test('Mercado Pago: valida firmas y normaliza ids alfanuméricos en mayúscula', () => {
+  const secret = 'secreto-de-prueba';
+  const requestId = 'request-test-123';
+  const dataId = 'ABCDEF123';
+  const now = new Date('2026-05-10T12:00:00.000Z');
+  const ts = String(Math.floor(now.getTime() / 1000));
+  const manifest = `id:${dataId.toLowerCase()};request-id:${requestId};ts:${ts};`;
+  const signature = createHmac('sha256', secret).update(manifest).digest('hex');
+
+  assert.ok(verifyWebhookSignature({
+    xSignature: `ts=${ts}, v1=${signature}`,
+    xRequestId: requestId,
+    dataId,
+    secret,
+    now,
+  }));
+  const millisecondTs = String(now.getTime());
+  const millisecondManifest = `id:${dataId.toLowerCase()};request-id:${requestId};ts:${millisecondTs};`;
+  const millisecondSignature = createHmac('sha256', secret).update(millisecondManifest).digest('hex');
+  assert.ok(verifyWebhookSignature({
+    xSignature: `ts=${millisecondTs},v1=${millisecondSignature}`,
+    xRequestId: requestId,
+    dataId,
+    secret,
+    now,
+  }));
+  assert.ok(!verifyWebhookSignature({
+    xSignature: `ts=${ts},v1=${signature}`,
+    xRequestId: requestId,
+    dataId,
+    secret,
+    now: new Date(now.getTime() + 301_000),
+  }));
+  assert.ok(!verifyWebhookSignature({
+    xSignature: `ts=${ts},v1=${signature.slice(0, -2)}xx`,
+    xRequestId: requestId,
+    dataId,
+    secret,
+    now,
+  }));
+});
+
 async function integrationTest(name: string, fn: () => Promise<void>) {
   try {
     await fn();
@@ -623,6 +667,7 @@ async function runIntegrationTests() {
       });
       const other = await otherResponse.json() as { token: string };
       const paymentRef = `CRM_${generateId('pay')}`;
+      const providerPaymentId = `sim_${paymentRef}`;
 
       const activation = await sendJson('/api/subscriptions/activate-license', {
         plan_id: 'pro_quarterly',
@@ -634,7 +679,7 @@ async function runIntegrationTests() {
         SELECT user_id, type, provider, provider_payment_id, status, payment_method, metadata
         FROM payments
         WHERE provider_payment_id = ?
-      `).get(paymentRef) as any;
+      `).get(providerPaymentId) as any;
       assert.strictEqual(paymentRow.user_id, owner.user.id);
       assert.strictEqual(paymentRow.type, 'subscription_payment');
       assert.strictEqual(paymentRow.provider, 'mercadopago');
@@ -651,7 +696,7 @@ async function runIntegrationTests() {
         message: 'Este pago ya fue procesado.',
         payment: activationBody.payment,
       });
-      assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count, 1);
+      assert.strictEqual((sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(providerPaymentId) as any).count, 1);
 
       const crossUser = await sendJson('/api/subscriptions/activate-license', {
         plan_id: 'pro_quarterly',
@@ -662,7 +707,7 @@ async function runIntegrationTests() {
 
       const current = await requestJson('/api/subscriptions/current', 'GET', owner.token);
       const currentBody = await current.json() as any;
-      assert.ok(currentBody.payments.some((payment: any) => payment.provider_payment_id === paymentRef));
+      assert.ok(currentBody.payments.some((payment: any) => payment.provider_payment_id === providerPaymentId));
     });
 
     await integrationTest('Pagos simulados: bloqueo en producción y activación explícita para demos', async () => {
@@ -679,6 +724,7 @@ async function runIntegrationTests() {
       const userId = registered.user.id;
       const bookingId = generateId('payment_gate_booking');
       const paymentRef = `PRODUCTION_GATE_${generateId('pay')}`;
+      const providerPaymentId = `sim_${paymentRef}`;
       const now = new Date().toISOString();
       const originalNodeEnv = process.env.NODE_ENV;
       const originalAllowSimulatedPayments = process.env.ALLOW_SIMULATED_PAYMENTS;
@@ -723,7 +769,7 @@ async function runIntegrationTests() {
           subscriptionBefore
         );
         assert.strictEqual(
-          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count,
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(providerPaymentId) as any).count,
           0
         );
 
@@ -748,7 +794,7 @@ async function runIntegrationTests() {
         }, registered.token);
         assert.strictEqual(allowedActivation.status, 200);
         assert.strictEqual(
-          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(paymentRef) as any).count,
+          (sqlite.prepare('SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?').get(providerPaymentId) as any).count,
           1
         );
       } finally {
@@ -756,6 +802,395 @@ async function runIntegrationTests() {
         restoreEnvironmentValue('ALLOW_SIMULATED_PAYMENTS', originalAllowSimulatedPayments);
         sqlite.prepare('DELETE FROM payments WHERE user_id = ?').run(userId);
         sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+      }
+    });
+
+    await integrationTest('Mercado Pago: preferencias, webhook firmado, confirmación e idempotencia', async () => {
+      const preferenceRequests: Array<{ body: any; authorization?: string; idempotencyKey?: string }> = [];
+      const fakePayments = new Map<string, any>();
+      const fakeMpServer = createServer((request, response) => {
+        const url = new URL(request.url || '/', 'http://127.0.0.1');
+        let requestBody = '';
+        request.on('data', chunk => {
+          requestBody += chunk.toString();
+        });
+        request.on('end', () => {
+          if (request.method === 'POST' && url.pathname === '/checkout/preferences') {
+            const body = JSON.parse(requestBody || '{}');
+            preferenceRequests.push({
+              body,
+              authorization: request.headers.authorization,
+              idempotencyKey: request.headers['x-idempotency-key'] as string | undefined,
+            });
+            response.writeHead(201, { 'Content-Type': 'application/json' });
+            response.end(JSON.stringify({
+              id: `pref-${preferenceRequests.length}`,
+              init_point: `https://checkout.test/${preferenceRequests.length}`,
+            }));
+            return;
+          }
+
+          if (request.method === 'GET' && url.pathname.startsWith('/v1/payments/')) {
+            const id = decodeURIComponent(url.pathname.slice('/v1/payments/'.length));
+            const payment = fakePayments.get(id);
+            response.writeHead(payment ? 200 : 404, { 'Content-Type': 'application/json' });
+            response.end(JSON.stringify(payment || { message: 'not found' }));
+            return;
+          }
+
+          response.writeHead(404, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify({ message: 'not found' }));
+        });
+      });
+      fakeMpServer.listen(0, '127.0.0.1');
+      await new Promise<void>(resolve => fakeMpServer.once('listening', () => resolve()));
+      const fakeAddress = fakeMpServer.address();
+      assert.ok(fakeAddress && typeof fakeAddress !== 'string');
+      const fakeApiBase = `http://127.0.0.1:${fakeAddress.port}`;
+      const originalEnvironment = {
+        accessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN,
+        webhookSecret: process.env.MERCADO_PAGO_WEBHOOK_SECRET,
+        apiBase: process.env.MERCADO_PAGO_API_BASE,
+        appUrl: process.env.APP_URL,
+        nodeEnv: process.env.NODE_ENV,
+      };
+      const registeredUserIds: string[] = [];
+      const restoreEnvironmentValue = (name: string, value: string | undefined) => {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      };
+
+      try {
+        process.env.MERCADO_PAGO_ACCESS_TOKEN = 'test-access-token';
+        process.env.MERCADO_PAGO_WEBHOOK_SECRET = 'test-webhook-secret';
+        process.env.MERCADO_PAGO_API_BASE = fakeApiBase;
+        process.env.APP_URL = 'https://salontrack.test';
+        process.env.NODE_ENV = 'test';
+
+        const registerTestUser = async (prefix: string) => {
+          const email = `${prefix}-${generateId('user')}@example.test`;
+          const response = await sendJson('/api/auth/register', {
+            email,
+            password: 'MercadoPagoTest123!',
+            full_name: `Cuenta de prueba ${prefix}`,
+            phone: '+56912345061',
+            role: 'CUSTOMER',
+          });
+          assert.strictEqual(response.status, 201);
+          const registered = await response.json() as { token: string; user: { id: string } };
+          registeredUserIds.push(registered.user.id);
+          return { ...registered, email };
+        };
+
+        const owner = await registerTestUser('mercadopago-owner');
+        const other = await registerTestUser('mercadopago-other');
+        const preferenceResponse = await sendJson('/api/payments/create-preference', {
+          plan_id: 'pro_quarterly',
+        }, owner.token);
+        assert.strictEqual(preferenceResponse.status, 200);
+        const preference = await preferenceResponse.json() as any;
+        assert.strictEqual(preference.mode, 'mercadopago_live');
+        assert.strictEqual(preference.init_point, 'https://checkout.test/1');
+        assert.strictEqual(preference.plan_id, 'pro_quarterly');
+
+        const preferenceRequest = preferenceRequests[0];
+        assert.strictEqual(preferenceRequest.authorization, 'Bearer test-access-token');
+        assert.strictEqual(preferenceRequest.idempotencyKey, preferenceRequest.body.external_reference);
+        assert.match(preferenceRequest.body.external_reference, new RegExp(`^sub:${owner.user.id}:pro_quarterly:[a-f0-9]{12}$`));
+        assert.deepStrictEqual(preferenceRequest.body.items[0], {
+          id: preferenceRequest.body.external_reference,
+          title: preference.plan.name,
+          quantity: 1,
+          currency_id: 'CLP',
+          unit_price: 14990,
+        });
+        assert.strictEqual(preferenceRequest.body.payer.email, owner.email);
+        assert.strictEqual(preferenceRequest.body.notification_url, 'https://salontrack.test/api/payments/webhook');
+        assert.deepStrictEqual(preferenceRequest.body.back_urls, {
+          success: 'https://salontrack.test/?payment=success',
+          failure: 'https://salontrack.test/?payment=failure',
+          pending: 'https://salontrack.test/?payment=pending',
+        });
+        assert.strictEqual(preferenceRequest.body.auto_return, 'approved');
+
+        const externalReference = preferenceRequest.body.external_reference as string;
+        const makePayment = (id: string, status = 'approved', amount = 14990) => ({
+          id,
+          status,
+          status_detail: status === 'approved' ? 'accredited' : 'pending_waiting_payment',
+          transaction_amount: amount,
+          currency_id: 'CLP',
+          external_reference: externalReference,
+        });
+        const sendWebhook = async (
+          paymentId: string,
+          options: { timestamp?: number; invalidSignature?: boolean; query?: boolean } = {},
+        ) => {
+          const timestamp = String(options.timestamp ?? Math.floor(Date.now() / 1000));
+          const requestId = `request-${generateId('mp')}`;
+          const signedId = /^[a-z\d]+$/i.test(paymentId) ? paymentId.toLowerCase() : paymentId;
+          const manifest = `id:${signedId};request-id:${requestId};ts:${timestamp};`;
+          const signature = options.invalidSignature
+            ? '0'.repeat(64)
+            : createHmac('sha256', 'test-webhook-secret').update(manifest).digest('hex');
+          const query = options.query
+            ? `?type=payment&data.id=${encodeURIComponent(paymentId)}`
+            : '';
+          return fetch(`${baseUrl}/api/payments/webhook${query}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-signature': `ts=${timestamp},v1=${signature}`,
+              'x-request-id': requestId,
+            },
+            ...(options.query ? {} : { body: JSON.stringify({ type: 'payment', data: { id: paymentId } }) }),
+          });
+        };
+        const getSubscriptionState = (userId: string) => sqlite.prepare(
+          'SELECT status, expiration_date FROM subscriptions WHERE user_id = ?'
+        ).get(userId) as { status: string; expiration_date: string };
+        const getUserPaymentCount = (userId: string) => (sqlite.prepare(
+          'SELECT COUNT(*) AS count FROM payments WHERE user_id = ?'
+        ).get(userId) as { count: number }).count;
+        const originalSubscription = getSubscriptionState(owner.user.id);
+        const originalPaymentCount = getUserPaymentCount(owner.user.id);
+
+        const webhookPaymentId = 'MPTESTA123';
+        fakePayments.set(webhookPaymentId, makePayment(webhookPaymentId));
+        const approvedWebhook = await sendWebhook(webhookPaymentId);
+        assert.strictEqual(approvedWebhook.status, 200);
+        const afterWebhook = getSubscriptionState(owner.user.id);
+        assert.strictEqual(afterWebhook.status, 'active');
+        assert.ok(new Date(afterWebhook.expiration_date) > new Date(originalSubscription.expiration_date));
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 1);
+        const webhookPaymentRef = `mp_${webhookPaymentId}`;
+        const persistedWebhookPayment = sqlite.prepare(
+          'SELECT payment_method FROM payments WHERE provider_payment_id = ?'
+        ).get(webhookPaymentRef) as { payment_method: string };
+        assert.strictEqual(persistedWebhookPayment.payment_method, 'mercadopago_checkout');
+
+        const replay = await sendWebhook(webhookPaymentId);
+        assert.strictEqual(replay.status, 200);
+        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterWebhook);
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 1);
+
+        const rejectedPaymentIds = ['BADSIG123', 'STALE123'];
+        rejectedPaymentIds.forEach(id => fakePayments.set(id, makePayment(id)));
+        const badSignature = await sendWebhook(rejectedPaymentIds[0], { invalidSignature: true, query: true });
+        assert.strictEqual(badSignature.status, 401);
+        const staleSignature = await sendWebhook(rejectedPaymentIds[1], {
+          timestamp: Math.floor(Date.now() / 1000) - 301,
+        });
+        assert.strictEqual(staleSignature.status, 401);
+        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterWebhook);
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 1);
+
+        const mismatchId = 'AMOUNT123';
+        fakePayments.set(mismatchId, makePayment(mismatchId, 'approved', 15000));
+        const amountMismatch = await sendWebhook(mismatchId);
+        assert.strictEqual(amountMismatch.status, 200);
+        assert.strictEqual((sqlite.prepare(
+          'SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?'
+        ).get(`mp_${mismatchId}`) as { count: number }).count, 0);
+
+        const pendingId = 'PENDING123';
+        fakePayments.set(pendingId, makePayment(pendingId, 'pending'));
+        const pendingWebhook = await sendWebhook(pendingId);
+        assert.strictEqual(pendingWebhook.status, 200);
+        assert.strictEqual((sqlite.prepare(
+          'SELECT COUNT(*) AS count FROM payments WHERE provider_payment_id = ?'
+        ).get(`mp_${pendingId}`) as { count: number }).count, 0);
+        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterWebhook);
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 1);
+
+        const confirmPaymentId = 'CONFIRM123';
+        fakePayments.set(confirmPaymentId, makePayment(confirmPaymentId));
+        const beforeConfirm = getSubscriptionState(owner.user.id);
+        const missingConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: 'missing-payment',
+        }, owner.token);
+        assert.strictEqual(missingConfirmation.status, 404);
+        const paymentNotFound = { error: 'No se encontró el pago.' };
+        assert.deepStrictEqual(await missingConfirmation.json(), paymentNotFound);
+
+        const unrelatedPaymentId = 'UNRELATED123';
+        fakePayments.set(unrelatedPaymentId, {
+          ...makePayment(unrelatedPaymentId),
+          external_reference: 'unrelated-payment',
+        });
+        const unrelatedConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: unrelatedPaymentId,
+        }, owner.token);
+        assert.strictEqual(unrelatedConfirmation.status, 404);
+        assert.deepStrictEqual(await unrelatedConfirmation.json(), paymentNotFound);
+
+        const invalidAmountId = 'INVALIDAMOUNT123';
+        fakePayments.set(invalidAmountId, makePayment(invalidAmountId, 'approved', 1000));
+        const invalidAmountConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: invalidAmountId,
+        }, owner.token);
+        assert.strictEqual(invalidAmountConfirmation.status, 404);
+        assert.deepStrictEqual(await invalidAmountConfirmation.json(), paymentNotFound);
+
+        const forbiddenConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: confirmPaymentId,
+        }, other.token);
+        assert.strictEqual(forbiddenConfirmation.status, 404);
+        assert.deepStrictEqual(await forbiddenConfirmation.json(), paymentNotFound);
+        assert.deepStrictEqual(getSubscriptionState(owner.user.id), beforeConfirm);
+
+        const confirmed = await sendJson('/api/payments/confirm', {
+          payment_id: confirmPaymentId,
+        }, owner.token);
+        assert.strictEqual(confirmed.status, 200);
+        const confirmedBody = await confirmed.json() as any;
+        assert.strictEqual(confirmedBody.subscription.status, 'active');
+        const afterConfirm = getSubscriptionState(owner.user.id);
+        assert.ok(new Date(afterConfirm.expiration_date) > new Date(beforeConfirm.expiration_date));
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 2);
+
+        const simulatedCollision = await sendJson('/api/subscriptions/activate-license', {
+          plan_id: 'pro_quarterly',
+          payment_ref: 'mp_123',
+        }, other.token);
+        assert.strictEqual(simulatedCollision.status, 200);
+        const simulatedPayment = sqlite.prepare(
+          'SELECT user_id, payment_method FROM payments WHERE provider_payment_id = ?'
+        ).get('sim_mp_123') as { user_id: string; payment_method: string };
+        assert.strictEqual(simulatedPayment.user_id, other.user.id);
+        assert.strictEqual(simulatedPayment.payment_method, 'simulated_online');
+
+        fakePayments.set('123', makePayment('123'));
+        const realPaymentAfterSimulation = await sendJson('/api/payments/confirm', {
+          payment_id: '123',
+        }, owner.token);
+        assert.strictEqual(realPaymentAfterSimulation.status, 200);
+        const realPayment = sqlite.prepare(
+          'SELECT user_id FROM payments WHERE provider_payment_id = ?'
+        ).get('mp_123') as { user_id: string };
+        assert.strictEqual(realPayment.user_id, owner.user.id);
+        const afterCollisionPayment = getSubscriptionState(owner.user.id);
+        assert.ok(new Date(afterCollisionPayment.expiration_date) > new Date(afterConfirm.expiration_date));
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 3);
+
+        const repeatedConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: confirmPaymentId,
+        }, owner.token);
+        assert.strictEqual(repeatedConfirmation.status, 200);
+        assert.strictEqual((await repeatedConfirmation.json() as any).message, 'Este pago ya fue procesado.');
+        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterCollisionPayment);
+        assert.strictEqual(getUserPaymentCount(owner.user.id), originalPaymentCount + 3);
+
+        const pendingConfirmationId = 'CONFIRMPENDING123';
+        fakePayments.set(pendingConfirmationId, makePayment(pendingConfirmationId, 'pending'));
+        const pendingConfirmation = await sendJson('/api/payments/confirm', {
+          payment_id: pendingConfirmationId,
+        }, owner.token);
+        assert.strictEqual(pendingConfirmation.status, 409);
+        assert.deepStrictEqual(await pendingConfirmation.json(), { status: 'pending' });
+        assert.deepStrictEqual(getSubscriptionState(owner.user.id), afterCollisionPayment);
+
+        const originalWebhookSecret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
+        const originalNodeEnv = process.env.NODE_ENV;
+        try {
+          delete process.env.MERCADO_PAGO_WEBHOOK_SECRET;
+          process.env.NODE_ENV = 'production';
+          const missingWebhookSecret = await sendJson('/api/payments/webhook', {
+            type: 'payment',
+            data: { id: pendingConfirmationId },
+          });
+          assert.strictEqual(missingWebhookSecret.status, 503);
+          assert.deepStrictEqual(await missingWebhookSecret.json(), {
+            error: 'El webhook de Mercado Pago no está configurado.',
+          });
+
+          delete process.env.MERCADO_PAGO_ACCESS_TOKEN;
+          const missingWebhookConfiguration = await sendJson('/api/payments/webhook', {
+            type: 'payment',
+            data: { id: pendingConfirmationId },
+          });
+          assert.strictEqual(missingWebhookConfiguration.status, 200);
+          assert.deepStrictEqual(await missingWebhookConfiguration.json(), { received: true, ignored: true });
+        } finally {
+          restoreEnvironmentValue('MERCADO_PAGO_WEBHOOK_SECRET', originalWebhookSecret);
+          restoreEnvironmentValue('NODE_ENV', originalNodeEnv);
+        }
+      } finally {
+        restoreEnvironmentValue('MERCADO_PAGO_ACCESS_TOKEN', originalEnvironment.accessToken);
+        restoreEnvironmentValue('MERCADO_PAGO_WEBHOOK_SECRET', originalEnvironment.webhookSecret);
+        restoreEnvironmentValue('MERCADO_PAGO_API_BASE', originalEnvironment.apiBase);
+        restoreEnvironmentValue('APP_URL', originalEnvironment.appUrl);
+        restoreEnvironmentValue('NODE_ENV', originalEnvironment.nodeEnv);
+        try {
+          for (const userId of registeredUserIds) {
+            sqlite.prepare('DELETE FROM payments WHERE user_id = ?').run(userId);
+            sqlite.prepare('DELETE FROM subscriptions WHERE user_id = ?').run(userId);
+            sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
+          }
+        } finally {
+          await new Promise<void>((resolve, reject) => {
+            fakeMpServer.close(error => error ? reject(error) : resolve());
+          });
+        }
+      }
+    });
+
+    await integrationTest('Mercado Pago no configurado: bloquea preferencias simuladas en producción', async () => {
+      const registeredResponse = await sendJson('/api/auth/register', {
+        email: `mercadopago-gate-${generateId('user')}@example.test`,
+        password: 'MercadoPagoTest123!',
+        full_name: 'Cuenta de prueba de pagos no configurados',
+        phone: '+56912345062',
+        role: 'CUSTOMER',
+      });
+      assert.strictEqual(registeredResponse.status, 201);
+      const registered = await registeredResponse.json() as { token: string; user: { id: string } };
+      const userId = registered.user.id;
+      const originalNodeEnv = process.env.NODE_ENV;
+      const originalAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
+      const originalWebhookSecret = process.env.MERCADO_PAGO_WEBHOOK_SECRET;
+      const originalAllowSimulatedPayments = process.env.ALLOW_SIMULATED_PAYMENTS;
+      try {
+        process.env.NODE_ENV = 'production';
+        process.env.MERCADO_PAGO_ACCESS_TOKEN = 'test-token-without-webhook-secret';
+        delete process.env.MERCADO_PAGO_WEBHOOK_SECRET;
+        delete process.env.ALLOW_SIMULATED_PAYMENTS;
+        const response = await sendJson('/api/payments/create-preference', {
+          plan_id: 'pro_quarterly',
+        }, registered.token);
+        assert.strictEqual(response.status, 503);
+        assert.deepStrictEqual(await response.json(), {
+          error: 'Los pagos en línea aún no están configurados. Contáctanos para renovar tu licencia.',
+          code: 'PAYMENTS_NOT_CONFIGURED',
+        });
+        const confirmWithoutConfiguration = await sendJson('/api/payments/confirm', {
+          payment_id: '123',
+        }, registered.token);
+        assert.strictEqual(confirmWithoutConfiguration.status, 503);
+        assert.deepStrictEqual(await confirmWithoutConfiguration.json(), {
+          error: 'Los pagos en línea aún no están configurados. Contáctanos para renovar tu licencia.',
+          code: 'PAYMENTS_NOT_CONFIGURED',
+        });
+        const webhookWithoutSecret = await sendJson('/api/payments/webhook', {
+          type: 'payment',
+          data: { id: 'not-configured' },
+        });
+        assert.strictEqual(webhookWithoutSecret.status, 503);
+        assert.deepStrictEqual(await webhookWithoutSecret.json(), {
+          error: 'El webhook de Mercado Pago no está configurado.',
+        });
+      } finally {
+        if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = originalNodeEnv;
+        if (originalAccessToken === undefined) delete process.env.MERCADO_PAGO_ACCESS_TOKEN;
+        else process.env.MERCADO_PAGO_ACCESS_TOKEN = originalAccessToken;
+        if (originalWebhookSecret === undefined) delete process.env.MERCADO_PAGO_WEBHOOK_SECRET;
+        else process.env.MERCADO_PAGO_WEBHOOK_SECRET = originalWebhookSecret;
+        if (originalAllowSimulatedPayments === undefined) delete process.env.ALLOW_SIMULATED_PAYMENTS;
+        else process.env.ALLOW_SIMULATED_PAYMENTS = originalAllowSimulatedPayments;
+        sqlite.prepare('DELETE FROM payments WHERE user_id = ?').run(userId);
+        sqlite.prepare('DELETE FROM subscriptions WHERE user_id = ?').run(userId);
         sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);
       }
     });
@@ -772,6 +1207,7 @@ async function runIntegrationTests() {
       const registered = await registeredResponse.json() as { token: string; user: { id: string } };
       const userId = registered.user.id;
       const paymentRef = `SUBSCRIPTION_TEST_${generateId('pay')}`;
+      const providerPaymentId = `sim_${paymentRef}`;
 
       try {
         const existingClientResponse = await sendJson('/api/clients', {
@@ -1040,7 +1476,7 @@ async function runIntegrationTests() {
           }
         }
       } finally {
-        sqlite.prepare('DELETE FROM payments WHERE provider_payment_id = ?').run(paymentRef);
+        sqlite.prepare('DELETE FROM payments WHERE provider_payment_id = ?').run(providerPaymentId);
         const business = sqlite.prepare('SELECT id FROM businesses WHERE owner_id = ?').get(userId) as { id: string } | undefined;
         if (business) sqlite.prepare('DELETE FROM businesses WHERE id = ?').run(business.id);
         sqlite.prepare('DELETE FROM users WHERE id = ?').run(userId);

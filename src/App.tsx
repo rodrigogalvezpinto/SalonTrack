@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
@@ -34,8 +34,13 @@ import { apiRequest } from './utils/api';
 import { showPushNotification, playNotificationChime } from './utils/notifications';
 
 function MainApp() {
-  const { user, profile, isCustomer, isPlatformAdmin, isBusinessOwner, isStaff, business, isLoading } = useAuth();
+  const { user, profile, isCustomer, isPlatformAdmin, isBusinessOwner, isStaff, business, isLoading, reloadSession } = useAuth();
   const resetToken = new URLSearchParams(window.location.search).get('reset_token');
+  const paymentReturnProcessed = useRef(false);
+  const [paymentNotice, setPaymentNotice] = useState<{
+    type: 'success' | 'info' | 'error';
+    message: string;
+  } | null>(null);
 
   // Navigation state
   const [currentView, setCurrentView] = useState<string>('dashboard');
@@ -64,6 +69,65 @@ function MainApp() {
   const [whatsAppModalOpen, setWhatsAppModalOpen] = useState(false);
   const [whatsAppTargetClient, setWhatsAppTargetClient] = useState<Client | null>(null);
   const [whatsAppTargetService, setWhatsAppTargetService] = useState<Service | null>(null);
+
+  useEffect(() => {
+    if (isLoading || paymentReturnProcessed.current) return;
+
+    const url = new URL(window.location.href);
+    const paymentStatus = url.searchParams.get('payment');
+    if (!paymentStatus || !['success', 'failure', 'pending'].includes(paymentStatus)) return;
+
+    const stripPaymentParams = () => {
+      for (const key of ['payment', 'payment_id', 'collection_id', 'collection_status', 'external_reference', 'merchant_order_id', 'preference_id']) {
+        url.searchParams.delete(key);
+      }
+      window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+    };
+
+    if (paymentStatus === 'failure' || paymentStatus === 'pending') {
+      paymentReturnProcessed.current = true;
+      setPaymentNotice({
+        type: 'info',
+        message: paymentStatus === 'failure'
+          ? 'El pago no se completó. Puedes intentarlo nuevamente desde Configuración.'
+          : 'Tu pago está pendiente de confirmación. Actualizaremos tu licencia cuando Mercado Pago lo confirme.',
+      });
+      stripPaymentParams();
+      return;
+    }
+
+    const paymentId = url.searchParams.get('payment_id') || url.searchParams.get('collection_id');
+    if (!paymentId) {
+      paymentReturnProcessed.current = true;
+      setPaymentNotice({ type: 'error', message: 'No se recibió el identificador del pago para confirmarlo.' });
+      stripPaymentParams();
+      return;
+    }
+    if (!user) return;
+
+    paymentReturnProcessed.current = true;
+    void (async () => {
+      try {
+        const result = await apiRequest<{ message: string }>('/api/payments/confirm', {
+          method: 'POST',
+          body: JSON.stringify({ payment_id: paymentId }),
+        });
+        setPaymentNotice({ type: 'success', message: result.message });
+        await reloadSession();
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'No se pudo confirmar el pago.';
+        const paymentPending = errorMessage.startsWith('Error 409');
+        setPaymentNotice({
+          type: paymentPending ? 'info' : 'error',
+          message: paymentPending
+            ? 'El pago aún no está aprobado. Mercado Pago lo confirmará automáticamente.'
+            : errorMessage,
+        });
+      } finally {
+        stripPaymentParams();
+      }
+    })();
+  }, [isLoading, user?.id, reloadSession]);
 
   // Set default view depending on user role once authenticated
   useEffect(() => {
@@ -116,10 +180,34 @@ function MainApp() {
     );
   }
 
+  const paymentNoticeBanner = paymentNotice && (
+    <div
+      role={paymentNotice.type === 'error' ? 'alert' : 'status'}
+      className={`mx-auto mt-3 w-full max-w-7xl px-4 sm:px-6 ${
+        paymentNotice.type === 'success'
+          ? 'text-emerald-800'
+          : paymentNotice.type === 'error'
+            ? 'text-rose-800'
+            : 'text-amber-800'
+      }`}
+    >
+      <div className={`rounded-xl border px-3 py-2 text-sm ${
+        paymentNotice.type === 'success'
+          ? 'border-emerald-200 bg-emerald-50'
+          : paymentNotice.type === 'error'
+            ? 'border-rose-200 bg-rose-50'
+            : 'border-amber-200 bg-amber-50'
+      }`}>
+        {paymentNotice.message}
+      </div>
+    </div>
+  );
+
   // If not logged in, show conversion-focused Landing Page
   if (!user) {
     return (
       <>
+        {paymentNoticeBanner}
         <LandingPage
           onOpenAuth={(mode) => {
             setAuthModalMode(mode);
@@ -178,6 +266,7 @@ function MainApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col antialiased">
+      {paymentNoticeBanner}
       {/* Top Header */}
       <Header
         onNewClientClick={() => setNewClientModalOpen(true)}
