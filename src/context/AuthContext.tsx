@@ -111,6 +111,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     fetchCurrentUser();
   }, []);
 
+  useEffect(() => {
+    const handleStorageChange = (event: StorageEvent) => {
+      if (event.key === 'salontrack_active_business') window.location.reload();
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
+
   const login = async (email: string, password: string) => {
     const res = await apiRequest<{
       token: string;
@@ -196,8 +204,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const switchBusiness = async (id: string) => {
     if (!memberships.some(membership => membership.business_id === id)) return;
     setStoredActiveBusinessId(id);
-    setActiveBusinessId(id);
-    await reloadSession();
+    window.location.reload();
   };
 
   const updateProfile = async (data: Partial<Profile>) => {
