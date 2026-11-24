@@ -5085,6 +5085,8 @@ async function runIntegrationTests() {
         id: string; staff_id: string; day_of_week: number; start_time: string; end_time: string;
         break_start: string | null; break_end: string | null; is_active: number; created_at: string;
       } | undefined;
+      const previousCamilaActive = sqlite.prepare('SELECT is_active FROM staff WHERE id = ?')
+        .get('stf_camila') as { is_active: number };
       const now = new Date().toISOString();
 
       try {
@@ -5108,6 +5110,43 @@ async function runIntegrationTests() {
             VALUES (?, ?, ?, 'STAFF', 1, ?)
           `).run(membershipId, businessBId, professional.user.id, now);
         }
+
+        const inactiveStaffBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T08:00`,
+          end_datetime: `${bookingDate}T09:00`,
+        }, professional.token);
+        assert.strictEqual(inactiveStaffBlockResponse.status, 201);
+        const inactiveStaffBlock = await inactiveStaffBlockResponse.json() as { block_id: string };
+        availabilityBlockIds.push(inactiveStaffBlock.block_id);
+        sqlite.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run('stf_camila');
+        assert.strictEqual((await requestJson(
+          '/api/business/staff/stf_camila/availability',
+          'GET',
+          professional.token,
+        )).status, 403);
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks?from=${bookingDate}`,
+          'GET',
+          professional.token,
+        )).status, 403);
+        assert.strictEqual((await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T09:00`,
+          end_datetime: `${bookingDate}T10:00`,
+        }, professional.token)).status, 403);
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks/${inactiveStaffBlock.block_id}`,
+          'DELETE',
+          professional.token,
+        )).status, 403);
+        sqlite.prepare('UPDATE staff SET is_active = ? WHERE id = ?')
+          .run(previousCamilaActive.is_active, 'stf_camila');
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks/${inactiveStaffBlock.block_id}`,
+          'DELETE',
+          owner.token,
+        )).status, 200);
 
         const scheduleResponse = await requestJson(
           '/api/business/staff/stf_camila/availability',
@@ -5434,6 +5473,8 @@ async function runIntegrationTests() {
         const deleteLocalAsOwner = await requestJson(`/api/business/blocks/${localBlockId}`, 'DELETE', owner.token);
         assert.strictEqual(deleteLocalAsOwner.status, 200, `Borrar bloqueo de negocio: ${await deleteLocalAsOwner.clone().text()}`);
       } finally {
+        sqlite.prepare('UPDATE staff SET is_active = ? WHERE id = ?')
+          .run(previousCamilaActive.is_active, 'stf_camila');
         for (const id of availabilityBlockIds) sqlite.prepare('DELETE FROM availability_blocks WHERE id = ?').run(id);
         sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(bookingId);
         sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);

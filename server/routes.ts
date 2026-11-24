@@ -2090,12 +2090,24 @@ function countConflictingBookings(
 
 router.get('/business/staff/:id/availability', requireAuth, (req: AuthRequest, res: Response) => {
   const db = getSqliteDb();
-  const staff = db.prepare('SELECT id, business_id, user_id FROM staff WHERE id = ?')
-    .get(req.params.id) as { id: string; business_id: string; user_id: string | null } | undefined;
+  const staff = db.prepare('SELECT id, business_id, user_id, is_active FROM staff WHERE id = ?')
+    .get(req.params.id) as {
+      id: string;
+      business_id: string;
+      user_id: string | null;
+      is_active: number;
+    } | undefined;
   if (!staff) return res.status(404).json({ error: 'Profesional no encontrado.' });
 
-  if (staff.user_id !== req.userId
-    && authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN', 'RECEPTION']) === null) return;
+  if (staff.user_id === req.userId) {
+    const membership = db.prepare(`
+      SELECT is_active FROM business_members
+      WHERE business_id = ? AND user_id = ?
+    `).get(staff.business_id, req.userId) as { is_active: number } | undefined;
+    if (staff.is_active !== 1 || membership?.is_active !== 1) {
+      return res.status(403).json({ error: 'No tienes permisos para ver esta disponibilidad.' });
+    }
+  } else if (authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN', 'RECEPTION']) === null) return;
 
   return res.json({ availability: listStaffAvailability(db, staff.id) });
 });
@@ -2223,6 +2235,9 @@ router.get('/business/blocks', requireAuth, (req: AuthRequest, res: Response) =>
   const canManageAll = member.role === 'OWNER' || member.role === 'ADMIN';
   const ownStaffId = req.userId ? getBusinessStaffId(db, businessId, req.userId) : null;
   const canManageOwn = member.role === 'STAFF' || member.role === 'PROFESSIONAL';
+  if (canManageOwn && !ownStaffId) {
+    return res.status(403).json({ error: 'No tienes permisos para ver estas ausencias.' });
+  }
   const staffFilter = canManageOwn ? 'AND (block.staff_id IS NULL OR block.staff_id = ?)' : '';
   const blocks = db.prepare(`
     SELECT block.id, block.staff_id, staff.name AS staff_name,
