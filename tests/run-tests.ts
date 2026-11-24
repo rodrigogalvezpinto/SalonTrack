@@ -5060,6 +5060,7 @@ async function runIntegrationTests() {
       const membershipId = generateId('schedule_member');
       const bookingId = generateId('schedule_booking');
       const crossBusinessBookingId = generateId('schedule_booking_other');
+      const businessBufferBookingId = generateId('schedule_booking_buffer');
       const availabilityBlockIds: string[] = [];
       const sqlite = getSqliteDb();
       const previousBusinessBMembership = sqlite.prepare(`
@@ -5087,6 +5088,11 @@ async function runIntegrationTests() {
       } | undefined;
       const previousCamilaActive = sqlite.prepare('SELECT is_active FROM staff WHERE id = ?')
         .get('stf_camila') as { is_active: number };
+      const previousBusinessBuffers = sqlite.prepare(`
+        SELECT id, buffer_minutes FROM businesses WHERE id IN (?, ?)
+      `).all(businessAId, businessBId) as Array<{ id: string; buffer_minutes: number | null }>;
+      const previousBarberCleanMinutes = sqlite.prepare('SELECT clean_minutes FROM services WHERE id = ?')
+        .get('srv_barb_corte') as { clean_minutes: number | null };
       const now = new Date().toISOString();
 
       try {
@@ -5201,6 +5207,53 @@ async function runIntegrationTests() {
           const restored = await saveSchedule([previousAvailability], owner.token);
           assert.strictEqual(restored.status, 200, `Restaurar disponibilidad: ${await restored.clone().text()}`);
         }
+
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = ? WHERE id = ?').run(0, businessAId);
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = ? WHERE id = ?').run(30, businessBId);
+        sqlite.prepare('UPDATE services SET clean_minutes = 0 WHERE id = ?').run('srv_barb_corte');
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'srv_barb_corte', ?, ?, '10:00', '11:00',
+            60, 25000, 'salon', 'CONFIRMED', 'presential', 'pending', 'Reserva con buffer propio',
+            '+56912345004', ?, ?)
+        `).run(
+          businessBufferBookingId,
+          `SCHEDULE-${businessBufferBookingId}`,
+          businessBId,
+          staffBId,
+          customer.user.id,
+          bookingDate,
+          now,
+          now,
+        );
+        const slotsWithBusinessBuffer = getAvailableSlots({
+          businessId: businessAId,
+          serviceId: 'srv_val_corte',
+          dateStr: bookingDate,
+          staffId: 'stf_camila',
+        });
+        assert.ok(!slotsWithBusinessBuffer.some(slot => slot.time === '11:15'));
+        assert.ok(slotsWithBusinessBuffer.some(slot => slot.time === '11:30'));
+        assert.strictEqual(isSlotAvailable({
+          businessId: businessAId,
+          staffId: 'stf_camila',
+          serviceId: 'srv_val_corte',
+          dateStr: bookingDate,
+          startTime: '11:15',
+          durationMinutes: 45,
+        }), false);
+        assert.strictEqual(isSlotAvailable({
+          businessId: businessAId,
+          staffId: 'stf_camila',
+          serviceId: 'srv_val_corte',
+          dateStr: bookingDate,
+          startTime: '11:30',
+          durationMinutes: 45,
+        }), true);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(businessBufferBookingId);
 
         const crossBusinessSlots = getAvailableSlots({
           businessId: businessBId,
@@ -5475,11 +5528,18 @@ async function runIntegrationTests() {
       } finally {
         sqlite.prepare('UPDATE staff SET is_active = ? WHERE id = ?')
           .run(previousCamilaActive.is_active, 'stf_camila');
+        for (const business of previousBusinessBuffers) {
+          sqlite.prepare('UPDATE businesses SET buffer_minutes = ? WHERE id = ?')
+            .run(business.buffer_minutes, business.id);
+        }
+        sqlite.prepare('UPDATE services SET clean_minutes = ? WHERE id = ?')
+          .run(previousBarberCleanMinutes.clean_minutes, 'srv_barb_corte');
         for (const id of availabilityBlockIds) sqlite.prepare('DELETE FROM availability_blocks WHERE id = ?').run(id);
         sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(bookingId);
         sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
         sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(crossBusinessBookingId);
         sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(crossBusinessBookingId);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(businessBufferBookingId);
         if (previousAvailability) {
           sqlite.prepare(`
             UPDATE staff_availability SET

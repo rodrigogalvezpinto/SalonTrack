@@ -171,9 +171,11 @@ export function getAvailableSlots(params: {
 
     // Existing active bookings for this person on this date
     const existingBookings = db.prepare(`
-      SELECT b.id, b.start_time, b.end_time, sv.clean_minutes
+      SELECT b.id, b.start_time, b.end_time, sv.clean_minutes,
+             COALESCE(bz.buffer_minutes, 5) AS buffer_minutes
       FROM bookings b
       LEFT JOIN services sv ON sv.id = b.service_id
+      JOIN businesses bz ON bz.id = b.business_id
       WHERE b.staff_id IN (${staffPlaceholders}) AND b.booking_date = ?
       AND b.status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
       ${excludeBookingId ? 'AND b.id != ?' : ''}
@@ -181,11 +183,17 @@ export function getAvailableSlots(params: {
       ...personStaffIds,
       dateStr,
       ...(excludeBookingId ? [excludeBookingId] : [])
-    ) as Array<{ id: string; start_time: string; end_time: string; clean_minutes: number | null }>;
+    ) as Array<{
+      id: string;
+      start_time: string;
+      end_time: string;
+      clean_minutes: number | null;
+      buffer_minutes: number;
+    }>;
 
     const bookedIntervals = existingBookings.map(b => ({
       start: parseTimeToMinutes(b.start_time),
-      end: parseTimeToMinutes(b.end_time) + (b.clean_minutes ?? 5) + bufferMinutes,
+      end: parseTimeToMinutes(b.end_time) + (b.clean_minutes ?? 5) + b.buffer_minutes,
     }));
 
     const blockIntervals = getBlockIntervalsForDate(db, businessId, personStaffIds, dateStr);
@@ -281,9 +289,11 @@ export function isSlotAvailable(params: {
   const staffPlaceholders = personStaffIds.map(() => '?').join(', ');
 
   const collisions = db.prepare(`
-    SELECT b.id, b.start_time, b.end_time, sv.clean_minutes
+    SELECT b.id, b.start_time, b.end_time, sv.clean_minutes,
+           COALESCE(bz.buffer_minutes, 5) AS buffer_minutes
     FROM bookings b
     LEFT JOIN services sv ON sv.id = b.service_id
+    JOIN businesses bz ON bz.id = b.business_id
     WHERE b.staff_id IN (${staffPlaceholders}) AND b.booking_date = ?
     AND b.status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
     ${excludeBookingId ? 'AND b.id != ?' : ''}
@@ -291,11 +301,17 @@ export function isSlotAvailable(params: {
     ...personStaffIds,
     dateStr,
     ...(excludeBookingId ? [excludeBookingId] : [])
-  ) as Array<{ id: string; start_time: string; end_time: string; clean_minutes: number | null }>;
+  ) as Array<{
+    id: string;
+    start_time: string;
+    end_time: string;
+    clean_minutes: number | null;
+    buffer_minutes: number;
+  }>;
 
   for (const c of collisions) {
     const cStart = parseTimeToMinutes(c.start_time);
-    const cEnd = parseTimeToMinutes(c.end_time) + (c.clean_minutes ?? 5) + bufferMinutes;
+    const cEnd = parseTimeToMinutes(c.end_time) + (c.clean_minutes ?? 5) + c.buffer_minutes;
     if (!(endMin <= cStart || startMin >= cEnd)) {
       return false; // Collision detected!
     }
