@@ -35,7 +35,7 @@ import {
   updateProfileDetails,
   updateProfileTemplate,
 } from './crmRepository.js';
-import { getAvailableSlots, isSlotAvailable } from './availability.js';
+import { getAvailableSlots, getPersonStaffIds, isSlotAvailable } from './availability.js';
 import { emailProvider } from './adapters/email.js';
 import { localGeolocationProvider, localWhatsAppProvider, localPaymentProvider } from './adapters/index.js';
 import {
@@ -2007,6 +2007,401 @@ router.get('/business/staff', requireAuth, (req: AuthRequest, res: Response) => 
     ORDER BY s.display_order ASC
   `).all(businessId);
   return res.json({ staff });
+});
+
+function listStaffAvailability(db: ReturnType<typeof getSqliteDb>, staffId: string) {
+  const rows = db.prepare(`
+    SELECT day_of_week, is_active, start_time, end_time, break_start, break_end
+    FROM staff_availability
+    WHERE staff_id = ?
+  `).all(staffId) as Array<{
+    day_of_week: number;
+    is_active: number;
+    start_time: string;
+    end_time: string;
+    break_start: string | null;
+    break_end: string | null;
+  }>;
+  const byDay = new Map(rows.map(row => [row.day_of_week, row]));
+  return Array.from({ length: 7 }, (_, day) => {
+    const row = byDay.get(day);
+    return row
+      ? { ...row, is_active: Boolean(row.is_active) }
+      : {
+        day_of_week: day,
+        is_active: false,
+        start_time: '09:00',
+        end_time: '19:00',
+        break_start: null,
+        break_end: null,
+      };
+  });
+}
+
+function getBusinessStaffId(
+  db: ReturnType<typeof getSqliteDb>,
+  businessId: string,
+  userId: string,
+): string | null {
+  const staff = db.prepare(`
+    SELECT id FROM staff
+    WHERE business_id = ? AND user_id = ? AND is_active = 1
+    ORDER BY display_order, id
+    LIMIT 1
+  `).get(businessId, userId) as { id: string } | undefined;
+  return staff?.id || null;
+}
+
+function isAvailabilityDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).toISOString().slice(0, 10) === value;
+}
+
+function isAvailabilityDateTime(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)
+    && isAvailabilityDate(value.slice(0, 10));
+}
+
+function countConflictingBookings(
+  db: ReturnType<typeof getSqliteDb>,
+  businessId: string,
+  staffIds: string[] | null,
+  startDatetime: string,
+  endDatetime: string,
+  includeOtherBusinesses = false,
+): number {
+  const staffFilter = staffIds
+    ? `${includeOtherBusinesses ? '' : 'b.business_id = ? AND '}b.staff_id IN (${staffIds.map(() => '?').join(', ')})`
+    : 'b.business_id = ?';
+  const params = staffIds
+    ? [...(includeOtherBusinesses ? [] : [businessId]), ...staffIds, endDatetime, startDatetime]
+    : [businessId, endDatetime, startDatetime];
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM bookings b
+    WHERE ${staffFilter}
+      AND b.status NOT IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+      AND (b.booking_date || 'T' || b.start_time || ':00') < ?
+      AND (b.booking_date || 'T' || b.end_time || ':00') > ?
+  `).get(...params) as { count: number };
+  return row.count;
+}
+
+router.get('/business/staff/:id/availability', requireAuth, (req: AuthRequest, res: Response) => {
+  const db = getSqliteDb();
+  const staff = db.prepare('SELECT id, business_id, user_id, is_active FROM staff WHERE id = ?')
+    .get(req.params.id) as {
+      id: string;
+      business_id: string;
+      user_id: string | null;
+      is_active: number;
+    } | undefined;
+  if (!staff) return res.status(404).json({ error: 'Profesional no encontrado.' });
+
+  if (staff.user_id === req.userId) {
+    const membership = db.prepare(`
+      SELECT is_active FROM business_members
+      WHERE business_id = ? AND user_id = ?
+    `).get(staff.business_id, req.userId) as { is_active: number } | undefined;
+    if (staff.is_active !== 1 || membership?.is_active !== 1) {
+      return res.status(403).json({ error: 'No tienes permisos para ver esta disponibilidad.' });
+    }
+  } else if (authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN', 'RECEPTION']) === null) return;
+
+  return res.json({ availability: listStaffAvailability(db, staff.id) });
+});
+
+router.put('/business/staff/:id/availability', requireAuth, (req: AuthRequest, res: Response) => {
+  const db = getSqliteDb();
+  const staff = db.prepare('SELECT id, business_id FROM staff WHERE id = ?')
+    .get(req.params.id) as { id: string; business_id: string } | undefined;
+  if (!staff) return res.status(404).json({ error: 'Profesional no encontrado.' });
+  if (authorizeBusiness(req, res, staff.business_id, ['OWNER', 'ADMIN']) === null) return;
+  if (businessSubscriptionBlocked(res, staff.business_id)) return;
+
+  const input = req.body?.availability;
+  if (!Array.isArray(input) || input.length === 0) {
+    return res.status(400).json({ error: 'Debes enviar al menos un horario semanal válido.' });
+  }
+  const days = new Set<number>();
+  const rows: Array<{
+    day_of_week: number;
+    is_active: number;
+    start_time: string;
+    end_time: string;
+    break_start: string | null;
+    break_end: string | null;
+  }> = [];
+
+  for (const item of input) {
+    if (!Number.isInteger(item?.day_of_week) || item.day_of_week < 0 || item.day_of_week > 6
+      || days.has(item.day_of_week)) {
+      return res.status(400).json({ error: 'Cada día debe estar entre 0 y 6 y no repetirse.' });
+    }
+    days.add(item.day_of_week);
+    if (![true, false, 0, 1].includes(item.is_active)
+      || typeof item.start_time !== 'string'
+      || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(item.start_time)
+      || typeof item.end_time !== 'string'
+      || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(item.end_time)
+      || item.start_time >= item.end_time) {
+      return res.status(400).json({ error: 'Los horarios deben usar HH:MM y la hora de inicio debe ser anterior al término.' });
+    }
+
+    const breakStartEmpty = item.break_start === undefined || item.break_start === null || item.break_start === '';
+    const breakEndEmpty = item.break_end === undefined || item.break_end === null || item.break_end === '';
+    if (breakStartEmpty !== breakEndEmpty) {
+      return res.status(400).json({ error: 'Debes indicar el inicio y el término del descanso.' });
+    }
+    let breakStart: string | null = null;
+    let breakEnd: string | null = null;
+    if (!breakStartEmpty) {
+      if (typeof item.break_start !== 'string'
+        || typeof item.break_end !== 'string'
+        || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(item.break_start)
+        || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(item.break_end)
+        || item.break_start >= item.break_end
+        || item.break_start < item.start_time
+        || item.break_end > item.end_time) {
+        return res.status(400).json({ error: 'El descanso debe estar dentro del horario de trabajo.' });
+      }
+      breakStart = item.break_start;
+      breakEnd = item.break_end;
+    }
+    rows.push({
+      day_of_week: item.day_of_week,
+      is_active: item.is_active ? 1 : 0,
+      start_time: item.start_time,
+      end_time: item.end_time,
+      break_start: breakStart,
+      break_end: breakEnd,
+    });
+  }
+
+  const now = new Date().toISOString();
+  withTransaction(transactionDb => {
+    for (const row of rows) {
+      transactionDb.prepare(`
+        INSERT INTO staff_availability (
+          id, staff_id, day_of_week, start_time, end_time, break_start, break_end, is_active, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(staff_id, day_of_week) DO UPDATE SET
+          start_time = excluded.start_time,
+          end_time = excluded.end_time,
+          break_start = excluded.break_start,
+          break_end = excluded.break_end,
+          is_active = excluded.is_active
+      `).run(
+        generateId('sa'),
+        staff.id,
+        row.day_of_week,
+        row.start_time,
+        row.end_time,
+        row.break_start,
+        row.break_end,
+        row.is_active,
+        now,
+      );
+    }
+    logAudit(req.userId || null, staff.business_id, 'STAFF_AVAILABILITY_UPDATED', 'staff', staff.id, {
+      days: rows.map(row => row.day_of_week),
+    });
+  });
+
+  return res.json({ availability: listStaffAvailability(db, staff.id) });
+});
+
+router.get('/business/blocks', requireAuth, (req: AuthRequest, res: Response) => {
+  const db = getSqliteDb();
+  const businessId = resolveActiveBusinessId(req, res, BUSINESS_MEMBER_ROLES);
+  if (!businessId) {
+    if (!res.headersSent) return res.status(404).json({ error: 'Negocio no encontrado.' });
+    return;
+  }
+  const member = db.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1')
+    .get(businessId, req.userId || '') as { role: string } | undefined;
+  if (!member) return res.status(404).json({ error: 'Negocio no encontrado.' });
+
+  const now = new Date();
+  const santiagoNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Santiago' }));
+  const today = getSantiagoDateString(now);
+  const from = req.query.from === undefined ? today : req.query.from;
+  const to = req.query.to;
+  if (!isAvailabilityDate(from)
+    || (to !== undefined && !isAvailabilityDate(to))
+    || (to !== undefined && from > to)) {
+    return res.status(400).json({ error: 'El rango debe usar fechas válidas y la fecha inicial no puede superar la final.' });
+  }
+  const fromDatetime = req.query.from === undefined
+    ? `${today}T${String(santiagoNow.getHours()).padStart(2, '0')}:${String(santiagoNow.getMinutes()).padStart(2, '0')}:${String(santiagoNow.getSeconds()).padStart(2, '0')}`
+    : `${from}T00:00:00`;
+  const toFilter = to === undefined ? '' : 'AND block.start_datetime < ?';
+
+  const canManageAll = member.role === 'OWNER' || member.role === 'ADMIN';
+  const ownStaffId = req.userId ? getBusinessStaffId(db, businessId, req.userId) : null;
+  const canManageOwn = member.role === 'STAFF' || member.role === 'PROFESSIONAL';
+  if (canManageOwn && !ownStaffId) {
+    return res.status(403).json({ error: 'No tienes permisos para ver estas ausencias.' });
+  }
+  const staffFilter = canManageOwn ? 'AND (block.staff_id IS NULL OR block.staff_id = ?)' : '';
+  const blocks = db.prepare(`
+    SELECT block.id, block.staff_id, staff.name AS staff_name,
+           block.start_datetime, block.end_datetime, block.reason
+    FROM availability_blocks block
+    LEFT JOIN staff ON staff.id = block.staff_id
+    WHERE block.business_id = ?
+      ${toFilter}
+      AND block.end_datetime > ?
+      ${staffFilter}
+    ORDER BY block.start_datetime
+  `).all(
+    businessId,
+    ...(to === undefined ? [] : [`${to}T23:59:59`]),
+    fromDatetime,
+    ...(canManageOwn ? [ownStaffId || ''] : []),
+  ) as Array<{
+    id: string;
+    staff_id: string | null;
+    staff_name: string | null;
+    start_datetime: string;
+    end_datetime: string;
+    reason: string | null;
+  }>;
+  const staff = canManageAll
+    ? db.prepare(`
+      SELECT id, name FROM staff
+      WHERE business_id = ? AND is_active = 1
+      ORDER BY display_order, name
+    `).all(businessId) as Array<{ id: string; name: string }>
+    : [];
+
+  return res.json({
+    blocks: blocks.map(block => ({
+      ...block,
+      can_delete: canManageAll || (canManageOwn && block.staff_id === ownStaffId),
+    })),
+    can_manage_all: canManageAll,
+    own_staff_id: ownStaffId,
+    staff,
+  });
+});
+
+router.post('/business/blocks', requireAuth, (req: AuthRequest, res: Response) => {
+  const db = getSqliteDb();
+  const businessId = resolveActiveBusinessId(req, res, BUSINESS_MEMBER_ROLES);
+  if (!businessId) {
+    if (!res.headersSent) return res.status(404).json({ error: 'Negocio no encontrado.' });
+    return;
+  }
+  const member = db.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1')
+    .get(businessId, req.userId || '') as { role: string } | undefined;
+  if (!member) return res.status(404).json({ error: 'Negocio no encontrado.' });
+
+  const start = req.body?.start_datetime;
+  const end = req.body?.end_datetime;
+  const rawStaffId = req.body?.staff_id;
+  const reasonValue = req.body?.reason;
+  if (!isAvailabilityDateTime(start) || !isAvailabilityDateTime(end) || start >= end) {
+    return res.status(400).json({ error: 'Indica un inicio y término válidos en formato YYYY-MM-DDTHH:MM.' });
+  }
+  if (Date.parse(`${end}:00Z`) - Date.parse(`${start}:00Z`) > 366 * 24 * 60 * 60 * 1000) {
+    return res.status(400).json({ error: 'El bloqueo no puede superar 366 días.' });
+  }
+  if (reasonValue !== undefined && reasonValue !== null && typeof reasonValue !== 'string') {
+    return res.status(400).json({ error: 'El motivo debe ser texto.' });
+  }
+  const reason = typeof reasonValue === 'string' ? reasonValue.trim() : '';
+  if (reason.length > 200) return res.status(400).json({ error: 'El motivo no puede superar 200 caracteres.' });
+  if (rawStaffId !== undefined && rawStaffId !== null && rawStaffId !== '' && typeof rawStaffId !== 'string') {
+    return res.status(400).json({ error: 'staff_id debe ser un profesional o null.' });
+  }
+
+  const canManageAll = member.role === 'OWNER' || member.role === 'ADMIN';
+  const canManageOwn = member.role === 'STAFF' || member.role === 'PROFESSIONAL';
+  let staffId = typeof rawStaffId === 'string' && rawStaffId ? rawStaffId : null;
+  let affectedStaffIds: string[] | null = null;
+  let includeOtherBusinessConflicts = false;
+  if (canManageAll) {
+    if (staffId) {
+      const staff = db.prepare(`
+        SELECT id, user_id FROM staff
+        WHERE id = ? AND business_id = ? AND is_active = 1
+      `).get(staffId, businessId) as { id: string; user_id: string | null } | undefined;
+      if (!staff) return res.status(404).json({ error: 'Profesional no encontrado en este negocio.' });
+      affectedStaffIds = getPersonStaffIds(db, staff.id);
+      includeOtherBusinessConflicts = staff.user_id === req.userId;
+    }
+  } else if (canManageOwn) {
+    const ownStaffId = req.userId ? getBusinessStaffId(db, businessId, req.userId) : null;
+    if (!ownStaffId || staffId !== ownStaffId) {
+      return res.status(403).json({ error: 'Solo puedes registrar tus propias ausencias.' });
+    }
+    staffId = ownStaffId;
+    affectedStaffIds = getPersonStaffIds(db, ownStaffId);
+    includeOtherBusinessConflicts = true;
+  } else {
+    return res.status(403).json({ error: 'Solo puedes registrar tus propias ausencias.' });
+  }
+  if (businessSubscriptionBlocked(res, businessId)) return;
+
+  const startDatetime = `${start}:00`;
+  const endDatetime = `${end}:00`;
+  const blockId = generateId('block');
+  const now = new Date().toISOString();
+  const conflictingBookings = withTransaction(transactionDb => {
+    transactionDb.prepare(`
+      INSERT INTO availability_blocks (id, business_id, staff_id, start_datetime, end_datetime, reason, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(blockId, businessId, staffId, startDatetime, endDatetime, reason || null, now);
+    const conflicts = countConflictingBookings(
+      transactionDb,
+      businessId,
+      affectedStaffIds,
+      startDatetime,
+      endDatetime,
+      includeOtherBusinessConflicts,
+    );
+    logAudit(req.userId || null, businessId, 'AVAILABILITY_BLOCK_CREATED', 'availability_block', blockId, {
+      staff_id: staffId,
+      conflicting_bookings: conflicts,
+    });
+    return conflicts;
+  });
+  return res.status(201).json({ block_id: blockId, conflicting_bookings: conflictingBookings });
+});
+
+router.delete('/business/blocks/:id', requireAuth, (req: AuthRequest, res: Response) => {
+  const db = getSqliteDb();
+  const businessId = resolveActiveBusinessId(req, res, BUSINESS_MEMBER_ROLES);
+  if (!businessId) {
+    if (!res.headersSent) return res.status(404).json({ error: 'Negocio no encontrado.' });
+    return;
+  }
+  const member = db.prepare('SELECT role FROM business_members WHERE business_id = ? AND user_id = ? AND is_active = 1')
+    .get(businessId, req.userId || '') as { role: string } | undefined;
+  if (!member) return res.status(404).json({ error: 'Negocio no encontrado.' });
+  const block = db.prepare(`
+    SELECT id, business_id, staff_id FROM availability_blocks
+    WHERE id = ? AND business_id = ?
+  `).get(req.params.id, businessId) as { id: string; business_id: string; staff_id: string | null } | undefined;
+  if (!block) return res.status(404).json({ error: 'Bloqueo no encontrado.' });
+
+  const canManageAll = member.role === 'OWNER' || member.role === 'ADMIN';
+  const canManageOwn = member.role === 'STAFF' || member.role === 'PROFESSIONAL';
+  const ownStaffId = req.userId ? getBusinessStaffId(db, businessId, req.userId) : null;
+  if (!canManageAll && !(canManageOwn && block.staff_id === ownStaffId)) {
+    return res.status(403).json({ error: 'No tienes permisos para eliminar este bloqueo.' });
+  }
+  if (businessSubscriptionBlocked(res, businessId)) return;
+
+  withTransaction(transactionDb => {
+    transactionDb.prepare('DELETE FROM availability_blocks WHERE id = ? AND business_id = ?')
+      .run(block.id, businessId);
+    logAudit(req.userId || null, businessId, 'AVAILABILITY_BLOCK_DELETED', 'availability_block', block.id);
+  });
+  return res.json({ message: 'Ausencia eliminada.' });
 });
 
 router.get('/business/hours', requireAuth, (req: AuthRequest, res: Response) => {

@@ -5043,6 +5043,560 @@ async function runIntegrationTests() {
       }
     });
 
+    await integrationTest('Agenda: horarios, ausencias y colisiones entre negocios', async () => {
+      const login = async (email: string, password: string) => {
+        const response = await sendJson('/api/auth/login', { email, password });
+        assert.strictEqual(response.status, 200, `Login ${email}: ${await response.clone().text()}`);
+        return await response.json() as { token: string; user: { id: string } };
+      };
+      const owner = await login('contacto@valeriaestudio.cl', 'NuevaClaveSegura123!');
+      const ownerB = await login('ignacio@barberiaroute.cl', 'Barber1234!');
+      const professional = await login('camila@valeriaestudio.cl', 'Staff1234!');
+      const customer = await login('cliente@gmail.com', 'Cliente1234!');
+      const previousBillingEnabled = process.env.BILLING_ENABLED;
+      const businessAId = 'biz_valeria_studio';
+      const businessBId = 'biz_route68_barber';
+      const staffBId = generateId('schedule_staff');
+      const membershipId = generateId('schedule_member');
+      const bookingId = generateId('schedule_booking');
+      const crossBusinessBookingId = generateId('schedule_booking_other');
+      const businessBufferBookingId = generateId('schedule_booking_buffer');
+      const availabilityBlockIds: string[] = [];
+      const sqlite = getSqliteDb();
+      const previousBusinessBMembership = sqlite.prepare(`
+        SELECT id, role, is_active, created_at FROM business_members
+        WHERE business_id = ? AND user_id = ?
+      `).get(businessBId, professional.user.id) as {
+        id: string; role: string; is_active: number; created_at: string;
+      } | undefined;
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Santiago' }).format(new Date());
+      const dateValue = new Date(`${today}T12:00:00Z`);
+      dateValue.setUTCDate(dateValue.getUTCDate() + 7);
+      while (dateValue.getUTCDay() === 0) dateValue.setUTCDate(dateValue.getUTCDate() + 1);
+      const bookingDate = dateValue.toISOString().slice(0, 10);
+      const dayOfWeek = dateValue.getUTCDay();
+      const addDays = (value: string, count: number) => {
+        const date = new Date(`${value}T12:00:00Z`);
+        date.setUTCDate(date.getUTCDate() + count);
+        return date.toISOString().slice(0, 10);
+      };
+      const previousAvailability = sqlite.prepare(`
+        SELECT * FROM staff_availability WHERE staff_id = 'stf_camila' AND day_of_week = ?
+      `).get(dayOfWeek) as {
+        id: string; staff_id: string; day_of_week: number; start_time: string; end_time: string;
+        break_start: string | null; break_end: string | null; is_active: number; created_at: string;
+      } | undefined;
+      const previousCamilaActive = sqlite.prepare('SELECT is_active FROM staff WHERE id = ?')
+        .get('stf_camila') as { is_active: number };
+      const previousBusinessBuffers = sqlite.prepare(`
+        SELECT id, buffer_minutes FROM businesses WHERE id IN (?, ?)
+      `).all(businessAId, businessBId) as Array<{ id: string; buffer_minutes: number | null }>;
+      const previousBarberCleanMinutes = sqlite.prepare('SELECT clean_minutes FROM services WHERE id = ?')
+        .get('srv_barb_corte') as { clean_minutes: number | null };
+      const now = new Date().toISOString();
+
+      try {
+        process.env.BILLING_ENABLED = 'false';
+        sqlite.prepare(`
+          INSERT INTO staff (id, business_id, user_id, name, is_active, display_order, created_at)
+          VALUES (?, ?, ?, 'Camila en otra sede', 1, 10, ?)
+        `).run(staffBId, businessBId, professional.user.id, now);
+        sqlite.prepare(`
+          INSERT INTO staff_services (id, staff_id, service_id, created_at)
+          VALUES (?, ?, 'srv_barb_corte', ?)
+        `).run(generateId('schedule_service'), staffBId, now);
+        sqlite.prepare(`
+          INSERT INTO staff_availability (
+            id, staff_id, day_of_week, start_time, end_time, is_active, created_at
+          ) VALUES (?, ?, ?, '10:00', '19:00', 1, ?)
+        `).run(generateId('schedule_hours'), staffBId, dayOfWeek, now);
+        if (!previousBusinessBMembership) {
+          sqlite.prepare(`
+            INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
+            VALUES (?, ?, ?, 'STAFF', 1, ?)
+          `).run(membershipId, businessBId, professional.user.id, now);
+        }
+
+        const inactiveStaffBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T08:00`,
+          end_datetime: `${bookingDate}T09:00`,
+        }, professional.token);
+        assert.strictEqual(inactiveStaffBlockResponse.status, 201);
+        const inactiveStaffBlock = await inactiveStaffBlockResponse.json() as { block_id: string };
+        availabilityBlockIds.push(inactiveStaffBlock.block_id);
+        sqlite.prepare('UPDATE staff SET is_active = 0 WHERE id = ?').run('stf_camila');
+        assert.strictEqual((await requestJson(
+          '/api/business/staff/stf_camila/availability',
+          'GET',
+          professional.token,
+        )).status, 403);
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks?from=${bookingDate}`,
+          'GET',
+          professional.token,
+        )).status, 403);
+        assert.strictEqual((await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T09:00`,
+          end_datetime: `${bookingDate}T10:00`,
+        }, professional.token)).status, 403);
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks/${inactiveStaffBlock.block_id}`,
+          'DELETE',
+          professional.token,
+        )).status, 403);
+        sqlite.prepare('UPDATE staff SET is_active = ? WHERE id = ?')
+          .run(previousCamilaActive.is_active, 'stf_camila');
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks/${inactiveStaffBlock.block_id}`,
+          'DELETE',
+          owner.token,
+        )).status, 200);
+
+        const scheduleResponse = await requestJson(
+          '/api/business/staff/stf_camila/availability',
+          'GET',
+          owner.token,
+        );
+        assert.strictEqual(scheduleResponse.status, 200, `GET disponibilidad: ${await scheduleResponse.clone().text()}`);
+        const schedule = (await scheduleResponse.json() as {
+          availability: Array<{ day_of_week: number; is_active: boolean; start_time: string; end_time: string }>;
+        }).availability;
+        assert.strictEqual(schedule.length, 7);
+        const disabledDay = schedule.find(row => row.day_of_week === dayOfWeek)!;
+        const saveSchedule = (availability: unknown, token: string) => requestJson(
+          '/api/business/staff/stf_camila/availability',
+          'PUT',
+          token,
+          { availability },
+        );
+        const disabledSchedule = await saveSchedule([{
+          ...disabledDay,
+          is_active: false,
+          break_start: null,
+          break_end: null,
+        }], owner.token);
+        assert.strictEqual(disabledSchedule.status, 200, `PUT disponibilidad: ${await disabledSchedule.clone().text()}`);
+        assert.strictEqual(getAvailableSlots({
+          businessId: businessAId,
+          serviceId: 'srv_val_corte',
+          dateStr: bookingDate,
+          staffId: 'stf_camila',
+        }).length, 0);
+        assert.strictEqual((await saveSchedule([{
+          day_of_week: dayOfWeek,
+          is_active: true,
+          start_time: '11:00',
+          end_time: '10:00',
+          break_start: null,
+          break_end: null,
+        }], owner.token)).status, 400);
+        assert.strictEqual((await saveSchedule([{
+          day_of_week: dayOfWeek,
+          is_active: true,
+          start_time: '09:00',
+          end_time: '18:00',
+          break_start: '08:00',
+          break_end: '09:30',
+        }], owner.token)).status, 400);
+        assert.strictEqual((await saveSchedule([disabledDay], professional.token)).status, 403);
+        assert.strictEqual((await saveSchedule([disabledDay], ownerB.token)).status, 404);
+
+        if (previousAvailability) {
+          const restored = await saveSchedule([previousAvailability], owner.token);
+          assert.strictEqual(restored.status, 200, `Restaurar disponibilidad: ${await restored.clone().text()}`);
+        }
+
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = ? WHERE id = ?').run(0, businessAId);
+        sqlite.prepare('UPDATE businesses SET buffer_minutes = ? WHERE id = ?').run(30, businessBId);
+        sqlite.prepare('UPDATE services SET clean_minutes = 0 WHERE id = ?').run('srv_barb_corte');
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'srv_barb_corte', ?, ?, '10:00', '11:00',
+            60, 25000, 'salon', 'CONFIRMED', 'presential', 'pending', 'Reserva con buffer propio',
+            '+56912345004', ?, ?)
+        `).run(
+          businessBufferBookingId,
+          `SCHEDULE-${businessBufferBookingId}`,
+          businessBId,
+          staffBId,
+          customer.user.id,
+          bookingDate,
+          now,
+          now,
+        );
+        const slotsWithBusinessBuffer = getAvailableSlots({
+          businessId: businessAId,
+          serviceId: 'srv_val_corte',
+          dateStr: bookingDate,
+          staffId: 'stf_camila',
+        });
+        assert.ok(!slotsWithBusinessBuffer.some(slot => slot.time === '11:15'));
+        assert.ok(slotsWithBusinessBuffer.some(slot => slot.time === '11:30'));
+        assert.strictEqual(isSlotAvailable({
+          businessId: businessAId,
+          staffId: 'stf_camila',
+          serviceId: 'srv_val_corte',
+          dateStr: bookingDate,
+          startTime: '11:15',
+          durationMinutes: 45,
+        }), false);
+        assert.strictEqual(isSlotAvailable({
+          businessId: businessAId,
+          staffId: 'stf_camila',
+          serviceId: 'srv_val_corte',
+          dateStr: bookingDate,
+          startTime: '11:30',
+          durationMinutes: 45,
+        }), true);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(businessBufferBookingId);
+
+        const crossBusinessSlots = getAvailableSlots({
+          businessId: businessBId,
+          serviceId: 'srv_barb_corte',
+          dateStr: bookingDate,
+          staffId: staffBId,
+        });
+        assert.ok(crossBusinessSlots.some(slot => slot.time === '10:00'));
+        assert.ok(getAvailableSlots({
+          businessId: businessBId,
+          serviceId: 'srv_barb_corte',
+          dateStr: bookingDate,
+          staffId: 'stf_ignacio',
+        }).some(slot => slot.time === '10:00'));
+
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, 'stf_camila', 'srv_val_corte', ?, ?, '10:00', '10:45',
+            45, 25000, 'salon', 'CONFIRMED', 'presential', 'pending', 'Reserva entre negocios',
+            '+56912345001', ?, ?)
+        `).run(
+          bookingId,
+          `SCHEDULE-${bookingId}`,
+          businessAId,
+          customer.user.id,
+          bookingDate,
+          now,
+          now,
+        );
+        const linkedStaffIds = (sqlite.prepare(`
+          SELECT id FROM staff WHERE user_id = (SELECT user_id FROM staff WHERE id = 'stf_camila')
+        `).all() as Array<{ id: string }>).map(row => row.id);
+        const fixtureConflict = sqlite.prepare(`
+          SELECT COUNT(*) AS count FROM bookings b
+          WHERE b.staff_id IN (${linkedStaffIds.map(() => '?').join(', ')})
+            AND (b.booking_date || 'T' || b.start_time || ':00') < ?
+            AND (b.booking_date || 'T' || b.end_time || ':00') > ?
+        `).get(
+          ...linkedStaffIds,
+          `${addDays(bookingDate, 1)}T02:00:00`,
+          `${addDays(bookingDate, -1)}T22:00:00`,
+        ) as { count: number };
+        assert.strictEqual(fixtureConflict.count, 1, `Fixture staff=${JSON.stringify(linkedStaffIds)} booking=${JSON.stringify(sqlite.prepare('SELECT staff_id, booking_date, start_time, end_time, status FROM bookings WHERE id = ?').get(bookingId))}`);
+        const bookingInB = await sendJson('/api/bookings', {
+          business_id: businessBId,
+          service_id: 'srv_barb_corte',
+          staff_id: staffBId,
+          booking_date: bookingDate,
+          start_time: '10:00',
+          client_name: 'Cliente en otra sede',
+          client_phone: '+56912345002',
+          payment_method: 'presential',
+        }, customer.token);
+        assert.strictEqual(bookingInB.status, 409);
+        assert.ok(!getAvailableSlots({
+          businessId: businessBId,
+          serviceId: 'srv_barb_corte',
+          dateStr: bookingDate,
+          staffId: staffBId,
+        }).some(slot => slot.time === '10:00'));
+        assert.ok(getAvailableSlots({
+          businessId: businessBId,
+          serviceId: 'srv_barb_corte',
+          dateStr: bookingDate,
+          staffId: 'stf_ignacio',
+        }).some(slot => slot.time === '10:00'));
+
+        const ownBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${addDays(bookingDate, -1)}T22:00`,
+          end_datetime: `${addDays(bookingDate, 1)}T02:00`,
+          reason: 'Vacaciones de prueba',
+        }, professional.token);
+        assert.strictEqual(ownBlockResponse.status, 201);
+        const ownBlock = await ownBlockResponse.json() as { block_id: string; conflicting_bookings: number };
+        availabilityBlockIds.push(ownBlock.block_id);
+        assert.strictEqual(ownBlock.conflicting_bookings, 1, `API conflict count for staff ${JSON.stringify(linkedStaffIds)}`);
+        assert.strictEqual(getAvailableSlots({
+          businessId: businessBId,
+          serviceId: 'srv_barb_corte',
+          dateStr: bookingDate,
+          staffId: staffBId,
+        }).length, 0);
+        assert.strictEqual(isSlotAvailable({
+          businessId: businessBId,
+          staffId: staffBId,
+          serviceId: 'srv_barb_corte',
+          dateStr: bookingDate,
+          startTime: '12:00',
+          durationMinutes: 40,
+        }), false);
+
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'srv_barb_corte', ?, ?, '12:00', '13:00',
+            60, 25000, 'salon', 'CONFIRMED', 'presential', 'pending', 'Reserva en negocio B',
+            '+56912345003', ?, ?)
+        `).run(
+          crossBusinessBookingId,
+          `SCHEDULE-${crossBusinessBookingId}`,
+          businessBId,
+          staffBId,
+          customer.user.id,
+          bookingDate,
+          now,
+          now,
+        );
+        const managerStaffBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T12:00`,
+          end_datetime: `${bookingDate}T13:00`,
+        }, owner.token);
+        assert.strictEqual(managerStaffBlockResponse.status, 201);
+        const managerStaffBlock = await managerStaffBlockResponse.json() as {
+          block_id: string;
+          conflicting_bookings: number;
+        };
+        availabilityBlockIds.push(managerStaffBlock.block_id);
+        assert.strictEqual(managerStaffBlock.conflicting_bookings, 0);
+
+        const selfCrossBusinessBlockResponse = await requestJson('/api/business/blocks', 'POST', professional.token, {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T12:00`,
+          end_datetime: `${bookingDate}T13:00`,
+        }, { 'x-business-id': businessAId });
+        assert.strictEqual(selfCrossBusinessBlockResponse.status, 201);
+        const selfCrossBusinessBlock = await selfCrossBusinessBlockResponse.json() as {
+          block_id: string;
+          conflicting_bookings: number;
+        };
+        availabilityBlockIds.push(selfCrossBusinessBlock.block_id);
+        assert.strictEqual(selfCrossBusinessBlock.conflicting_bookings, 1);
+        assert.strictEqual((sqlite.prepare('SELECT business_id FROM availability_blocks WHERE id = ?')
+          .get(selfCrossBusinessBlock.block_id) as { business_id: string }).business_id, businessAId);
+
+        assert.strictEqual((await sendJson('/api/business/blocks', {
+          staff_id: 'stf_valeria',
+          start_datetime: `${bookingDate}T12:00`,
+          end_datetime: `${bookingDate}T13:00`,
+        }, professional.token)).status, 403);
+        assert.strictEqual((await sendJson('/api/business/blocks', {
+          staff_id: null,
+          start_datetime: `${bookingDate}T12:00`,
+          end_datetime: `${bookingDate}T13:00`,
+        }, professional.token)).status, 403);
+        assert.strictEqual((await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T13:00`,
+          end_datetime: `${bookingDate}T12:00`,
+        }, professional.token)).status, 400);
+        assert.strictEqual((await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T12:00`,
+          end_datetime: `${addDays(bookingDate, 367)}T12:00`,
+        }, professional.token)).status, 400);
+        assert.strictEqual((await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T12:00`,
+          end_datetime: `${bookingDate}T13:00`,
+          reason: 'x'.repeat(201),
+        }, professional.token)).status, 400);
+
+        const otherStaffBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: 'stf_valeria',
+          start_datetime: `${bookingDate}T16:00`,
+          end_datetime: `${bookingDate}T17:00`,
+        }, owner.token);
+        assert.strictEqual(otherStaffBlockResponse.status, 201);
+        const otherStaffBlock = await otherStaffBlockResponse.json() as { block_id: string };
+        availabilityBlockIds.push(otherStaffBlock.block_id);
+        const businessBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: null,
+          start_datetime: `${bookingDate}T17:00`,
+          end_datetime: `${bookingDate}T18:00`,
+        }, owner.token);
+        assert.strictEqual(businessBlockResponse.status, 201);
+        const businessBlock = await businessBlockResponse.json() as { block_id: string };
+        availabilityBlockIds.push(businessBlock.block_id);
+
+        const futureBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: null,
+          start_datetime: `${addDays(today, 120)}T10:00`,
+          end_datetime: `${addDays(today, 120)}T11:00`,
+        }, owner.token);
+        assert.strictEqual(futureBlockResponse.status, 201);
+        const futureBlock = await futureBlockResponse.json() as { block_id: string };
+        availabilityBlockIds.push(futureBlock.block_id);
+        const unboundedBlocksResponse = await requestJson('/api/business/blocks', 'GET', owner.token);
+        assert.strictEqual(unboundedBlocksResponse.status, 200);
+        const unboundedBlocks = await unboundedBlocksResponse.json() as {
+          blocks: Array<{ id: string }>;
+        };
+        assert.ok(unboundedBlocks.blocks.some(block => block.id === futureBlock.block_id));
+
+        const from = addDays(bookingDate, -1);
+        const to = addDays(bookingDate, 1);
+        const ownerBlocksResponse = await requestJson(
+          `/api/business/blocks?from=${from}&to=${to}`,
+          'GET',
+          owner.token,
+        );
+        const ownerBlocks = await ownerBlocksResponse.json() as {
+          blocks: Array<{ id: string; can_delete: boolean }>;
+          can_manage_all: boolean;
+        };
+        assert.strictEqual(ownerBlocks.can_manage_all, true);
+        assert.ok(ownerBlocks.blocks.some(block => block.id === ownBlock.block_id));
+        assert.ok(ownerBlocks.blocks.some(block => block.id === otherStaffBlock.block_id));
+        const staffBlocksResponse = await requestJson(
+          `/api/business/blocks?from=${from}&to=${to}`,
+          'GET',
+          professional.token,
+        );
+        const staffBlocks = await staffBlocksResponse.json() as {
+          blocks: Array<{ id: string; can_delete: boolean }>;
+          can_manage_all: boolean;
+          own_staff_id: string;
+        };
+        assert.strictEqual(staffBlocks.can_manage_all, false);
+        assert.strictEqual(staffBlocks.own_staff_id, 'stf_camila');
+        assert.ok(staffBlocks.blocks.some(block => block.id === ownBlock.block_id && block.can_delete));
+        assert.ok(staffBlocks.blocks.some(block => block.id === businessBlock.block_id && !block.can_delete));
+        assert.ok(!staffBlocks.blocks.some(block => block.id === otherStaffBlock.block_id));
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks/${otherStaffBlock.block_id}`,
+          'DELETE',
+          professional.token,
+        )).status, 403);
+        const deleteOwnAsOwner = await requestJson(
+          `/api/business/blocks/${ownBlock.block_id}`,
+          'DELETE',
+          owner.token,
+        );
+        assert.strictEqual(deleteOwnAsOwner.status, 200, `Borrar ausencia propia como dueño: ${await deleteOwnAsOwner.clone().text()}`);
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks/${managerStaffBlock.block_id}`,
+          'DELETE',
+          owner.token,
+        )).status, 200);
+        const deleteOtherAsOwner = await requestJson(
+          `/api/business/blocks/${otherStaffBlock.block_id}`,
+          'DELETE',
+          owner.token,
+        );
+        assert.strictEqual(deleteOtherAsOwner.status, 200, `Borrar ausencia ajena como dueño: ${await deleteOtherAsOwner.clone().text()}`);
+        const deleteBusinessAsOwner = await requestJson(
+          `/api/business/blocks/${businessBlock.block_id}`,
+          'DELETE',
+          owner.token,
+        );
+        assert.strictEqual(deleteBusinessAsOwner.status, 200, `Borrar bloqueo comercial: ${await deleteBusinessAsOwner.clone().text()}`);
+
+        sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(bookingId);
+        sqlite.prepare("DELETE FROM bookings WHERE id = ?").run(bookingId);
+        sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(crossBusinessBookingId);
+        sqlite.prepare("DELETE FROM bookings WHERE id = ?").run(crossBusinessBookingId);
+        const personalBlock = await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T10:00`,
+          end_datetime: `${bookingDate}T11:00`,
+        }, professional.token);
+        assert.strictEqual(personalBlock.status, 201);
+        const personalBlockId = (await personalBlock.json() as { block_id: string }).block_id;
+        availabilityBlockIds.push(personalBlockId);
+        assert.ok(!getAvailableSlots({
+          businessId: businessBId,
+          serviceId: 'srv_barb_corte',
+          dateStr: bookingDate,
+          staffId: staffBId,
+        }).some(slot => slot.time === '10:00'));
+        const deleteOwnAsStaff = await requestJson(`/api/business/blocks/${personalBlockId}`, 'DELETE', professional.token);
+        assert.strictEqual(deleteOwnAsStaff.status, 200, `Borrar ausencia propia: ${await deleteOwnAsStaff.clone().text()}`);
+
+        const localBlock = await sendJson('/api/business/blocks', {
+          staff_id: null,
+          start_datetime: `${bookingDate}T10:00`,
+          end_datetime: `${bookingDate}T11:00`,
+        }, owner.token);
+        assert.strictEqual(localBlock.status, 201);
+        const localBlockId = (await localBlock.json() as { block_id: string }).block_id;
+        availabilityBlockIds.push(localBlockId);
+        assert.ok(getAvailableSlots({
+          businessId: businessBId,
+          serviceId: 'srv_barb_corte',
+          dateStr: bookingDate,
+          staffId: staffBId,
+        }).some(slot => slot.time === '10:00'));
+        assert.ok(!getAvailableSlots({
+          businessId: businessAId,
+          serviceId: 'srv_val_corte',
+          dateStr: bookingDate,
+          staffId: 'stf_camila',
+        }).some(slot => slot.time === '10:00'));
+        const deleteLocalAsOwner = await requestJson(`/api/business/blocks/${localBlockId}`, 'DELETE', owner.token);
+        assert.strictEqual(deleteLocalAsOwner.status, 200, `Borrar bloqueo de negocio: ${await deleteLocalAsOwner.clone().text()}`);
+      } finally {
+        sqlite.prepare('UPDATE staff SET is_active = ? WHERE id = ?')
+          .run(previousCamilaActive.is_active, 'stf_camila');
+        for (const business of previousBusinessBuffers) {
+          sqlite.prepare('UPDATE businesses SET buffer_minutes = ? WHERE id = ?')
+            .run(business.buffer_minutes, business.id);
+        }
+        sqlite.prepare('UPDATE services SET clean_minutes = ? WHERE id = ?')
+          .run(previousBarberCleanMinutes.clean_minutes, 'srv_barb_corte');
+        for (const id of availabilityBlockIds) sqlite.prepare('DELETE FROM availability_blocks WHERE id = ?').run(id);
+        sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(bookingId);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(crossBusinessBookingId);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(crossBusinessBookingId);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(businessBufferBookingId);
+        if (previousAvailability) {
+          sqlite.prepare(`
+            UPDATE staff_availability SET
+              start_time = ?, end_time = ?, break_start = ?, break_end = ?, is_active = ?
+            WHERE staff_id = ? AND day_of_week = ?
+          `).run(
+            previousAvailability.start_time,
+            previousAvailability.end_time,
+            previousAvailability.break_start,
+            previousAvailability.break_end,
+            previousAvailability.is_active,
+            'stf_camila',
+            dayOfWeek,
+          );
+        } else {
+          sqlite.prepare('DELETE FROM staff_availability WHERE staff_id = ? AND day_of_week = ?')
+            .run('stf_camila', dayOfWeek);
+        }
+        if (!previousBusinessBMembership) {
+          sqlite.prepare('DELETE FROM business_members WHERE id = ?').run(membershipId);
+        }
+        sqlite.prepare('DELETE FROM staff WHERE id = ?').run(staffBId);
+        if (previousBillingEnabled === undefined) delete process.env.BILLING_ENABLED;
+        else process.env.BILLING_ENABLED = previousBillingEnabled;
+      }
+    });
+
     await integrationTest('Persistencia CRM: DATABASE_FILE_JSON permanece intacto', async () => {
       if (databaseJsonAtStart.exists) {
         assert.ok(existsSync(databaseJsonPath));

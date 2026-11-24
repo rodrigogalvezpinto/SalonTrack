@@ -19,6 +19,15 @@ import {
   ToggleRight
 } from 'lucide-react';
 
+type StaffAvailability = {
+  day_of_week: number;
+  is_active: boolean;
+  start_time: string;
+  end_time: string;
+  break_start: string | null;
+  break_end: string | null;
+};
+
 export const BusinessCatalogView: React.FC = () => {
   const { business, refreshBusiness } = useAuth();
 
@@ -49,6 +58,11 @@ export const BusinessCatalogView: React.FC = () => {
   const [isStaffModalOpen, setIsStaffModalOpen] = useState<boolean>(false);
   const [invitingStaffId, setInvitingStaffId] = useState<string | null>(null);
   const [staffInviteEmails, setStaffInviteEmails] = useState<Record<string, string>>({});
+  const [scheduleStaff, setScheduleStaff] = useState<Pick<Staff, 'id' | 'name'> | null>(null);
+  const [staffAvailability, setStaffAvailability] = useState<StaffAvailability[]>([]);
+  const [isLoadingSchedule, setIsLoadingSchedule] = useState<boolean>(false);
+  const [isSavingSchedule, setIsSavingSchedule] = useState<boolean>(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [staffForm, setStaffForm] = useState({
     name: '',
     email: '',
@@ -74,6 +88,7 @@ export const BusinessCatalogView: React.FC = () => {
   });
   const [isSavingProfile, setIsSavingProfile] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const canManageStaffSchedules = business?.member_role === 'OWNER' || business?.member_role === 'ADMIN';
 
   useEffect(() => {
     if (business) {
@@ -217,6 +232,50 @@ export const BusinessCatalogView: React.FC = () => {
       loadData();
     } catch (err: any) {
       alert(`Error: ${err.message}`);
+    }
+  };
+
+  const openStaffSchedule = async (member: Pick<Staff, 'id' | 'name'>) => {
+    setScheduleStaff(member);
+    setStaffAvailability([]);
+    setScheduleError(null);
+    setIsLoadingSchedule(true);
+    try {
+      const response = await apiRequest<{ availability: StaffAvailability[] }>(
+        `/api/business/staff/${member.id}/availability`,
+      );
+      setStaffAvailability(response.availability);
+    } catch (err: any) {
+      setScheduleError(err.message || 'No se pudo cargar el horario.');
+    } finally {
+      setIsLoadingSchedule(false);
+    }
+  };
+
+  const updateStaffAvailability = (day: number, values: Partial<StaffAvailability>) => {
+    setStaffAvailability(current => current.map(row => (
+      row.day_of_week === day ? { ...row, ...values } : row
+    )));
+  };
+
+  const handleSaveStaffAvailability = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!scheduleStaff) return;
+    setIsSavingSchedule(true);
+    setScheduleError(null);
+    try {
+      const response = await apiRequest<{ availability: StaffAvailability[] }>(
+        `/api/business/staff/${scheduleStaff.id}/availability`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ availability: staffAvailability }),
+        },
+      );
+      setStaffAvailability(response.availability);
+    } catch (err: any) {
+      setScheduleError(err.message || 'No se pudo guardar el horario.');
+    } finally {
+      setIsSavingSchedule(false);
     }
   };
 
@@ -511,7 +570,16 @@ export const BusinessCatalogView: React.FC = () => {
                   )}
                 </div>
 
-                <div className="pt-2 border-t border-slate-100 flex justify-end">
+                <div className="pt-2 border-t border-slate-100 flex justify-between">
+                  {canManageStaffSchedules && (
+                    <button
+                      type="button"
+                      onClick={() => void openStaffSchedule(member)}
+                      className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                    >
+                      <Clock className="w-3.5 h-3.5" /> Horario
+                    </button>
+                  )}
                   <button
                     onClick={() => handleDeleteStaff(member.id)}
                     className="text-xs text-rose-600 hover:text-rose-800 flex items-center gap-1"
@@ -911,6 +979,102 @@ export const BusinessCatalogView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {scheduleStaff && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6 space-y-5 shadow-xl">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">Horario de {scheduleStaff.name}</h3>
+              <p className="mt-1 text-xs text-slate-500">Define los días y horas disponibles de esta profesional.</p>
+            </div>
+
+            {isLoadingSchedule ? (
+              <p className="py-8 text-center text-sm text-slate-500">Cargando horario...</p>
+            ) : (
+              <form onSubmit={handleSaveStaffAvailability} className="space-y-3">
+                {dayNames.map(({ day, name }) => {
+                  const row = staffAvailability.find(item => item.day_of_week === day);
+                  if (!row) return null;
+                  return (
+                    <div key={day} className="grid grid-cols-1 sm:grid-cols-[100px_repeat(4,minmax(0,1fr))] gap-3 items-end border-b border-slate-100 pb-3">
+                      <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
+                        <input
+                          type="checkbox"
+                          checked={row.is_active}
+                          onChange={event => updateStaffAvailability(day, { is_active: event.target.checked })}
+                        />
+                        {name}
+                      </label>
+                      <label className="text-[11px] text-slate-500">
+                        Inicio
+                        <input
+                          type="time"
+                          required
+                          disabled={!row.is_active}
+                          value={row.start_time}
+                          onChange={event => updateStaffAvailability(day, { start_time: event.target.value })}
+                          className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs disabled:bg-slate-50"
+                        />
+                      </label>
+                      <label className="text-[11px] text-slate-500">
+                        Término
+                        <input
+                          type="time"
+                          required
+                          disabled={!row.is_active}
+                          value={row.end_time}
+                          onChange={event => updateStaffAvailability(day, { end_time: event.target.value })}
+                          className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs disabled:bg-slate-50"
+                        />
+                      </label>
+                      <label className="text-[11px] text-slate-500">
+                        Inicio descanso
+                        <input
+                          type="time"
+                          disabled={!row.is_active}
+                          value={row.break_start || ''}
+                          onChange={event => updateStaffAvailability(day, { break_start: event.target.value || null })}
+                          className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs disabled:bg-slate-50"
+                        />
+                      </label>
+                      <label className="text-[11px] text-slate-500">
+                        Fin descanso
+                        <input
+                          type="time"
+                          disabled={!row.is_active}
+                          value={row.break_end || ''}
+                          onChange={event => updateStaffAvailability(day, { break_end: event.target.value || null })}
+                          className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs disabled:bg-slate-50"
+                        />
+                      </label>
+                    </div>
+                  );
+                })}
+
+                {scheduleError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{scheduleError}</p>}
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setScheduleStaff(null)}
+                    className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600"
+                  >
+                    Cerrar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isSavingSchedule || isLoadingSchedule || staffAvailability.length !== 7}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    {isSavingSchedule ? 'Guardando...' : 'Guardar horario'}
+                  </button>
+                </div>
+              </form>
+            )}
+            {scheduleError && isLoadingSchedule && <p role="alert" className="text-xs text-rose-700">{scheduleError}</p>}
           </div>
         </div>
       )}
