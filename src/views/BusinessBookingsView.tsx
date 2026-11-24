@@ -293,7 +293,9 @@ export const BusinessBookingsView: React.FC = () => {
         {blocksError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{blocksError}</p>}
         {conflictingBookings > 0 && (
           <p role="status" className="rounded-lg bg-amber-50 p-3 text-xs font-medium text-amber-800">
-            Hay {conflictingBookings} citas en ese horario. Revísalas o reprográmalas.
+            {conflictingBookings === 1
+              ? 'Hay 1 cita en ese horario. Revísala o reprográmala.'
+              : `Hay ${conflictingBookings} citas en ese horario. Revísalas o reprográmalas.`}
           </p>
         )}
 
