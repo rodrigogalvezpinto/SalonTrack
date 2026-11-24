@@ -44,13 +44,15 @@ export const BusinessCatalogView: React.FC = () => {
     price_clp: number;
     buffer_min: number | '';
     is_active: boolean;
+    modality: 'salon' | 'home' | 'both';
   }>({
     name: '',
     description: '',
     duration_min: 45,
     price_clp: 20000,
     buffer_min: 10,
-    is_active: true
+    is_active: true,
+    modality: 'salon',
   });
 
   // Staff State
@@ -82,6 +84,8 @@ export const BusinessCatalogView: React.FC = () => {
     description: business?.description || '',
     address: business?.address || '',
     comuna: business?.comuna || 'Providencia',
+    modality: business?.modality === 'home' || business?.modality === 'both' ? business.modality : 'salon',
+    home_service_comunas: business?.home_service_comunas?.join(', ') || '',
     phone: business?.phone || '',
     whatsapp: business?.whatsapp || '',
     auto_confirm_bookings: business?.auto_confirm_bookings ?? false
@@ -98,6 +102,8 @@ export const BusinessCatalogView: React.FC = () => {
         description: business.description || '',
         address: business.address || '',
         comuna: business.comuna || 'Providencia',
+        modality: business.modality === 'home' || business.modality === 'both' ? business.modality : 'salon',
+        home_service_comunas: business.home_service_comunas?.join(', ') || '',
         phone: business.phone || '',
         whatsapp: business.whatsapp || '',
         auto_confirm_bookings: business.auto_confirm_bookings ?? false
@@ -161,7 +167,8 @@ export const BusinessCatalogView: React.FC = () => {
         duration_min: 45,
         price_clp: 20000,
         buffer_min: 10,
-        is_active: true
+        is_active: true,
+        modality: 'salon'
       });
       loadData();
     } catch (err: any) {
@@ -303,7 +310,13 @@ export const BusinessCatalogView: React.FC = () => {
     try {
       await apiRequest('/api/business/my', {
         method: 'PUT',
-        body: JSON.stringify(profileForm)
+        body: JSON.stringify({
+          ...profileForm,
+          home_service_comunas: profileForm.home_service_comunas
+            .split(',')
+            .map(comuna => comuna.trim())
+            .filter(Boolean),
+        })
       });
       setStatusMessage('Perfil actualizado correctamente');
       setTimeout(() => setStatusMessage(null), 3000);
@@ -411,7 +424,8 @@ export const BusinessCatalogView: React.FC = () => {
                   duration_min: 45,
                   price_clp: 20000,
                   buffer_min: 10,
-                  is_active: true
+                  is_active: true,
+                  modality: 'salon'
                 });
                 setIsServiceModalOpen(true);
               }}
@@ -466,7 +480,8 @@ export const BusinessCatalogView: React.FC = () => {
                           duration_min: svc.duration_minutes || svc.duration_min || 45,
                           price_clp: svc.price_clp,
                           buffer_min: svc.clean_minutes ?? svc.buffer_min ?? 10,
-                          is_active: svc.status !== 'INACTIVE'
+                          is_active: svc.status !== 'INACTIVE',
+                          modality: svc.modality === 'home' || svc.modality === 'both' ? svc.modality : 'salon'
                         });
                         setIsServiceModalOpen(true);
                       }}
@@ -715,6 +730,31 @@ export const BusinessCatalogView: React.FC = () => {
             </div>
 
             <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">Modalidad del negocio</label>
+              <select
+                value={profileForm.modality}
+                onChange={e => setProfileForm({ ...profileForm, modality: e.target.value as 'salon' | 'home' | 'both' })}
+                className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg"
+              >
+                <option value="salon">En el local</option>
+                <option value="home">A domicilio</option>
+                <option value="both">Ambos</option>
+              </select>
+            </div>
+            {(profileForm.modality === 'home' || profileForm.modality === 'both') && (
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-700 mb-1">Comunas con atención a domicilio</label>
+                <input
+                  type="text"
+                  value={profileForm.home_service_comunas}
+                  onChange={e => setProfileForm({ ...profileForm, home_service_comunas: e.target.value })}
+                  placeholder="Providencia, Ñuñoa, Las Condes"
+                  className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg"
+                />
+              </div>
+            )}
+
+            <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">Dirección (Calle y Número)</label>
               <input
                 type="text"
@@ -817,6 +857,19 @@ export const BusinessCatalogView: React.FC = () => {
                   onChange={(e) => setServiceForm({ ...serviceForm, description: e.target.value })}
                   className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-rose-600"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">Modalidad</label>
+                <select
+                  value={serviceForm.modality}
+                  onChange={e => setServiceForm({ ...serviceForm, modality: e.target.value as 'salon' | 'home' | 'both' })}
+                  className="w-full px-3 py-2 text-xs border border-slate-200 rounded-lg"
+                >
+                  <option value="salon">En el local</option>
+                  <option value="home">A domicilio</option>
+                  <option value="both">Ambos</option>
+                </select>
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">

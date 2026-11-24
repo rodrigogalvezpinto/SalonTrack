@@ -592,6 +592,12 @@ const MIGRATION_V5_SQL = `
   );
 `;
 
+const MIGRATION_V6_SQL = `
+  ALTER TABLE bookings ADD COLUMN service_address TEXT;
+  ALTER TABLE bookings ADD COLUMN service_comuna TEXT;
+  ALTER TABLE bookings ADD COLUMN service_address_notes TEXT;
+  ALTER TABLE businesses ADD COLUMN home_service_comunas TEXT;
+`;
 
 export interface Migration {
   version: number;
@@ -623,4 +629,5 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
   { version: 5, name: 'business_invitations', sql: MIGRATION_V5_SQL },
+  { version: 6, name: 'home_service_details', sql: MIGRATION_V6_SQL },
 ];
