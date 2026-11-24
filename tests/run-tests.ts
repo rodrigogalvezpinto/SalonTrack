@@ -5424,6 +5424,21 @@ async function runIntegrationTests() {
         const businessBlock = await businessBlockResponse.json() as { block_id: string };
         availabilityBlockIds.push(businessBlock.block_id);
 
+        const futureBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: null,
+          start_datetime: `${addDays(today, 120)}T10:00`,
+          end_datetime: `${addDays(today, 120)}T11:00`,
+        }, owner.token);
+        assert.strictEqual(futureBlockResponse.status, 201);
+        const futureBlock = await futureBlockResponse.json() as { block_id: string };
+        availabilityBlockIds.push(futureBlock.block_id);
+        const unboundedBlocksResponse = await requestJson('/api/business/blocks', 'GET', owner.token);
+        assert.strictEqual(unboundedBlocksResponse.status, 200);
+        const unboundedBlocks = await unboundedBlocksResponse.json() as {
+          blocks: Array<{ id: string }>;
+        };
+        assert.ok(unboundedBlocks.blocks.some(block => block.id === futureBlock.block_id));
+
         const from = addDays(bookingDate, -1);
         const to = addDays(bookingDate, 1);
         const ownerBlocksResponse = await requestJson(

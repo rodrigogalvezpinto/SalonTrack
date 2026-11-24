@@ -2223,14 +2223,20 @@ router.get('/business/blocks', requireAuth, (req: AuthRequest, res: Response) =>
     .get(businessId, req.userId || '') as { role: string } | undefined;
   if (!member) return res.status(404).json({ error: 'Negocio no encontrado.' });
 
-  const today = getSantiagoDateString();
-  const defaultEnd = new Date(`${today}T00:00:00Z`);
-  defaultEnd.setUTCDate(defaultEnd.getUTCDate() + 90);
+  const now = new Date();
+  const santiagoNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Santiago' }));
+  const today = getSantiagoDateString(now);
   const from = req.query.from === undefined ? today : req.query.from;
-  const to = req.query.to === undefined ? defaultEnd.toISOString().slice(0, 10) : req.query.to;
-  if (!isAvailabilityDate(from) || !isAvailabilityDate(to) || from > to) {
+  const to = req.query.to;
+  if (!isAvailabilityDate(from)
+    || (to !== undefined && !isAvailabilityDate(to))
+    || (to !== undefined && from > to)) {
     return res.status(400).json({ error: 'El rango debe usar fechas válidas y la fecha inicial no puede superar la final.' });
   }
+  const fromDatetime = req.query.from === undefined
+    ? `${today}T${String(santiagoNow.getHours()).padStart(2, '0')}:${String(santiagoNow.getMinutes()).padStart(2, '0')}:${String(santiagoNow.getSeconds()).padStart(2, '0')}`
+    : `${from}T00:00:00`;
+  const toFilter = to === undefined ? '' : 'AND block.start_datetime < ?';
 
   const canManageAll = member.role === 'OWNER' || member.role === 'ADMIN';
   const ownStaffId = req.userId ? getBusinessStaffId(db, businessId, req.userId) : null;
@@ -2245,14 +2251,14 @@ router.get('/business/blocks', requireAuth, (req: AuthRequest, res: Response) =>
     FROM availability_blocks block
     LEFT JOIN staff ON staff.id = block.staff_id
     WHERE block.business_id = ?
-      AND block.start_datetime < ?
+      ${toFilter}
       AND block.end_datetime > ?
       ${staffFilter}
     ORDER BY block.start_datetime
   `).all(
     businessId,
-    `${to}T23:59:59`,
-    `${from}T00:00:00`,
+    ...(to === undefined ? [] : [`${to}T23:59:59`]),
+    fromDatetime,
     ...(canManageOwn ? [ownStaffId || ''] : []),
   ) as Array<{
     id: string;
