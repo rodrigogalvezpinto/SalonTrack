@@ -2070,12 +2070,13 @@ function countConflictingBookings(
   staffIds: string[] | null,
   startDatetime: string,
   endDatetime: string,
+  includeOtherBusinesses = false,
 ): number {
   const staffFilter = staffIds
-    ? `b.business_id = ? AND b.staff_id IN (${staffIds.map(() => '?').join(', ')})`
+    ? `${includeOtherBusinesses ? '' : 'b.business_id = ? AND '}b.staff_id IN (${staffIds.map(() => '?').join(', ')})`
     : 'b.business_id = ?';
   const params = staffIds
-    ? [businessId, ...staffIds, endDatetime, startDatetime]
+    ? [...(includeOtherBusinesses ? [] : [businessId]), ...staffIds, endDatetime, startDatetime]
     : [businessId, endDatetime, startDatetime];
   const row = db.prepare(`
     SELECT COUNT(*) AS count
@@ -2321,14 +2322,16 @@ router.post('/business/blocks', requireAuth, (req: AuthRequest, res: Response) =
   const canManageOwn = member.role === 'STAFF' || member.role === 'PROFESSIONAL';
   let staffId = typeof rawStaffId === 'string' && rawStaffId ? rawStaffId : null;
   let affectedStaffIds: string[] | null = null;
+  let includeOtherBusinessConflicts = false;
   if (canManageAll) {
     if (staffId) {
       const staff = db.prepare(`
-        SELECT id FROM staff
+        SELECT id, user_id FROM staff
         WHERE id = ? AND business_id = ? AND is_active = 1
-      `).get(staffId, businessId) as { id: string } | undefined;
+      `).get(staffId, businessId) as { id: string; user_id: string | null } | undefined;
       if (!staff) return res.status(404).json({ error: 'Profesional no encontrado en este negocio.' });
       affectedStaffIds = getPersonStaffIds(db, staff.id);
+      includeOtherBusinessConflicts = staff.user_id === req.userId;
     }
   } else if (canManageOwn) {
     const ownStaffId = req.userId ? getBusinessStaffId(db, businessId, req.userId) : null;
@@ -2337,6 +2340,7 @@ router.post('/business/blocks', requireAuth, (req: AuthRequest, res: Response) =
     }
     staffId = ownStaffId;
     affectedStaffIds = getPersonStaffIds(db, ownStaffId);
+    includeOtherBusinessConflicts = true;
   } else {
     return res.status(403).json({ error: 'Solo puedes registrar tus propias ausencias.' });
   }
@@ -2357,6 +2361,7 @@ router.post('/business/blocks', requireAuth, (req: AuthRequest, res: Response) =
       affectedStaffIds,
       startDatetime,
       endDatetime,
+      includeOtherBusinessConflicts,
     );
     logAudit(req.userId || null, businessId, 'AVAILABILITY_BLOCK_CREATED', 'availability_block', blockId, {
       staff_id: staffId,

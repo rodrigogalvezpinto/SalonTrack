@@ -5380,6 +5380,21 @@ async function runIntegrationTests() {
         availabilityBlockIds.push(managerStaffBlock.block_id);
         assert.strictEqual(managerStaffBlock.conflicting_bookings, 0);
 
+        const selfCrossBusinessBlockResponse = await requestJson('/api/business/blocks', 'POST', professional.token, {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T12:00`,
+          end_datetime: `${bookingDate}T13:00`,
+        }, { 'x-business-id': businessAId });
+        assert.strictEqual(selfCrossBusinessBlockResponse.status, 201);
+        const selfCrossBusinessBlock = await selfCrossBusinessBlockResponse.json() as {
+          block_id: string;
+          conflicting_bookings: number;
+        };
+        availabilityBlockIds.push(selfCrossBusinessBlock.block_id);
+        assert.strictEqual(selfCrossBusinessBlock.conflicting_bookings, 1);
+        assert.strictEqual((sqlite.prepare('SELECT business_id FROM availability_blocks WHERE id = ?')
+          .get(selfCrossBusinessBlock.block_id) as { business_id: string }).business_id, businessAId);
+
         assert.strictEqual((await sendJson('/api/business/blocks', {
           staff_id: 'stf_valeria',
           start_datetime: `${bookingDate}T12:00`,
