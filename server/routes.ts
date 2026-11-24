@@ -1131,11 +1131,12 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
       if (value === 'both') return ['salon', 'home'];
       return value === 'salon' || value === 'home' ? [value] : [];
     };
+    const businessModes = getSupportedModes(business.modality);
     const serviceModes = getSupportedModes(service.modality);
-    const allowedModes = getSupportedModes(business.modality).filter(mode => serviceModes.includes(mode));
-    if (allowedModes.length === 0) {
-      return res.status(400).json({ error: 'Este servicio no está disponible en esa modalidad.' });
-    }
+    const matchingModes = businessModes.filter(mode => serviceModes.includes(mode));
+    const allowedModes = matchingModes.length > 0
+      ? matchingModes
+      : businessModes.length > 0 ? businessModes : ['salon'];
     const bookingModality = modality === undefined || modality === null || modality === ''
       ? allowedModes.includes('salon') ? 'salon' : allowedModes[0]
       : modality;
