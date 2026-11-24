@@ -2072,10 +2072,10 @@ function countConflictingBookings(
   endDatetime: string,
 ): number {
   const staffFilter = staffIds
-    ? `b.staff_id IN (${staffIds.map(() => '?').join(', ')})`
+    ? `b.business_id = ? AND b.staff_id IN (${staffIds.map(() => '?').join(', ')})`
     : 'b.business_id = ?';
   const params = staffIds
-    ? [...staffIds, endDatetime, startDatetime]
+    ? [businessId, ...staffIds, endDatetime, startDatetime]
     : [businessId, endDatetime, startDatetime];
   const row = db.prepare(`
     SELECT COUNT(*) AS count

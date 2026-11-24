@@ -5059,6 +5059,7 @@ async function runIntegrationTests() {
       const staffBId = generateId('schedule_staff');
       const membershipId = generateId('schedule_member');
       const bookingId = generateId('schedule_booking');
+      const crossBusinessBookingId = generateId('schedule_booking_other');
       const availabilityBlockIds: string[] = [];
       const sqlite = getSqliteDb();
       const previousBusinessBMembership = sqlite.prepare(`
@@ -5255,6 +5256,38 @@ async function runIntegrationTests() {
           startTime: '12:00',
           durationMinutes: 40,
         }), false);
+
+        sqlite.prepare(`
+          INSERT INTO bookings (
+            id, code, business_id, staff_id, service_id, customer_user_id, booking_date,
+            start_time, end_time, duration_minutes, amount_clp, modality, status,
+            payment_method, payment_status, client_name, client_phone, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'srv_barb_corte', ?, ?, '12:00', '13:00',
+            60, 25000, 'salon', 'CONFIRMED', 'presential', 'pending', 'Reserva en negocio B',
+            '+56912345003', ?, ?)
+        `).run(
+          crossBusinessBookingId,
+          `SCHEDULE-${crossBusinessBookingId}`,
+          businessBId,
+          staffBId,
+          customer.user.id,
+          bookingDate,
+          now,
+          now,
+        );
+        const managerStaffBlockResponse = await sendJson('/api/business/blocks', {
+          staff_id: 'stf_camila',
+          start_datetime: `${bookingDate}T12:00`,
+          end_datetime: `${bookingDate}T13:00`,
+        }, owner.token);
+        assert.strictEqual(managerStaffBlockResponse.status, 201);
+        const managerStaffBlock = await managerStaffBlockResponse.json() as {
+          block_id: string;
+          conflicting_bookings: number;
+        };
+        availabilityBlockIds.push(managerStaffBlock.block_id);
+        assert.strictEqual(managerStaffBlock.conflicting_bookings, 0);
+
         assert.strictEqual((await sendJson('/api/business/blocks', {
           staff_id: 'stf_valeria',
           start_datetime: `${bookingDate}T12:00`,
@@ -5339,6 +5372,11 @@ async function runIntegrationTests() {
           owner.token,
         );
         assert.strictEqual(deleteOwnAsOwner.status, 200, `Borrar ausencia propia como dueño: ${await deleteOwnAsOwner.clone().text()}`);
+        assert.strictEqual((await requestJson(
+          `/api/business/blocks/${managerStaffBlock.block_id}`,
+          'DELETE',
+          owner.token,
+        )).status, 200);
         const deleteOtherAsOwner = await requestJson(
           `/api/business/blocks/${otherStaffBlock.block_id}`,
           'DELETE',
@@ -5354,6 +5392,8 @@ async function runIntegrationTests() {
 
         sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(bookingId);
         sqlite.prepare("DELETE FROM bookings WHERE id = ?").run(bookingId);
+        sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(crossBusinessBookingId);
+        sqlite.prepare("DELETE FROM bookings WHERE id = ?").run(crossBusinessBookingId);
         const personalBlock = await sendJson('/api/business/blocks', {
           staff_id: 'stf_camila',
           start_datetime: `${bookingDate}T10:00`,
@@ -5397,6 +5437,8 @@ async function runIntegrationTests() {
         for (const id of availabilityBlockIds) sqlite.prepare('DELETE FROM availability_blocks WHERE id = ?').run(id);
         sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(bookingId);
         sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        sqlite.prepare("DELETE FROM booking_status_history WHERE booking_id = ?").run(crossBusinessBookingId);
+        sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(crossBusinessBookingId);
         if (previousAvailability) {
           sqlite.prepare(`
             UPDATE staff_availability SET
