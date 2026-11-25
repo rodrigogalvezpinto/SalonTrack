@@ -306,6 +306,37 @@ function getBusinessMemberships(userId: string): BusinessMembershipSummary[] {
   `).all(userId) as unknown as BusinessMembershipSummary[];
 }
 
+function parseHomeServiceComunas(value: unknown): string[] {
+  if (typeof value !== 'string' || !value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeComuna(value: string): string {
+  return value.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+function normalizeHomeServiceComunas(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 50) return null;
+  const seen = new Set<string>();
+  const comunas: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') return null;
+    const comuna = item.trim();
+    if (comuna.length < 2 || comuna.length > 80) return null;
+    const key = comuna.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      comunas.push(comuna);
+    }
+  }
+  return comunas;
+}
+
 function getUserBusiness(req: Request, userId: string): {
   business: any | null;
   memberships: BusinessMembershipSummary[];
@@ -323,7 +354,10 @@ function getUserBusiness(req: Request, userId: string): {
     INNER JOIN business_members bm ON bm.business_id = b.id
     WHERE b.id = ? AND bm.user_id = ? AND bm.is_active = 1
   `).get(selectedMembership.business_id, userId) as any;
-  if (business) business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
+  if (business) {
+    business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
+    business.home_service_comunas = parseHomeServiceComunas(business.home_service_comunas);
+  }
   return { business: business || null, memberships };
 }
 
@@ -911,6 +945,7 @@ router.get('/marketplace/search', (req, res) => {
       latitude: biz.latitude,
       longitude: biz.longitude,
       modality: biz.modality,
+      home_service_comunas: parseHomeServiceComunas(biz.home_service_comunas),
       booking_mode: biz.booking_mode,
       rating_avg: Math.round(Number(biz.rating_avg) * 10) / 10,
       reviews_count: Number(biz.reviews_count),
@@ -1003,6 +1038,7 @@ router.get('/marketplace/business/:slug', optionalAuth, (req: AuthRequest, res: 
   return res.json({
     business: {
       ...business,
+      home_service_comunas: parseHomeServiceComunas(business.home_service_comunas),
       rating_avg: avgRating,
       reviews_count: reviews.length,
     },
@@ -1056,6 +1092,9 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
       client_phone,
       client_email,
       client_notes,
+      service_address: rawServiceAddress,
+      service_comuna: rawServiceComuna,
+      service_address_notes: rawServiceAddressNotes,
     } = req.body;
 
     if (!business_id || !service_id || !booking_date || !start_time || !client_name || !client_phone) {
@@ -1071,15 +1110,65 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
     }
 
     // Verify business
-    const business = sqlite.prepare('SELECT id, name, owner_id, booking_mode, status FROM businesses WHERE id = ?').get(business_id) as any;
+    const business = sqlite.prepare(`
+      SELECT id, name, owner_id, booking_mode, status, modality, home_service_comunas
+      FROM businesses WHERE id = ?
+    `).get(business_id) as any;
     if (!business || business.status !== 'PUBLISHED') {
       return res.status(400).json({ error: 'El negocio seleccionado no está disponible para reservas.' });
     }
 
     // Verify service and get price from SQLite (never trust client-sent price!)
-    const service = sqlite.prepare('SELECT id, name, price_clp, duration_minutes FROM services WHERE id = ? AND business_id = ?').get(service_id, business_id) as any;
+    const service = sqlite.prepare(`
+      SELECT id, name, price_clp, duration_minutes, modality
+      FROM services WHERE id = ? AND business_id = ?
+    `).get(service_id, business_id) as any;
     if (!service) {
       return res.status(400).json({ error: 'El servicio solicitado no existe en el catálogo.' });
+    }
+
+    const getSupportedModes = (value: unknown): Array<'salon' | 'home'> => {
+      if (value === 'both') return ['salon', 'home'];
+      return value === 'salon' || value === 'home' ? [value] : [];
+    };
+    const businessModes = getSupportedModes(business.modality);
+    const serviceModes = getSupportedModes(service.modality);
+    const matchingModes = businessModes.filter(mode => serviceModes.includes(mode));
+    const allowedModes = matchingModes.length > 0
+      ? matchingModes
+      : businessModes.length > 0 ? businessModes : ['salon'];
+    const bookingModality = modality === undefined || modality === null || modality === ''
+      ? allowedModes.includes('salon') ? 'salon' : allowedModes[0]
+      : modality;
+    if (typeof bookingModality !== 'string' || !allowedModes.includes(bookingModality as 'salon' | 'home')) {
+      return res.status(400).json({ error: 'Este servicio no está disponible en esa modalidad.' });
+    }
+
+    let serviceAddress: string | null = null;
+    let serviceComuna: string | null = null;
+    let serviceAddressNotes: string | null = null;
+    if (bookingModality === 'home') {
+      if (typeof rawServiceAddress !== 'string' || rawServiceAddress.trim().length < 5 || rawServiceAddress.trim().length > 200) {
+        return res.status(400).json({ error: 'La dirección debe tener entre 5 y 200 caracteres.' });
+      }
+      if (typeof rawServiceComuna !== 'string' || rawServiceComuna.trim().length < 2 || rawServiceComuna.trim().length > 80) {
+        return res.status(400).json({ error: 'La comuna debe tener entre 2 y 80 caracteres.' });
+      }
+      if (rawServiceAddressNotes !== undefined && rawServiceAddressNotes !== null
+        && (typeof rawServiceAddressNotes !== 'string' || rawServiceAddressNotes.trim().length > 200)) {
+        return res.status(400).json({ error: 'Las referencias no pueden superar 200 caracteres.' });
+      }
+      serviceAddress = rawServiceAddress.trim();
+      serviceComuna = rawServiceComuna.trim();
+      serviceAddressNotes = typeof rawServiceAddressNotes === 'string' ? rawServiceAddressNotes.trim() || null : null;
+      const businessComunas = parseHomeServiceComunas(business.home_service_comunas);
+      if (businessComunas.length > 0) {
+        const canonicalComuna = businessComunas.find(comuna => normalizeComuna(comuna) === normalizeComuna(serviceComuna!));
+        if (!canonicalComuna) {
+          return res.status(400).json({ error: 'El negocio no atiende a domicilio en esa comuna.' });
+        }
+        serviceComuna = canonicalComuna;
+      }
     }
 
     const match = getAvailableSlots({
@@ -1127,8 +1216,8 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
           id, code, business_id, staff_id, service_id, customer_user_id,
           booking_date, start_time, end_time, duration_minutes, amount_clp, modality,
           status, payment_method, payment_status, client_name, client_phone, client_email,
-          client_notes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          client_notes, service_address, service_comuna, service_address_notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         bookingId,
         bookingCode,
@@ -1141,7 +1230,7 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
         endTimeStr,
         match.durationMinutes,
         service.price_clp,
-        modality || 'salon',
+        bookingModality,
         initialStatus,
         payMethod,
         payStatus,
@@ -1149,6 +1238,9 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
         client_phone.trim(),
         client_email ? client_email.trim() : null,
         client_notes ? client_notes.trim() : null,
+        serviceAddress,
+        serviceComuna,
+        serviceAddressNotes,
         now,
         now
       );
@@ -1221,6 +1313,10 @@ router.post('/bookings', optionalAuth, async (req: AuthRequest, res: Response) =
         status: initialStatus,
         payment_method: payMethod,
         payment_status: payStatus,
+        modality: bookingModality,
+        service_address: serviceAddress,
+        service_comuna: serviceComuna,
+        service_address_notes: serviceAddressNotes,
       },
       payment: paymentData,
     });
@@ -1950,6 +2046,7 @@ router.get('/business/my', requireAuth, (req: AuthRequest, res: Response) => {
     return res.json({ business: null, has_business: false });
   }
   business.auto_confirm_bookings = business.booking_mode === 'AUTOMATIC';
+  business.home_service_comunas = parseHomeServiceComunas(business.home_service_comunas);
 
   // Get staff
   const staff = sqlite.prepare('SELECT * FROM staff WHERE business_id = ? AND is_active = 1 ORDER BY display_order ASC').all(business.id);
@@ -2428,9 +2525,16 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
   const {
     name, description, phone, whatsapp, email, website, instagram,
     address, comuna, region, modality, booking_mode, auto_confirm_bookings,
-    min_advance_hours, max_advance_days, buffer_minutes, cancellation_policy
+    min_advance_hours, max_advance_days, buffer_minutes, cancellation_policy,
+    home_service_comunas: rawHomeServiceComunas,
   } = req.body;
 
+  const homeServiceComunas = rawHomeServiceComunas === undefined
+    ? undefined
+    : normalizeHomeServiceComunas(rawHomeServiceComunas);
+  if (rawHomeServiceComunas !== undefined && homeServiceComunas === null) {
+    return res.status(400).json({ error: 'home_service_comunas debe incluir hasta 50 comunas de 2 a 80 caracteres.' });
+  }
   const normalizedBufferMinutes = buffer_minutes !== undefined && buffer_minutes !== ''
     ? Number(buffer_minutes)
     : null;
@@ -2452,6 +2556,7 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
         comuna = COALESCE(?, comuna),
         region = COALESCE(?, region),
         modality = COALESCE(?, modality),
+        home_service_comunas = COALESCE(?, home_service_comunas),
         booking_mode = COALESCE(?, booking_mode),
         min_advance_hours = COALESCE(?, min_advance_hours),
         max_advance_days = COALESCE(?, max_advance_days),
@@ -2471,6 +2576,7 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
     comuna?.trim() || null,
     region?.trim() || null,
     modality || null,
+    homeServiceComunas === undefined ? null : JSON.stringify(homeServiceComunas),
     booking_mode || (auto_confirm_bookings === undefined ? null : (auto_confirm_bookings ? 'AUTOMATIC' : 'MANUAL')),
     min_advance_hours ? Number(min_advance_hours) : null,
     max_advance_days ? Number(max_advance_days) : null,
@@ -2480,7 +2586,8 @@ const updateBusinessHandler = (req: AuthRequest, res: Response) => {
     bizId
   );
 
-  const updated = sqlite.prepare('SELECT * FROM businesses WHERE id = ?').get(bizId);
+  const updated = sqlite.prepare('SELECT * FROM businesses WHERE id = ?').get(bizId) as any;
+  updated.home_service_comunas = parseHomeServiceComunas(updated.home_service_comunas);
   return res.json({ message: 'Datos del negocio actualizados con éxito.', business: updated });
 };
 
@@ -2490,6 +2597,8 @@ const parseBufferMin = (value: unknown): number | null => {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 };
+
+const SERVICE_MODALITIES = ['salon', 'home', 'both', 'remote'] as const;
 
 const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
   const sqlite = getSqliteDb();
@@ -2505,6 +2614,10 @@ const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
   const normalizedBufferMin = parseBufferMin(buffer_min);
   if (normalizedBufferMin === null) {
     return res.status(400).json({ error: 'buffer_min debe ser un número finito mayor o igual a 0.' });
+  }
+  const normalizedModality = modality === undefined ? 'salon' : modality;
+  if (typeof normalizedModality !== 'string' || !SERVICE_MODALITIES.includes(normalizedModality as typeof SERVICE_MODALITIES[number])) {
+    return res.status(400).json({ error: 'La modalidad del servicio no es válida.' });
   }
 
   const srvId = generateId('srv');
@@ -2525,7 +2638,7 @@ const createBusinessServiceHandler = (req: AuthRequest, res: Response) => {
     price_type || 'fixed',
     Number(duration_minutes ?? duration_min) || 45,
     normalizedBufferMin,
-    modality || 'salon',
+    normalizedModality,
     is_featured ? 1 : 0,
     is_active === false || is_active === 0 ? 'INACTIVE' : 'PUBLISHED',
     now,
@@ -2559,10 +2672,14 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
   if (authorizeBusiness(req, res, srv.business_id, ['OWNER', 'ADMIN']) === null) return;
   if (businessSubscriptionBlocked(res, srv.business_id)) return;
 
-  const { name, price_clp, price_type, duration_minutes, duration_min, buffer_min, description, is_featured, status, is_active } = req.body;
+  const { name, price_clp, price_type, duration_minutes, duration_min, buffer_min, description, is_featured, status, is_active, modality } = req.body;
   const normalizedBufferMin = buffer_min === undefined ? null : parseBufferMin(buffer_min);
   if (buffer_min !== undefined && normalizedBufferMin === null) {
     return res.status(400).json({ error: 'buffer_min debe ser un número finito mayor o igual a 0.' });
+  }
+  if (modality !== undefined
+    && (typeof modality !== 'string' || !SERVICE_MODALITIES.includes(modality as typeof SERVICE_MODALITIES[number]))) {
+    return res.status(400).json({ error: 'La modalidad del servicio no es válida.' });
   }
   const now = new Date().toISOString();
 
@@ -2573,6 +2690,7 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
         price_type = COALESCE(?, price_type),
         duration_minutes = COALESCE(?, duration_minutes),
         clean_minutes = COALESCE(?, clean_minutes),
+        modality = COALESCE(?, modality),
         description = COALESCE(?, description),
         is_featured = COALESCE(?, is_featured),
         status = COALESCE(?, status),
@@ -2584,6 +2702,7 @@ router.put('/business/services/:id', requireAuth, (req: AuthRequest, res: Respon
     price_type || null,
     duration_minutes !== undefined || duration_min !== undefined ? Number(duration_minutes ?? duration_min) : null,
     normalizedBufferMin,
+    modality ?? null,
     description !== undefined ? description.trim() : null,
     is_featured !== undefined ? (is_featured ? 1 : 0) : null,
     status || (is_active !== undefined ? (is_active ? 'PUBLISHED' : 'INACTIVE') : null),

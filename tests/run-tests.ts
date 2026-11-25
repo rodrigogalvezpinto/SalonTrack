@@ -274,14 +274,27 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
       INSERT INTO business_members (id, business_id, user_id, role, is_active, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run('bm_migration_existing', 'biz_migration_existing', 'usr_migration_existing', 'RECEPTION', 0, createdAt);
+    runMigrations(db, MIGRATIONS.slice(0, 5));
+    assert.strictEqual(
+      (db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version,
+      5,
+    );
+    assert.ok(!(db.prepare('PRAGMA table_info(bookings)').all() as Array<{ name: string }>)
+      .some(column => column.name === 'service_address'));
     runMigrations(db);
     const recorded = db.prepare('SELECT version, checksum FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number; checksum: string }>;
-    assert.strictEqual(recorded.length, 5);
+    assert.strictEqual(recorded.length, 6);
     assert.deepStrictEqual(
       recorded.map(row => row.checksum),
       MIGRATIONS.map(migrationChecksum)
     );
+    assert.ok(['service_address', 'service_comuna', 'service_address_notes'].every(column => (
+      (db.prepare('PRAGMA table_info(bookings)').all() as Array<{ name: string }>)
+        .some(row => row.name === column)
+    )));
+    assert.ok((db.prepare('PRAGMA table_info(businesses)').all() as Array<{ name: string }>)
+      .some(column => column.name === 'home_service_comunas'));
     assert.deepStrictEqual(
       { ...db.prepare('SELECT role, is_active FROM business_members WHERE business_id = ? AND user_id = ?')
         .get('biz_migration_owner', 'usr_migration_owner') as { role: string; is_active: number } },
@@ -314,7 +327,7 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
 
     const brokenMigrations = [
       ...MIGRATIONS,
-      { version: 6, name: 'rota', sql: 'CREATE TABLE tmp_rota (id TEXT); SELECT * FROM tabla_inexistente;' },
+      { version: 7, name: 'rota', sql: 'CREATE TABLE tmp_rota (id TEXT); SELECT * FROM tabla_inexistente;' },
     ];
     assert.throws(() => runMigrations(db, brokenMigrations), /tabla_inexistente/);
     assert.strictEqual(
@@ -323,7 +336,7 @@ test('Migraciones SQLite: valida checksums, esquemas heredados y rollback transa
       0
     );
     assert.strictEqual(
-      (db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 6').get() as { count: number }).count,
+      (db.prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 7').get() as { count: number }).count,
       0
     );
   } finally {
@@ -2127,6 +2140,169 @@ async function runIntegrationTests() {
           sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(createdBookingId);
           sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(createdBookingId);
         }
+      }
+    });
+
+    await integrationTest('Reservas a domicilio: valida modalidad, comuna y devuelve dirección en ambas agendas', async () => {
+      const login = async (email: string, password: string) => {
+        const response = await sendJson('/api/auth/login', { email, password });
+        const body = await response.json() as { token: string };
+        assert.strictEqual(response.status, 200);
+        return body;
+      };
+      const owner = await login('contacto@valeriaestudio.cl', 'Salon1234');
+      const customer = await login('cliente@gmail.com', 'Cliente1234!');
+      const businessId = 'biz_valeria_studio';
+      const serviceId = 'srv_val_corte';
+      const businessBefore = sqlite.prepare('SELECT modality, home_service_comunas, slug FROM businesses WHERE id = ?')
+        .get(businessId) as { modality: string; home_service_comunas: string | null; slug: string };
+      const serviceBefore = sqlite.prepare('SELECT modality FROM services WHERE id = ?').get(serviceId) as { modality: string };
+      const bookingIds: string[] = [];
+
+      try {
+        const settingsResponse = await requestJson('/api/business/my', 'PUT', owner.token, {
+          modality: 'both',
+          home_service_comunas: [' Peñalolén ', 'peñalolén', 'Las Condes'],
+        });
+        assert.strictEqual(settingsResponse.status, 200);
+        const settingsBody = await settingsResponse.json() as { business: { home_service_comunas: string[] } };
+        assert.deepStrictEqual(settingsBody.business.home_service_comunas, ['Peñalolén', 'Las Condes']);
+        const storedComunas = sqlite.prepare('SELECT home_service_comunas FROM businesses WHERE id = ?')
+          .get(businessId) as { home_service_comunas: string };
+        assert.deepStrictEqual(JSON.parse(storedComunas.home_service_comunas), ['Peñalolén', 'Las Condes']);
+
+        for (const invalid of [null, ['A'], ['x'.repeat(81)], Array(51).fill('Providencia'), ['Ñuñoa', 2]]) {
+          const response = await requestJson('/api/business/my', 'PUT', owner.token, { home_service_comunas: invalid });
+          assert.strictEqual(response.status, 400);
+        }
+        const settingsGet = await requestJson('/api/business/my', 'GET', owner.token);
+        const settingsGetBody = await settingsGet.json() as { business: { home_service_comunas: string[] } };
+        assert.deepStrictEqual(settingsGetBody.business.home_service_comunas, ['Peñalolén', 'Las Condes']);
+        const publicProfile = await requestJson(`/api/marketplace/business/${businessBefore.slug}`, 'GET');
+        const publicBody = await publicProfile.json() as { business: { home_service_comunas: string[] } };
+        assert.deepStrictEqual(publicBody.business.home_service_comunas, ['Peñalolén', 'Las Condes']);
+
+        const updateService = async (modality: string) => requestJson(
+          `/api/business/services/${serviceId}`, 'PUT', owner.token, { modality },
+        );
+        assert.strictEqual((await updateService('both')).status, 200);
+        assert.strictEqual((await updateService('invalid')).status, 400);
+        const { date, slots } = await findAvailableSlots(businessId, serviceId, 'stf_valeria');
+        const payload = {
+          business_id: businessId,
+          service_id: serviceId,
+          staff_id: 'stf_valeria',
+          booking_date: date,
+          start_time: slots[0].time,
+          client_name: 'Cliente de prueba domicilio',
+          client_phone: '+56912345678',
+          payment_method: 'presential',
+        };
+        assert.strictEqual((await sendJson('/api/bookings', { ...payload, modality: 'home', service_comuna: 'Peñalolén' }, customer.token)).status, 400);
+        assert.strictEqual((await sendJson('/api/bookings', {
+          ...payload, modality: 'home', service_address: 'Av. Prueba 123', service_comuna: 'Ñuñoa',
+        }, customer.token)).status, 400);
+        assert.strictEqual((await updateService('salon')).status, 200);
+        assert.strictEqual((await sendJson('/api/bookings', {
+          ...payload, modality: 'home', service_address: 'Av. Prueba 123', service_comuna: 'Peñalolén',
+        }, customer.token)).status, 400);
+        assert.strictEqual((await updateService('both')).status, 200);
+
+        const salonResponse = await sendJson('/api/bookings', {
+          ...payload, modality: 'salon', service_address: 'ignored address', service_comuna: 'Ñuñoa',
+        }, customer.token);
+        assert.strictEqual(salonResponse.status, 201);
+        const salonBody = await salonResponse.json() as { booking: { id: string } };
+        bookingIds.push(salonBody.booking.id);
+        const salonFields = sqlite.prepare('SELECT service_address, service_comuna, service_address_notes FROM bookings WHERE id = ?')
+          .get(salonBody.booking.id) as Record<string, null>;
+        assert.deepStrictEqual({ ...salonFields }, { service_address: null, service_comuna: null, service_address_notes: null });
+
+        const next = await findAvailableSlots(businessId, serviceId, 'stf_valeria');
+        const homeResponse = await sendJson('/api/bookings', {
+          ...payload,
+          booking_date: next.date,
+          start_time: next.slots[0].time,
+          modality: 'home',
+          service_address: 'Av. Prueba 123',
+          service_comuna: 'PENALOLEN',
+          service_address_notes: 'Casa azul',
+        }, customer.token);
+        assert.strictEqual(homeResponse.status, 201);
+        const homeBody = await homeResponse.json() as { booking: { id: string; service_comuna: string } };
+        bookingIds.push(homeBody.booking.id);
+        assert.strictEqual(homeBody.booking.service_comuna, 'Peñalolén');
+
+        for (const [path, token] of [['/api/bookings/business', owner.token], ['/api/bookings/my', customer.token]] as const) {
+          const response = await requestJson(path, 'GET', token);
+          const body = await response.json() as { bookings: Array<{ id: string; service_address: string; service_comuna: string; service_address_notes: string }> };
+          const booking = body.bookings.find(item => item.id === homeBody.booking.id);
+          assert.ok(booking);
+          assert.deepStrictEqual(
+            { service_address: booking.service_address, service_comuna: booking.service_comuna, service_address_notes: booking.service_address_notes },
+            { service_address: 'Av. Prueba 123', service_comuna: 'Peñalolén', service_address_notes: 'Casa azul' },
+          );
+        }
+      } finally {
+        for (const id of bookingIds) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(id);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(id);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(id);
+        }
+        sqlite.prepare('UPDATE businesses SET modality = ?, home_service_comunas = ? WHERE id = ?')
+          .run(businessBefore.modality, businessBefore.home_service_comunas, businessId);
+        sqlite.prepare('UPDATE services SET modality = ? WHERE id = ?').run(serviceBefore.modality, serviceId);
+      }
+    });
+
+    await integrationTest('Reservas: una modalidad de negocio home prevalece sobre servicio salon', async () => {
+      const customerResponse = await sendJson('/api/auth/login', {
+        email: 'cliente@gmail.com',
+        password: 'Cliente1234!',
+      });
+      const customer = await customerResponse.json() as { token: string };
+      assert.strictEqual(customerResponse.status, 200);
+
+      const businessId = 'biz_valeria_studio';
+      const serviceId = 'srv_val_corte';
+      const businessBefore = sqlite.prepare('SELECT modality, home_service_comunas FROM businesses WHERE id = ?')
+        .get(businessId) as { modality: string; home_service_comunas: string | null };
+      const serviceBefore = sqlite.prepare('SELECT modality FROM services WHERE id = ?').get(serviceId) as { modality: string };
+      let bookingId: string | undefined;
+      try {
+        sqlite.prepare('UPDATE businesses SET modality = ?, home_service_comunas = NULL WHERE id = ?').run('home', businessId);
+        sqlite.prepare('UPDATE services SET modality = ? WHERE id = ?').run('salon', serviceId);
+        const { date, slots } = await findAvailableSlots(businessId, serviceId, 'stf_valeria');
+        const response = await sendJson('/api/bookings', {
+          business_id: businessId,
+          service_id: serviceId,
+          staff_id: 'stf_valeria',
+          booking_date: date,
+          start_time: slots[0].time,
+          service_address: 'Av. Prueba 123',
+          service_comuna: 'Providencia',
+          client_name: 'Cliente de fallback de modalidad',
+          client_phone: '+56912345679',
+          payment_method: 'presential',
+        }, customer.token);
+        assert.strictEqual(response.status, 201);
+        const body = await response.json() as { booking: { id: string; modality: string; service_address: string } };
+        bookingId = body.booking.id;
+        assert.strictEqual(body.booking.modality, 'home');
+        assert.strictEqual(body.booking.service_address, 'Av. Prueba 123');
+        assert.strictEqual(
+          (sqlite.prepare('SELECT modality FROM bookings WHERE id = ?').get(bookingId) as { modality: string }).modality,
+          'home',
+        );
+      } finally {
+        if (bookingId) {
+          sqlite.prepare("DELETE FROM notifications WHERE entity_type = 'booking' AND entity_id = ?").run(bookingId);
+          sqlite.prepare('DELETE FROM booking_status_history WHERE booking_id = ?').run(bookingId);
+          sqlite.prepare('DELETE FROM bookings WHERE id = ?').run(bookingId);
+        }
+        sqlite.prepare('UPDATE businesses SET modality = ?, home_service_comunas = ? WHERE id = ?')
+          .run(businessBefore.modality, businessBefore.home_service_comunas, businessId);
+        sqlite.prepare('UPDATE services SET modality = ? WHERE id = ?').run(serviceBefore.modality, serviceId);
       }
     });
 

@@ -547,6 +547,9 @@ export const BusinessBookingsView: React.FC = () => {
                     <span className="text-slate-500 block text-xs mt-0.5">
                       {formatDuration(b.duration_minutes || b.duration_min)} · Staff: {b.staff_name || 'Sin asignar'}
                     </span>
+                    {b.modality === 'home' && b.service_address && (
+                      <span className="text-slate-500 block text-xs mt-0.5">A domicilio · {b.service_address}, {b.service_comuna}</span>
+                    )}
                   </div>
 
                   <div>

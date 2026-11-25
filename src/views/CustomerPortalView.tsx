@@ -456,6 +456,9 @@ export const CustomerPortalView: React.FC<CustomerPortalViewProps> = ({
                         <span className="text-slate-500 block text-xs">
                           {formatDuration(b.duration_minutes || b.duration_min)} · Atendido por {b.staff_name || 'Especialista asignado'}
                         </span>
+                        {b.modality === 'home' && b.service_address && (
+                          <span className="text-slate-500 block text-xs">A domicilio · {b.service_address}, {b.service_comuna}</span>
+                        )}
                       </div>
 
                       <div>

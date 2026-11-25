@@ -27,6 +27,10 @@ interface BookingModalProps {
   onBookingSuccess?: (booking: Booking, paymentData?: any) => void;
 }
 
+const bookingModes = (modality?: string): Array<'salon' | 'home'> => (
+  modality === 'both' ? ['salon', 'home'] : modality === 'salon' || modality === 'home' ? [modality] : []
+);
+
 export const BookingModal: React.FC<BookingModalProps> = ({
   isOpen,
   onClose,
@@ -52,6 +56,9 @@ export const BookingModal: React.FC<BookingModalProps> = ({
 
   // Client Details
   const [modality, setModality] = useState<string>('salon');
+  const [serviceAddress, setServiceAddress] = useState<string>('');
+  const [serviceComuna, setServiceComuna] = useState<string>('');
+  const [serviceAddressNotes, setServiceAddressNotes] = useState<string>('');
   const [clientName, setClientName] = useState<string>(profile?.full_name || '');
   const [clientPhone, setClientPhone] = useState<string>(profile?.phone || '+569');
   const [clientEmail, setClientEmail] = useState<string>(user?.email || '');
@@ -96,6 +103,21 @@ export const BookingModal: React.FC<BookingModalProps> = ({
     }
   }, [profile, user]);
 
+  const allowedModalities = selectedService
+    ? bookingModes(business.modality).filter(mode => bookingModes(selectedService.modality).includes(mode))
+    : [];
+
+  useEffect(() => {
+    setModality(current => allowedModalities.includes(current as 'salon' | 'home')
+      ? current
+      : allowedModalities[0] || 'salon');
+  }, [business.modality, selectedService?.modality]);
+
+  useEffect(() => {
+    const comunas = business.home_service_comunas || [];
+    if (comunas.length > 0 && !comunas.includes(serviceComuna)) setServiceComuna(comunas[0]);
+  }, [business.home_service_comunas, serviceComuna]);
+
   // Load available slots whenever date, service, or staff changes
   useEffect(() => {
     if (!business?.id || !selectedService?.id || !selectedDate) return;
@@ -136,6 +158,13 @@ export const BookingModal: React.FC<BookingModalProps> = ({
       setErrorMessage('Por favor ingresa tu nombre y teléfono de contacto.');
       return;
     }
+    if (modality === 'home'
+      && (serviceAddress.trim().length < 5 || serviceAddress.trim().length > 200
+        || serviceComuna.trim().length < 2 || serviceComuna.trim().length > 80
+        || serviceAddressNotes.trim().length > 200)) {
+      setErrorMessage('Indica una dirección, comuna y referencias válidas.');
+      return;
+    }
 
     setIsSubmitting(true);
     setErrorMessage(null);
@@ -148,6 +177,9 @@ export const BookingModal: React.FC<BookingModalProps> = ({
         booking_date: selectedDate,
         start_time: selectedSlot.time,
         modality,
+        service_address: modality === 'home' ? serviceAddress.trim() : undefined,
+        service_comuna: modality === 'home' ? serviceComuna.trim() : undefined,
+        service_address_notes: modality === 'home' ? serviceAddressNotes.trim() : undefined,
         payment_method: paymentMethod,
         client_name: clientName.trim(),
         client_phone: clientPhone.trim(),
@@ -430,7 +462,7 @@ export const BookingModal: React.FC<BookingModalProps> = ({
             </div>
 
             {/* Modality */}
-            {business.modality === 'both' && (
+            {allowedModalities.length > 1 && (
               <div>
                 <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
                   Modalidad de Atención
@@ -458,6 +490,56 @@ export const BookingModal: React.FC<BookingModalProps> = ({
                   >
                     🚗 A Domicilio
                   </button>
+                </div>
+              </div>
+            )}
+
+            {modality === 'home' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Dirección del servicio *</label>
+                  <input
+                    type="text"
+                    required
+                    minLength={5}
+                    maxLength={200}
+                    value={serviceAddress}
+                    onChange={event => setServiceAddress(event.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Comuna *</label>
+                  {business.home_service_comunas?.length ? (
+                    <select
+                      required
+                      value={serviceComuna || business.home_service_comunas[0]}
+                      onChange={event => setServiceComuna(event.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs"
+                    >
+                      {business.home_service_comunas.map(comuna => <option key={comuna}>{comuna}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      required
+                      minLength={2}
+                      maxLength={80}
+                      value={serviceComuna}
+                      onChange={event => setServiceComuna(event.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Referencia (Opcional)</label>
+                  <input
+                    type="text"
+                    maxLength={200}
+                    value={serviceAddressNotes}
+                    onChange={event => setServiceAddressNotes(event.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-xs"
+                  />
                 </div>
               </div>
             )}

@@ -240,6 +240,7 @@ export interface Business {
   latitude?: number;
   longitude?: number;
   modality: 'salon' | 'home' | 'remote' | 'both';
+  home_service_comunas?: string[];
   status: 'DRAFT' | 'PENDING_REVIEW' | 'PUBLISHED' | 'SUSPENDED' | 'INACTIVE';
   booking_mode: 'AUTOMATIC' | 'MANUAL';
   min_advance_hours: number;
@@ -341,6 +342,9 @@ export interface Booking {
   amount_clp: number;
   price_clp?: number;
   modality: string;
+  service_address?: string | null;
+  service_comuna?: string | null;
+  service_address_notes?: string | null;
   status: BookingStatus;
   payment_method: 'presential' | 'online';
   payment_status: 'pending' | 'paid' | 'refunded' | 'PAID' | 'PENDING' | 'REFUNDED';
